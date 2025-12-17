@@ -15,7 +15,7 @@
       </div>
       <!-- Number rows -->
       <div
-        v-for="(row, rowIdx) in cardLayout"
+        v-for="(row, rowIdx) in processedCardLayout"
         :key="rowIdx"
         class="card-row"
       >
@@ -25,9 +25,10 @@
           :key="`${rowIdx}-${colIdx}`"
           class="card-cell"
           :class="{ 
-            'marked': cell.marked, 
             'free': cell.letter === 'FREE',
-            'winning-cell': isWinningCell(rowIdx, colIdx)
+            'last-called': lastCalledNumber && Number(cell.number) === Number(lastCalledNumber),
+            'winning-cell': isWinningCell(rowIdx, colIdx),
+            'marked': cell.marked && !isWinningCell(rowIdx, colIdx) && !(lastCalledNumber && Number(cell.number) === Number(lastCalledNumber))
           }"
           @click="handleCellClick(cell)"
         >
@@ -71,6 +72,45 @@ export default {
     hideBingoButton: {
       type: Boolean,
       default: false
+    },
+    selectedNumbers: {
+      type: Array,
+      default: () => []
+    },
+    calledNumbers: {
+      type: Array,
+      default: () => []
+    },
+    lastCalledNumber: {
+      type: Number,
+      default: null
+    }
+  },
+  computed: {
+    processedCardLayout() {
+      // Process card layout to mark cells based on called numbers
+      if (!this.cardLayout) {
+        return this.cardLayout
+      }
+      
+      // Create a deep copy to avoid mutating the original
+      const layout = JSON.parse(JSON.stringify(this.cardLayout))
+      
+      // Use calledNumbers if available, otherwise fall back to selectedNumbers
+      const numbersToMark = this.calledNumbers && this.calledNumbers.length > 0 
+        ? this.calledNumbers 
+        : (this.selectedNumbers || [])
+      
+      // Mark cells that are in called numbers (or selected numbers as fallback)
+      for (let row of layout) {
+        for (let cell of row) {
+          if (cell.number && numbersToMark.includes(cell.number)) {
+            cell.marked = true
+          }
+        }
+      }
+      
+      return layout
     }
   },
   methods: {
@@ -230,6 +270,48 @@ export default {
   border: 2px solid #f39c12 !important;
   box-shadow: 0 0 8px rgba(241, 196, 15, 0.8);
   animation: pulse 1s infinite;
+}
+
+/* Last called number - MUST override marked class - blink between green and yellow */
+.card-cell.last-called {
+  color: white !important;
+  font-weight: bold !important;
+  animation: blink-green-yellow 0.8s infinite !important;
+  z-index: 10 !important;
+  position: relative !important;
+  /* Override marked background */
+  background: #4caf50 !important; /* Will be animated */
+  border: 3px solid #2e7d32 !important; /* Will be animated */
+}
+
+/* Last called number that is also marked - still blink */
+.card-cell.last-called.marked {
+  animation: blink-green-yellow 0.8s infinite !important;
+  /* Override marked background */
+  background: #4caf50 !important; /* Will be animated */
+}
+
+/* Last called number that is also in winning line - should still blink green/yellow */
+.card-cell.last-called.winning-cell {
+  animation: blink-green-yellow 0.8s infinite !important;
+  /* Override winning-cell background */
+  background: #4caf50 !important; /* Will be animated */
+  border: 3px solid #2e7d32 !important; /* Will be animated */
+}
+
+@keyframes blink-green-yellow {
+  0%, 100% {
+    background: #4caf50 !important; /* Green */
+    border: 3px solid #2e7d32 !important;
+    box-shadow: 0 0 15px rgba(76, 175, 80, 1) !important;
+    transform: scale(1.1) !important;
+  }
+  50% {
+    background: #f1c40f !important; /* Yellow */
+    border: 3px solid #f39c12 !important;
+    box-shadow: 0 0 20px rgba(241, 196, 15, 1) !important;
+    transform: scale(1.15) !important;
+  }
 }
 
 @keyframes pulse {

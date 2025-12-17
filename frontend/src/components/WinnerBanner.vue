@@ -29,6 +29,10 @@
               :card-number="winnerData.card_number"
               :can-claim-bingo="false"
               :winning-pattern="winnerData.winning_pattern || winningPattern"
+              :selected-numbers="winnerData.selected_numbers || []"
+              :called-numbers="winnerData.called_numbers || []"
+              :last-called-number="getLastCalledNumber(winnerData)"
+              :is-winner-banner="true"
               class="winner-card-display-small"
             />
             <div class="winner-prize">ሽልማት: {{ winnerData.prize || prize }} ብር</div>
@@ -48,19 +52,22 @@
             <div class="winner-text-you">አሸንፈዋል</div>
           </div>
           <div v-else class="winner-message">
-            <div class="winner-name">{{ winner.username || 'Winner' }}</div>
+            <div class="winner-name">{{ displayWinner.username || displayWinner.name || 'Winner' }}</div>
             <div class="winner-text">ጨዋታውን አሸንፏል</div>
           </div>
         </div>
         <UserCard
-          v-if="winnerCard && winnerCard.card_layout"
-          :card-layout="winnerCard.card_layout"
-          :card-number="winnerCard.card_number"
+          v-if="cardData"
+          :card-layout="cardData.card_layout"
+          :card-number="cardData.card_number"
           :can-claim-bingo="false"
-          :winning-pattern="winnerCard.winning_pattern || winningPattern"
+          :winning-pattern="cardData.winning_pattern || winningPattern"
+          :selected-numbers="cardData.selected_numbers || []"
+          :called-numbers="cardData.called_numbers || []"
+          :last-called-number="getLastCalledNumber(cardData)"
           class="winner-card-display"
         />
-        <div class="prize">ሽልማት: {{ prize }} ብር</div>
+        <div class="prize">ሽልማት: {{ displayPrize }} ብር</div>
       </div>
       
       <div class="timer-section">
@@ -115,11 +122,38 @@ export default {
   },
   data() {
     return {
-      timer: 5, // Minimum 5 seconds display
+      timer: 5,
       timerInterval: null,
-      minDisplayTime: 5000, // 5 seconds in milliseconds
+      minDisplayTime: 5000,
       startTime: null,
-      canRedirect: false // Flag to prevent premature redirects
+      canRedirect: false
+    }
+  },
+  computed: {
+    displayWinner() {
+      if (!this.winner || typeof this.winner !== 'object' || Object.keys(this.winner).length === 0) {
+        return { username: 'Winner', name: 'Winner' }
+      }
+      if (!this.winner.username && !this.winner.name) {
+        return { username: 'Winner', name: 'Winner' }
+      }
+      return this.winner
+    },
+    displayPrize() {
+      const prize = this.prize !== null && this.prize !== undefined ? this.prize : 0
+      return prize
+    },
+    cardData() {
+      // First try winnerCard prop
+      if (this.winnerCard && this.winnerCard.card_layout) {
+        return this.winnerCard
+      }
+      // If not available, try winners array (for single winner case)
+      if (this.winners && this.winners.length > 0 && this.winners[0].card_layout) {
+        return this.winners[0]
+      }
+      // Return null if no card data available
+      return null
     }
   },
   mounted() {
@@ -161,6 +195,15 @@ export default {
     isWinnerCurrentUser(winner) {
       if (!this.currentUserId || !winner) return false
       return winner.id === this.currentUserId || winner.id === Number(this.currentUserId)
+    },
+    getLastCalledNumber(winnerData) {
+      if (winnerData && winnerData.last_called_number !== null && winnerData.last_called_number !== undefined) {
+        return winnerData.last_called_number
+      }
+      if (!winnerData || !winnerData.called_numbers || winnerData.called_numbers.length === 0) {
+        return null
+      }
+      return winnerData.called_numbers[winnerData.called_numbers.length - 1]
     }
   }
 }
@@ -227,10 +270,12 @@ export default {
 
 .winner-card-display {
   margin: 20px auto;
-  max-width: 300px;
+  max-width: 280px;
   background: white;
   border-radius: 10px;
-  padding: 15px;
+  padding: 12px;
+  transform: scale(0.85);
+  transform-origin: center;
 }
 
 .prize {

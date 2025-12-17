@@ -383,20 +383,87 @@ def claim_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
 
 
 def start_game(game: Game) -> bool:
-    """Start a game - requires at least 2 players"""
+    """Start a game - requires at least 2 total players (real + fake)
+    Also caches game settings to prevent mid-game changes
+    """
     from django.core.cache import cache
+    from .models import GameSettings
+    
+    # Refresh game from database to get latest status (prevents race conditions)
+    game.refresh_from_db()
     
     if game.status != 'waiting':
         return False
     
-    # Require at least 2 players to start the game
-    player_count = game.gamecards.count()
-    if player_count < 2:
+    # CRITICAL: Cache game settings at game start to prevent mid-game changes
+    # This ensures settings remain consistent throughout the active game
+    settings = GameSettings.get_settings()
+    game_settings_cache_key = f'game:{game.id}:settings'
+    cache.set(game_settings_cache_key, {
+        'time_between_calls': settings.time_between_calls,
+        'allow_system_account': settings.allow_system_account,
+        'free_play': settings.free_play,
+        'bid_amount': float(settings.bid_amount),
+        'percentage_cut': float(settings.percentage_cut),
+        'card_selection_timer': settings.card_selection_timer,
+        'total_cards': settings.total_cards,
+    }, 3600)  # Cache for 1 hour (game won't last that long)
+    
+    # Check if system accounts are enabled (use cached settings)
+    allow_system_account = settings.allow_system_account
+    
+    # Count real players
+    real_player_count = game.gamecards.count()
+    
+    # Count fake players
+    fake_player_count = 0
+    if allow_system_account:
+        try:
+            from .fake_user_manager import get_fake_user_count_for_game
+            fake_player_count = get_fake_user_count_for_game(game)
+        except:
+            fake_player_count = 0
+    
+    # Total players (real + fake)
+    total_player_count = real_player_count + fake_player_count
+    
+    # Require at least 2 total players to start the game
+    if total_player_count < 2:
         return False
     
+    # IMPORTANT: Recalculate derash BEFORE setting game to active
+    # This ensures derash and player count are synchronized before countdown starts
+    # Refresh game from DB to get latest fake user count before recalculating derash
+    game.refresh_from_db()
+    
+    # Ensure all fake user cards are committed to DB before recalculating
+    # Add a small delay to ensure all pending fake user card selections are complete
+    import time
+    time.sleep(0.5)  # Small delay to ensure all fake user selections are committed
+    
+    # Refresh again to get the latest count after delay
+    game.refresh_from_db()
+    
+    # Recalculate derash to include fake users (MUST be done BEFORE setting status to active)
+    # This ensures derash is correct when the game starts and countdown begins
+    game.recalculate_derash()
+    
+    # Refresh again after derash calculation to ensure latest values are synced
+    game.refresh_from_db()
+    
+    # CRITICAL: Double-check game is still waiting before setting to active
+    # This prevents race conditions where multiple requests try to start the game
+    if game.status != 'waiting':
+        # Game was already started by another process, return False
+        return False
+    
+    # Now set game to active (after derash is calculated and synced)
     game.status = 'active'
     game.started_at = timezone.now()
     game.save()
+    
+    # Final refresh to ensure all values are synced
+    game.refresh_from_db()
     
     # Invalidate game cache when game starts
     cache.delete('game:current')
@@ -405,12 +472,15 @@ def start_game(game: Game) -> bool:
 
 
 def get_available_card_numbers(game: Game) -> List[int]:
-    """Get list of available card numbers for a game"""
-    from .models import GameSettings
+    """Get list of available card numbers for a game (excludes both real and fake user cards)"""
+    from .models import GameSettings, FakeUserGameCard
     # Get total_cards from settings
     settings = GameSettings.get_settings()
     total_cards = settings.total_cards
-    taken_numbers = set(GameCard.objects.filter(game=game).values_list('card_number', flat=True))
+    # Get taken numbers from both real and fake users
+    real_taken = set(GameCard.objects.filter(game=game).values_list('card_number', flat=True))
+    fake_taken = set(FakeUserGameCard.objects.filter(game=game).values_list('card_number', flat=True))
+    taken_numbers = real_taken | fake_taken
     all_numbers = list(range(1, total_cards + 1))
     return [num for num in all_numbers if num not in taken_numbers]
 

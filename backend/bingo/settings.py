@@ -117,7 +117,7 @@ import dj_database_url
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
-    # Parse database URL with optimized connection pooling for multiple machines
+    # Parse database URL with optimized connection pooling for memory efficiency
     # Reduced conn_max_age to 300 (5 minutes) to prevent stale connections after idle wake-up
     db_config = dj_database_url.parse(DATABASE_URL, conn_max_age=300)
     # Additional database options for better performance and connection validation
@@ -125,6 +125,8 @@ if DATABASE_URL:
         db_config['OPTIONS'] = {}
     db_config['OPTIONS'].update({
         'connect_timeout': 10,
+        # Note: statement_timeout removed - Neon pooled connections don't support it
+        # Use unpooled connection or set timeout at application level if needed
     })
     # Enable connection health checks
     db_config['CONN_MAX_AGE'] = 300  # 5 minutes max connection age
@@ -281,6 +283,13 @@ CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes soft limit
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Process one task at a time for game operations
 CELERY_TASK_ACKS_LATE = True  # Acknowledge tasks after completion
+
+# Memory optimization settings
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 50  # Restart worker after 50 tasks to prevent memory leaks
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 200000  # Kill worker if it exceeds 200MB (in KB)
+CELERY_WORKER_POOL = 'solo'  # Use solo pool (single-threaded) to reduce memory usage
+CELERY_TASK_IGNORE_RESULT = True  # Don't store task results to save memory
+CELERY_RESULT_EXPIRES = 3600  # Expire results after 1 hour
 
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')

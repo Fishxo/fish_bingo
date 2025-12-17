@@ -322,19 +322,23 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
         # Try to get from cache first
         cache_key = 'game:current'
         cached_data = cache.get(cache_key)
+        game = None
         if cached_data is not None:
             # Check if game still exists and is still current
             game_id = cached_data.get('id')
             if game_id:
                 game = Game.objects.filter(id=game_id).first()
                 if game and game.status in ['active', 'waiting']:
-                    # Return cached data if game is still current
-                    return Response(cached_data)
+                    # For active games, return cached data immediately
+                    if game.status == 'active':
+                        return Response(cached_data)
+                    # For waiting games, continue to check fake users below
         
-        # Cache miss - fetch from database
-        game = Game.objects.filter(
-            Q(status='active') | Q(status='waiting')
-        ).order_by('-created_at').first()
+        # Cache miss or waiting game - fetch from database
+        if not game:
+            game = Game.objects.filter(
+                Q(status='active') | Q(status='waiting')
+            ).order_by('-created_at').first()
         
         # If no game exists, create a new one
         if not game:
@@ -350,6 +354,97 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 game.save(update_fields=['bet_amount'])
                 # Invalidate cache when game is updated
                 cache.delete(cache_key)
+        
+        # Ensure fake users are added if system accounts are enabled (for waiting games)
+        if game.status == 'waiting':
+            settings = GameSettings.get_settings()
+            if settings.allow_system_account:
+                from .fake_user_manager import get_fake_user_count_for_game
+                from .auto_game_manager import add_fake_users_to_game_immediately
+                fake_count = get_fake_user_count_for_game(game)
+                if fake_count == 0:
+                    # Add fake users immediately when game is fetched
+                    add_fake_users_to_game_immediately(game)
+                    # Refresh game and recalculate derash
+                    game.refresh_from_db()
+                    game.recalculate_derash()
+                    # Invalidate cache to get updated game data
+                    cache.delete(cache_key)
+            
+            # Check if timer has elapsed and automatically start game
+            # IMPORTANT: Only check timer if fake users have finished selecting (if enabled)
+            if game.created_at:
+                from django.utils import timezone
+                from datetime import timedelta
+                elapsed_time = timezone.now() - game.created_at
+                timer_seconds = settings.card_selection_timer
+                
+                # Since we fixed fake user timing to complete within timer, no buffer needed
+                # Start game when timer elapses (fake users should already be selected)
+                # If timer has elapsed and we have at least 2 players (real + fake), start the game
+                if elapsed_time.total_seconds() >= timer_seconds:
+                    from .game_logic import start_game
+                    from .fake_user_manager import get_fake_user_count_for_game
+                    
+                    # When timer runs down, always start the game (no matter the player count)
+                    # This ensures game starts consistently when timer expires
+                    success = start_game(game)
+                    if success:
+                        game.refresh_from_db()
+                        # Broadcast game started
+                        try:
+                            from channels.layers import get_channel_layer
+                            from asgiref.sync import async_to_sync
+                            channel_layer = get_channel_layer()
+                            async_to_sync(channel_layer.group_send)(
+                                f'game_{game.id}',
+                                {
+                                    'type': 'game_started',
+                                    'data': {
+                                        'game_id': game.id,
+                                        'started_at': game.started_at.isoformat() if game.started_at else None
+                                    }
+                                }
+                            )
+                        except Exception as e:
+                            print(f"WebSocket broadcast error: {e}")
+                        
+                        # Start automatic number calling
+                        from .tasks import task_auto_call_numbers
+                        task_auto_call_numbers.delay(game.id)
+        
+        # Refresh game before returning
+        game.refresh_from_db()
+        
+        # Recalculate derash for WAITING games to ensure accuracy
+        # For ACTIVE games, verify consistency but don't recalculate (to avoid desync)
+        if game.status == 'waiting':
+            # Recalculate derash for waiting games to ensure accuracy
+            # This ensures derash includes fake users even when game is waiting
+            game.recalculate_derash()
+            game.refresh_from_db()
+        elif game.status == 'active':
+            # For active games, verify consistency between derash and player count
+            # If there's a mismatch, fix it (but this should rarely happen)
+            from decimal import Decimal
+            from .models import GameSettings
+            settings = GameSettings.get_settings()
+            bid_amount = Decimal(str(settings.bid_amount))
+            percentage_cut = Decimal(str(settings.percentage_cut))
+            
+            # Get actual player count
+            actual_player_count = game.total_players
+            
+            # Calculate expected derash based on actual player count
+            expected_derash = (Decimal(str(actual_player_count)) * bid_amount) - ((Decimal(str(actual_player_count)) * bid_amount * percentage_cut) / Decimal('100'))
+            
+            # Check if derash matches player count (allow small rounding differences)
+            if abs(game.derash_amount - expected_derash) > Decimal('0.01'):
+                # Mismatch detected - fix it
+                print(f"WARNING: Derash/player count mismatch in active game {game.id}. Players: {actual_player_count}, Derash: {game.derash_amount}, Expected: {expected_derash}. Fixing...")
+                game.derash_amount = expected_derash
+                game.save(update_fields=['derash_amount'])
+                game.refresh_from_db()
         
         serializer = self.get_serializer(game)
         game_data = serializer.data
@@ -424,11 +519,12 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     user.balance = Decimal(str(user.balance)) + bet_amount
                     user.save()
                     
-                    # Remove from game derash
-                    game.derash_amount = Decimal(str(game.derash_amount)) - bet_amount
-                    if game.derash_amount < 0:
-                        game.derash_amount = Decimal('0')
-                    game.save()
+                    # Delete the card first
+                    existing_card.delete()
+                    
+                    # Recalculate derash instead of manually subtracting
+                    # This ensures fake users are included in the calculation
+                    game.recalculate_derash()
                     
                     # Create refund transaction
                     Transaction.objects.create(
@@ -439,8 +535,12 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                         description=f'Refund for unselecting card {card_number} in game {game.id}'
                     )
                     
-                    # Delete the card
-                    existing_card.delete()
+                    # CRITICAL: Add one fake user back when real player unselects card
+                    try:
+                        from .fake_user_manager import adjust_fake_users_for_real_player_change
+                        adjust_fake_users_for_real_player_change(game, is_selection=False)
+                    except Exception as e:
+                        print(f"Error adjusting fake users on card unselection: {e}")
                     
                     # Invalidate game cache when derash changes
                     from django.core.cache import cache as django_cache
@@ -481,8 +581,24 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 from .game_logic import create_game_card
                 
                 try:
-                    # Create the card (this handles payment, validation, and derash update)
+                    # IMPORTANT: Create real user card FIRST to reserve the card number
+                    # This prevents fake users from selecting the same card
                     card = create_game_card(game, user, card_number)
+                    
+                    # CRITICAL: Remove one fake user when real player selects card
+                    # This happens AFTER card is created to ensure real user card is stable
+                    try:
+                        from .fake_user_manager import adjust_fake_users_for_real_player_change
+                        adjust_fake_users_for_real_player_change(game, is_selection=True)
+                    except Exception as e:
+                        print(f"Error adjusting fake users on card selection: {e}")
+                    
+                    # Card already created above - just refresh and recalculate
+                    # Refresh game to get latest state (including fake users)
+                    game.refresh_from_db()
+                    
+                    # Recalculate derash to include both real and fake users
+                    game.recalculate_derash()
                     
                     # Serialize the card
                     serializer = GameCardSerializer(card)
@@ -490,7 +606,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     user.refresh_from_db()
                     response_data = serializer.data
                     response_data['balance'] = float(user.balance)
-                    # Include available cards in response
+                    # Include available cards in response (includes fake user cards)
                     from .game_logic import get_available_card_numbers
                     response_data['available_cards'] = get_available_card_numbers(game)
                     

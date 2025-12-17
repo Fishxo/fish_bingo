@@ -528,6 +528,20 @@
                                 </label>
                             </div>
                         </div>
+                        <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 5px; border-left: 4px solid #ffc107;">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="allow_system_account" {% if game_settings.allow_system_account %}checked{% endif %} onchange="toggleFreePlay()" style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;">
+                                <span style="font-weight: bold;">Allow System Account</span>
+                            </label>
+                            <p style="margin: 5px 0 0 28px; font-size: 12px; color: #666;">Enable fake system accounts to join games and simulate players</p>
+                        </div>
+                        <div style="margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; border-left: 4px solid #4caf50;">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="free_play" {% if game_settings.free_play %}checked{% endif %} style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;" {% if not game_settings.allow_system_account %}disabled{% endif %}>
+                                <span style="font-weight: bold; {% if not game_settings.allow_system_account %}opacity: 0.5;{% endif %}">Free Play</span>
+                            </label>
+                            <p style="margin: 5px 0 0 28px; font-size: 12px; color: #666;">Allow real users to win even when system accounts are active (only available if system accounts are enabled)</p>
+                        </div>
                     </div>
                     
                     <h3 style="margin-top: 30px; margin-bottom: 15px;">🏦 Deposit Account Information</h3>
@@ -581,7 +595,7 @@
             </div>
         </div>
         
-        <!-- Active Games Section (with Start/End but NO Call Number) -->
+        <!-- Active Games Section (with Start/End and Call Number) -->
         <div class="section">
             <h2>🎮 Active Games</h2>
                 <table>
@@ -605,6 +619,8 @@
                             {% if game.status == 'waiting' %}
                             <button onclick="startGame('{{ game.id }}')" style="background: #2ecc71; color: white; padding: 8px 15px; border: none; border-radius: 5px; cursor: pointer;">Start Game</button>
                             {% elif game.status == 'active' %}
+                            <input type="number" id="number_{{ game.id }}" min="1" max="75" placeholder="Number" style="padding: 8px; width: 100px; border: 1px solid #ddd; border-radius: 5px; margin-right: 5px;">
+                            <button onclick="callNumber('{{ game.id }}')" style="background: #3498db; color: white; padding: 8px 15px; border: none; border-radius: 5px; cursor: pointer;">Call Number</button>
                             <button onclick="endGame('{{ game.id }}')" style="background: #e74c3c; color: white; padding: 8px 15px; border: none; border-radius: 5px; cursor: pointer;">End Game</button>
                             {% endif %}
                         </td>
@@ -1485,6 +1501,8 @@
                 min_withdraw: parseFloat(document.getElementById('min_withdraw').value),
                 percentage_cut: parseFloat(document.getElementById('percentage_cut').value),
                 automatic_mode_enabled: document.getElementById('automatic_mode_enabled').checked,
+                allow_system_account: document.getElementById('allow_system_account').checked,
+                free_play: document.getElementById('free_play').checked,
                 deposit_accounts: {
                     BOA: {
                         name: document.getElementById('boa_name').value,
@@ -1537,6 +1555,73 @@
                 }
             } catch (error) {
                 console.error('Error saving settings:', error);
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        function toggleFreePlay() {
+            const allowSystemAccount = document.getElementById('allow_system_account').checked;
+            const freePlayCheckbox = document.getElementById('free_play');
+            const freePlayLabel = freePlayCheckbox.nextElementSibling;
+            
+            if (!allowSystemAccount) {
+                // Disable free play if system accounts are disabled
+                freePlayCheckbox.disabled = true;
+                freePlayCheckbox.checked = false;
+                if (freePlayLabel) {
+                    freePlayLabel.style.opacity = '0.5';
+                }
+            } else {
+                // Enable free play checkbox
+                freePlayCheckbox.disabled = false;
+                if (freePlayLabel) {
+                    freePlayLabel.style.opacity = '1';
+                }
+            }
+        }
+        
+        async function callNumber(gameId) {
+            const number = parseInt(document.getElementById(`number_${gameId}`).value);
+            if (!number || number < 1 || number > 75) {
+                alert('Please enter a valid number (1-75)');
+                return;
+            }
+            
+            try {
+                const csrftoken = getCSRFToken();
+                if (!csrftoken) {
+                    alert('CSRF token not found. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const response = await fetch(`/api/admin/games/${parseInt(gameId)}/call-number/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': csrftoken
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ number })
+                });
+                
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 500));
+                    alert('Server returned an error. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const data = await response.json();
+                if (response.ok) {
+                    alert(`Number ${data.letter}-${data.number} called!`);
+                    document.getElementById(`number_${gameId}`).value = '';
+                    location.reload();
+                } else {
+                    alert(data.error || 'Failed to call number');
+                }
+            } catch (error) {
+                console.error('Error calling number:', error);
                 alert('Error: ' + error.message);
             }
         }

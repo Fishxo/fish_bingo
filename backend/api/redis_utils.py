@@ -56,6 +56,53 @@ def get_card_lock_key(card_number):
     return f"card:{card_number}:lock"
 
 
+def get_number_calling_lock_key(game_id):
+    """Get Redis key for number calling lock"""
+    return f"game:{game_id}:number_calling_lock"
+
+
+def acquire_number_calling_lock(game_id, timeout=10):
+    """
+    Try to acquire lock for calling numbers in a game
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        # If Redis unavailable, allow (fallback - should not happen in production)
+        return True
+    
+    try:
+        lock_key = get_number_calling_lock_key(game_id)
+        
+        # Try to acquire lock (SETNX - only sets if not exists)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            # Lock acquired, set timeout (10 seconds should be enough for one number call)
+            r.expire(lock_key, timeout)
+            return True
+        else:
+            # Lock exists - another instance is already calling a number
+            return False
+    except Exception as e:
+        print(f"Error acquiring number calling lock: {e}")
+        # On error, allow (fallback - but log it)
+        return True
+
+
+def release_number_calling_lock(game_id):
+    """Release number calling lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_number_calling_lock_key(game_id)
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing number calling lock: {e}")
+
+
 def try_acquire_bingo_window(game_id):
     """
     Try to acquire bingo window lock using SETNX
@@ -187,6 +234,7 @@ def cleanup_game_redis_keys(game_id):
         keys_to_delete = [
             get_bingo_window_key(game_id),
             get_bingo_winners_key(game_id),
+            get_number_calling_lock_key(game_id),
         ]
         
         # Also clean up any card locks that might still exist (optional, they expire anyway)

@@ -47,17 +47,58 @@ class Game(models.Model):
 
     @property
     def total_players(self):
-        return self.gamecards.count()
+        """Count both real and fake players"""
+        real_count = self.gamecards.count()
+        try:
+            from .fake_user_manager import get_fake_user_count_for_game
+            fake_count = get_fake_user_count_for_game(self)
+        except:
+            fake_count = 0
+        return real_count + fake_count
 
     def recalculate_derash(self):
-        """Recalculate derash_amount from actual cards to ensure accuracy"""
+        """Recalculate derash_amount from actual cards to ensure accuracy (includes fake users)
+        Also ensures consistency with total_players property
+        """
         from decimal import Decimal
-        # Count unique users who have cards (each user pays once per game)
+        from .models import GameSettings
+        
+        # Get settings for bid_amount and percentage_cut
+        settings = GameSettings.get_settings()
+        bid_amount = Decimal(str(settings.bid_amount))
+        percentage_cut = Decimal(str(settings.percentage_cut))
+        
+        # Count real users who have cards (each user pays once per game)
         unique_users = self.gamecards.values_list('user_id', flat=True).distinct()
-        player_count = len(list(unique_users))
-        # Recalculate: each unique player pays bet_amount once
-        self.derash_amount = Decimal(str(self.bet_amount)) * Decimal(str(player_count))
+        real_player_count = len(list(unique_users))
+        
+        # Count fake users
+        try:
+            from .fake_user_manager import get_fake_user_count_for_game
+            fake_player_count = get_fake_user_count_for_game(self)
+        except:
+            fake_player_count = 0
+        
+        # Total players (real + fake) - use same logic as total_players property
+        total_player_count = real_player_count + fake_player_count
+        
+        # Calculate derash: (total_players * bid_amount) - (total_players * bid_amount * percentage_cut / 100)
+        # This is: total_collected - percentage_cut_amount
+        total_collected = Decimal(str(total_player_count)) * bid_amount
+        percentage_amount = (total_collected * percentage_cut) / Decimal('100')
+        self.derash_amount = total_collected - percentage_amount
+        
         self.save(update_fields=['derash_amount'])
+        
+        # CONSISTENCY CHECK: Verify that derash matches player count
+        # Recalculate to ensure they're in sync
+        expected_derash = (Decimal(str(total_player_count)) * bid_amount) - ((Decimal(str(total_player_count)) * bid_amount * percentage_cut) / Decimal('100'))
+        if abs(self.derash_amount - expected_derash) > Decimal('0.01'):
+            # If mismatch, fix it
+            print(f"WARNING: Derash mismatch detected. Expected: {expected_derash}, Got: {self.derash_amount}. Fixing...")
+            self.derash_amount = expected_derash
+            self.save(update_fields=['derash_amount'])
+        
         # Invalidate cache
         from django.core.cache import cache
         if cache:
@@ -67,33 +108,12 @@ class Game(models.Model):
     def total_derash(self):
         """Calculate total derash after percentage cut
         Formula: (total_players * bid_amount) - percentage_cut
-        Note: derash_amount already stores the total collected amount
+        Note: derash_amount already stores the total collected amount (includes fake users)
         """
         from decimal import Decimal
-        # derash_amount is the total collected (sum of all bet amounts)
-        # Count unique users (each user pays once per game, even if they change cards)
-        unique_users = self.gamecards.values_list('user_id', flat=True).distinct()
-        unique_user_count = len(list(unique_users))
-        
-        # Recalculate derash_amount from actual unique players to ensure accuracy
-        # This fixes any discrepancies from race conditions or bugs
-        expected_derash = Decimal(str(self.bet_amount)) * Decimal(str(unique_user_count))
-        current_derash = self.derash_amount if self.derash_amount > 0 else Decimal('0')
-        
-        # If derash_amount doesn't match expected, use expected value for calculation
-        # (Don't save here to avoid performance issues - will be fixed on next card operation)
-        if abs(current_derash - expected_derash) > Decimal('0.01'):
-            # Use expected derash for calculation
-            current_derash = expected_derash
-        
-        if current_derash > 0:
-            settings = GameSettings.get_settings()
-            percentage = settings.percentage_cut
-            # Calculate cut amount: percentage of total collected
-            cut_amount = (current_derash * percentage) / Decimal('100')
-            # Prize is total collected minus the cut
-            return current_derash - cut_amount
-        return Decimal('0')
+        # derash_amount is already calculated by recalculate_derash() and includes fake users
+        # Just return derash_amount directly - it's already the correct value after percentage cut
+        return self.derash_amount if self.derash_amount > 0 else Decimal('0')
 
 
 class GameCard(models.Model):
@@ -296,6 +316,10 @@ class GameSettings(models.Model):
     # Game mode settings
     automatic_mode_enabled = models.BooleanField(default=False, help_text="If enabled, automatic mode will be available for all players")
     
+    # Fake user system settings
+    allow_system_account = models.BooleanField(default=False, help_text="Enable fake system accounts to join games")
+    free_play = models.BooleanField(default=False, help_text="Allow real users to win even when fake accounts are active (only available if allow_system_account is on)")
+    
     # Deposit account information (stored as JSON)
     deposit_accounts = models.JSONField(
         default=dict,
@@ -328,11 +352,34 @@ class GameSettings(models.Model):
         cache.delete('game_settings')
     
     @classmethod
-    def get_settings(cls):
-        """Get or create the singleton settings instance"""
+    def get_settings(cls, game_id=None):
+        """
+        Get or create the singleton settings instance
+        If game_id is provided and game is active, use cached settings from game start
+        This prevents mid-game setting changes from affecting active games
+        """
         from django.core.cache import cache
         
-        # Try to get from cache first
+        # If game_id provided, check for cached game-specific settings (set at game start)
+        if game_id:
+            game_settings_cache_key = f'game:{game_id}:settings'
+            cached_game_settings = cache.get(game_settings_cache_key)
+            if cached_game_settings is not None:
+                # Return a settings-like object with cached values
+                # This prevents mid-game changes
+                class CachedSettings:
+                    def __init__(self, data):
+                        for key, value in data.items():
+                            setattr(self, key, value)
+                        # Keep reference to original for methods that need it
+                        self._original = None
+                
+                cached_obj = CachedSettings(cached_game_settings)
+                # Also fetch original for any methods that might be called
+                cached_obj._original = cls.get_settings()
+                return cached_obj
+        
+        # Try to get from general cache first
         cache_key = 'game_settings'
         cached_settings = cache.get(cache_key)
         if cached_settings is not None:
@@ -477,3 +524,40 @@ class SecondAdmin(models.Model):
 
     def __str__(self):
         return f"SecondAdmin: {self.username}"
+
+
+class FakeUser(models.Model):
+    """Fake system accounts for simulating players"""
+    name = models.CharField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True, help_text="Whether this fake user can be selected for games")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'fake_users'
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"FakeUser: {self.name}"
+
+
+class FakeUserGameCard(models.Model):
+    """Tracks fake user cards in games"""
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name='fake_cards')
+    fake_user = models.ForeignKey(FakeUser, on_delete=models.CASCADE, related_name='game_cards')
+    card_number = models.IntegerField()
+    card_layout = models.JSONField(default=dict)  # 5x5 grid layout with numbers
+    selected_numbers = models.JSONField(default=list)  # Numbers that have been called
+    is_winner = models.BooleanField(default=False)
+    winning_pattern = models.CharField(max_length=50, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'fake_user_game_cards'
+        unique_together = ['game', 'fake_user']
+        indexes = [
+            models.Index(fields=['game', 'fake_user']),
+            models.Index(fields=['game', 'card_number']),
+        ]
+    
+    def __str__(self):
+        return f"FakeCard {self.card_number} - Game {self.game.id} - {self.fake_user.name}"

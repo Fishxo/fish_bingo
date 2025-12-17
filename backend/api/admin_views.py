@@ -710,8 +710,11 @@ def game_settings_api(request):
     
     settings = GameSettings.get_settings()
     
+    # Check if this is a second admin (not main admin)
+    is_second_admin = request.session.get('second_admin_authenticated') and not request.user.is_staff
+    
     if request.method == 'GET':
-        return JsonResponse({
+        response_data = {
             'bid_amount': float(settings.bid_amount),
             'card_selection_timer': settings.card_selection_timer,
             'time_between_calls': settings.time_between_calls,
@@ -721,7 +724,10 @@ def game_settings_api(request):
             'automatic_mode_enabled': settings.automatic_mode_enabled,
             'deposit_accounts': settings.deposit_accounts,
             'support_phone': settings.support_phone,
-        })
+            'allow_system_account': settings.allow_system_account,
+            'free_play': settings.free_play,
+        }
+        return JsonResponse(response_data)
     
     elif request.method == 'POST':
         try:
@@ -730,26 +736,38 @@ def game_settings_api(request):
             return JsonResponse({'error': 'Invalid JSON'}, status=400)
         
         try:
-            if 'bid_amount' in data:
-                settings.bid_amount = Decimal(str(data['bid_amount']))
-            if 'card_selection_timer' in data:
-                settings.card_selection_timer = int(data['card_selection_timer'])
-            if 'time_between_calls' in data:
-                settings.time_between_calls = int(data['time_between_calls'])
-            if 'total_cards' in data:
-                settings.total_cards = int(data['total_cards'])
-            if 'min_withdraw' in data:
-                settings.min_withdraw = Decimal(str(data['min_withdraw']))
-            if 'percentage_cut' in data:
-                settings.percentage_cut = Decimal(str(data['percentage_cut']))
-            if 'automatic_mode_enabled' in data:
-                settings.automatic_mode_enabled = bool(data['automatic_mode_enabled'])
-            if 'deposit_accounts' in data:
-                settings.deposit_accounts = data['deposit_accounts']
-            if 'support_phone' in data:
-                settings.support_phone = data['support_phone'].strip()
+            # Get the actual database object (bypass cache for saving)
+            # This ensures we're modifying the real database object
+            settings_obj, created = GameSettings.objects.get_or_create(pk=1)
             
-            settings.save()
+            if 'bid_amount' in data:
+                settings_obj.bid_amount = Decimal(str(data['bid_amount']))
+            if 'card_selection_timer' in data:
+                settings_obj.card_selection_timer = int(data['card_selection_timer'])
+            if 'time_between_calls' in data:
+                settings_obj.time_between_calls = int(data['time_between_calls'])
+            if 'total_cards' in data:
+                settings_obj.total_cards = int(data['total_cards'])
+            if 'min_withdraw' in data:
+                settings_obj.min_withdraw = Decimal(str(data['min_withdraw']))
+            if 'percentage_cut' in data:
+                settings_obj.percentage_cut = Decimal(str(data['percentage_cut']))
+            if 'automatic_mode_enabled' in data:
+                settings_obj.automatic_mode_enabled = bool(data['automatic_mode_enabled'])
+            if 'deposit_accounts' in data:
+                settings_obj.deposit_accounts = data['deposit_accounts']
+            if 'support_phone' in data:
+                settings_obj.support_phone = data['support_phone'].strip()
+            # Allow both main admin and second admin to update system account settings
+            if 'allow_system_account' in data:
+                settings_obj.allow_system_account = bool(data['allow_system_account'])
+            if 'free_play' in data:
+                # free_play can only be enabled if allow_system_account is enabled
+                if bool(data['free_play']) and not settings_obj.allow_system_account:
+                    return JsonResponse({'error': 'Free play can only be enabled when system accounts are allowed'}, status=400)
+                settings_obj.free_play = bool(data['free_play'])
+            
+            settings_obj.save()
             
             return JsonResponse({'success': True, 'message': 'Settings updated'})
         except Exception as e:

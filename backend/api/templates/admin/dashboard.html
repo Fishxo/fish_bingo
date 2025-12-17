@@ -503,6 +503,20 @@
                                 </label>
                             </div>
                         </div>
+                        <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 5px; border-left: 4px solid #ffc107;">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="allow_system_account" {% if game_settings.allow_system_account %}checked{% endif %} onchange="toggleFreePlay()" style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;">
+                                <span style="font-weight: bold;">Allow System Account</span>
+                            </label>
+                            <p style="margin: 5px 0 0 28px; font-size: 12px; color: #666;">Enable fake system accounts to join games and simulate players</p>
+                        </div>
+                        <div style="margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; border-left: 4px solid #4caf50;">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="free_play" {% if game_settings.free_play %}checked{% endif %} style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;" {% if not game_settings.allow_system_account %}disabled{% endif %}>
+                                <span style="font-weight: bold; {% if not game_settings.allow_system_account %}opacity: 0.5;{% endif %}">Free Play</span>
+                            </label>
+                            <p style="margin: 5px 0 0 28px; font-size: 12px; color: #666;">Allow real users to win even when system accounts are active (only available if system accounts are enabled)</p>
+                        </div>
                     </div>
                     
                     <h3 style="margin-top: 30px; margin-bottom: 15px;">🏦 Deposit Account Information</h3>
@@ -1569,6 +1583,8 @@
                 min_withdraw: parseFloat(document.getElementById('min_withdraw').value),
                 percentage_cut: parseFloat(document.getElementById('percentage_cut').value),
                 automatic_mode_enabled: document.getElementById('automatic_mode_enabled').checked,
+                allow_system_account: document.getElementById('allow_system_account').checked,
+                free_play: document.getElementById('free_play').checked,
                 deposit_accounts: {
                     BOA: {
                         name: document.getElementById('boa_name').value,
@@ -1623,6 +1639,27 @@
             } catch (error) {
                 console.error('Error saving settings:', error);
                 alert('Error: ' + error.message);
+            }
+        }
+        
+        function toggleFreePlay() {
+            const allowSystemAccount = document.getElementById('allow_system_account').checked;
+            const freePlayCheckbox = document.getElementById('free_play');
+            const freePlayLabel = freePlayCheckbox.nextElementSibling;
+            
+            if (!allowSystemAccount) {
+                // Disable free play if system accounts are disabled
+                freePlayCheckbox.disabled = true;
+                freePlayCheckbox.checked = false;
+                if (freePlayLabel) {
+                    freePlayLabel.style.opacity = '0.5';
+                }
+            } else {
+                // Enable free play checkbox
+                freePlayCheckbox.disabled = false;
+                if (freePlayLabel) {
+                    freePlayLabel.style.opacity = '1';
+                }
             }
         }
         

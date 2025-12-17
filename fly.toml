@@ -15,6 +15,7 @@ console_command = '/code/manage.py shell'
 
 [vm]
   size = "shared-cpu-2x"
+  memory_mb = 1024
 
 [http_service]
   internal_port = 8000
@@ -33,7 +34,7 @@ console_command = '/code/manage.py shell'
 
 [processes]
   app = "bash /start-app.sh"
-  worker = "celery -A bingo worker --loglevel=info --concurrency=2"
+  worker = "celery -A bingo worker --loglevel=info --concurrency=1 --max-tasks-per-child=50 --max-memory-per-child=200000"
 
 [[statics]]
   guest_path = '/code/static'

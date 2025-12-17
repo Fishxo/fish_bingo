@@ -697,25 +697,43 @@ export default {
               this.winnerCard = {
                 card_layout: currentUserWinner.card_layout,
                 card_number: currentUserWinner.card_number,
-                winning_pattern: currentUserWinner.winning_pattern
+                winning_pattern: currentUserWinner.winning_pattern,
+                selected_numbers: currentUserWinner.selected_numbers || [],
+                called_numbers: currentUserWinner.called_numbers || [],
+                last_called_number: currentUserWinner.last_called_number || null
               }
             } else {
               this.isCurrentUserWinner = false
-              // Use first winner's card as default
+              // Use first winner's card as default (for fake users or other real users)
               if (data.winners[0].card_layout) {
                 this.winnerCard = {
                   card_layout: data.winners[0].card_layout,
                   card_number: data.winners[0].card_number,
-                  winning_pattern: data.winners[0].winning_pattern
+                  winning_pattern: data.winners[0].winning_pattern,
+                  selected_numbers: data.winners[0].selected_numbers || [],
+                  called_numbers: data.winners[0].called_numbers || [],
+                  last_called_number: data.winners[0].last_called_number || null
                 }
               }
             }
           }
         } else {
-        // Single winner (backward compatible format)
-        this.winners = null
-        this.winner = data.winner
-        this.winnerPrize = data.prize || this.game?.total_derash || 0
+          // Single winner (backward compatible format)
+          this.winners = null
+          this.winner = data.winner
+          this.winnerPrize = data.prize || this.game?.total_derash || 0
+          
+          // Set winnerCard for single winner format
+          if (data.card_layout) {
+            this.winnerCard = {
+              card_layout: data.card_layout,
+              card_number: data.card_number,
+              winning_pattern: data.winning_pattern,
+              selected_numbers: data.selected_numbers || [],
+              called_numbers: data.called_numbers || [],
+              last_called_number: data.last_called_number || null
+            }
+          }
         this.totalPrize = null
         // Record when winner banner is shown (if not already set)
         if (!this.winnerBannerShownAt) {
@@ -728,7 +746,10 @@ export default {
             this.isCurrentUserWinner = true
             this.winnerCard = {
               ...this.userCard,
-              winning_pattern: data.winning_pattern
+              winning_pattern: data.winning_pattern,
+              selected_numbers: data.selected_numbers || this.userCard.selected_numbers || [],
+              called_numbers: data.called_numbers || [],
+              last_called_number: data.last_called_number || null
             }
           } else {
             this.isCurrentUserWinner = false
@@ -741,7 +762,10 @@ export default {
               this.winnerCard = {
                 card_layout: data.card_layout,
                 card_number: data.card_number,
-                winning_pattern: data.winning_pattern
+                winning_pattern: data.winning_pattern,
+                selected_numbers: data.selected_numbers || [],
+                called_numbers: data.called_numbers || [],
+                last_called_number: data.last_called_number || null
               }
             }
           }
@@ -943,7 +967,10 @@ export default {
         
         this.winnerCard = {
           ...this.userCard,
-          winning_pattern: winningPattern
+          winning_pattern: winningPattern,
+          selected_numbers: this.userCard.selected_numbers || [],
+          called_numbers: this.calledNumbers || [],
+          last_called_number: this.currentCall?.number || null
         }
       }
       
@@ -1240,7 +1267,10 @@ export default {
           const card = await getCard(data.card_id)
           this.winnerCard = {
             ...card,
-            winning_pattern: data.winning_pattern
+            winning_pattern: data.winning_pattern,
+            selected_numbers: data.selected_numbers || card.selected_numbers || [],
+            called_numbers: data.called_numbers || [],
+            last_called_number: data.last_called_number || null
           }
         } catch (error) {
           console.error('Error loading winner card:', error)
@@ -1249,7 +1279,10 @@ export default {
             this.winnerCard = {
               card_layout: data.card_layout,
               card_number: data.card_number,
-              winning_pattern: data.winning_pattern
+              winning_pattern: data.winning_pattern,
+              selected_numbers: data.selected_numbers || [],
+              called_numbers: data.called_numbers || [],
+              last_called_number: data.last_called_number || null
             }
           }
         }
@@ -1258,7 +1291,10 @@ export default {
         this.winnerCard = {
           card_layout: data.card_layout,
           card_number: data.card_number,
-          winning_pattern: data.winning_pattern
+          winning_pattern: data.winning_pattern,
+          selected_numbers: data.selected_numbers || [],
+          called_numbers: data.called_numbers || [],
+          last_called_number: data.last_called_number || null
         }
       } else if (this.game && this.game.gamecards) {
         const winnerCardData = this.game.gamecards.find(card => 
@@ -1269,7 +1305,10 @@ export default {
             const card = await getCard(winnerCardData.id)
             this.winnerCard = {
               ...card,
-              winning_pattern: data.winning_pattern
+              winning_pattern: data.winning_pattern,
+              selected_numbers: data.selected_numbers || card.selected_numbers || [],
+              called_numbers: data.called_numbers || [],
+              last_called_number: data.last_called_number || null
             }
           } catch (error) {
             console.error('Error loading winner card:', error)
