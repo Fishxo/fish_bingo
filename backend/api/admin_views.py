@@ -553,6 +553,7 @@ def call_number_api(request, game_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def approve_deposit_request_api(request, deposit_id):
     """API endpoint to approve a deposit request"""
@@ -601,6 +602,7 @@ def approve_deposit_request_api(request, deposit_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def reject_deposit_request_api(request, deposit_id):
     """API endpoint to reject a deposit request"""
@@ -634,6 +636,7 @@ def reject_deposit_request_api(request, deposit_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def approve_withdraw_request_api(request, withdraw_id):
     """API endpoint to approve a withdraw request"""
@@ -687,6 +690,7 @@ def approve_withdraw_request_api(request, withdraw_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def reject_withdraw_request_api(request, withdraw_id):
     """API endpoint to reject a withdraw request"""
@@ -1583,6 +1587,12 @@ def second_admin_dashboard_api(request):
             else:
                 manual_count += 1
         
+        # Count real and system users
+        from .fake_user_manager import get_fake_user_count_for_game
+        from .models import GameCard
+        real_users_count = GameCard.objects.filter(game=game).count()
+        system_users_count = get_fake_user_count_for_game(game)
+        
         today_games_data.append({
             'id': game.id,
             'players': game.total_players,
@@ -1590,6 +1600,8 @@ def second_admin_dashboard_api(request):
             'automatic_count': automatic_count,
             'manual_count': manual_count,
             'winner_phones': winner_phones,
+            'real_users': real_users_count,
+            'system_users': system_users_count,
             'status': game.status,
             'created_at': game.created_at.strftime('%H:%M'),
         })

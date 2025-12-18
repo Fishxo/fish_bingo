@@ -716,6 +716,67 @@ def task_refund_and_cancel_game(self, game_id: int, bet_amount: Decimal):
         return {'error': str(e)}
 
 
+@shared_task(bind=True)
+def task_cancel_game(self, game_id: int):
+    """
+    Background task to cancel a game (without refund).
+    This is called after a delay when admin cancels game without refund.
+    """
+    try:
+        from .models import Game, GameSettings, AdminMessage
+        
+        game = Game.objects.get(id=game_id)
+        
+        # Get admin message if it exists
+        admin_message = AdminMessage.objects.filter(game=game).order_by('-created_at').first()
+        
+        # Update admin_message first before deleting the game
+        if admin_message:
+            admin_message.cancel_processed = True
+            admin_message.save()
+        
+        # Get settings for new game
+        settings = GameSettings.get_settings()
+        
+        # Delete the game (this will cascade delete related objects like GameCards, AdminMessage, etc.)
+        game.delete()
+        
+        # Create new game
+        new_game = Game.objects.create(
+            status='waiting',
+            bet_amount=settings.bid_amount,
+            derash_amount=Decimal('0.00')
+        )
+        
+        # Broadcast game cancelled event to all players
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f'game_{game_id}',
+                {
+                    'type': 'game_cancelled',
+                    'data': {
+                        'message': 'Game has been cancelled. Please select a new card.',
+                        'new_game_id': new_game.id
+                    }
+                }
+            )
+        except Exception as e:
+            print(f"WebSocket broadcast error: {e}")
+        
+        return {
+            'success': True,
+            'game_cancelled': True,
+            'new_game_id': new_game.id
+        }
+    except Game.DoesNotExist:
+        return {'error': 'Game not found'}
+    except Exception as e:
+        print(f"Error in task_cancel_game: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+
 @shared_task(bind=True, max_retries=3)
 def task_add_fake_users_to_game(self, game_id: int, fake_user_ids: List[int]):
     """

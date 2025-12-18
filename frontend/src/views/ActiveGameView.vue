@@ -641,9 +641,10 @@ export default {
               window.location.reload()
             }, 5000)
           } else if (data.cancel) {
-            // If cancel only, refresh after a delay
+            // If cancel only, redirect to home/card selection after a delay
             setTimeout(() => {
-              window.location.reload()
+              // Redirect to home page to force card selection
+              window.location.href = '/'
             }, 3000)
           }
         }

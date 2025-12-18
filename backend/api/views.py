@@ -3,7 +3,9 @@ from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.shortcuts import get_object_or_404
+from django.http import JsonResponse
 from django.db.models import Q, Sum
+from django.views.decorators.csrf import csrf_exempt
 from decimal import Decimal
 from django.utils import timezone
 from channels.layers import get_channel_layer
@@ -1225,23 +1227,33 @@ def call_number_admin(request, game_id):
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['POST'])
+@csrf_exempt
 def restart_game(request):
     """Restart game endpoint - sends message, optionally refunds/cancels game (Admin only)"""
     # Check authentication (works for both admin and second admin)
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
-        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
     
     try:
+        import json
         from decimal import Decimal
         from .models import GameSettings, Transaction, AdminMessage
         from django.utils import timezone
         from datetime import timedelta
         import time
         
-        message = request.data.get('message', '').strip()
-        refund = request.data.get('refund', False)
-        cancel = request.data.get('cancel', False)
+        # Parse JSON body
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        message = body.get('message', '').strip()
+        refund = body.get('refund', False)
+        cancel = body.get('cancel', False)
         
         # Get settings
         settings = GameSettings.get_settings()
@@ -1250,9 +1262,9 @@ def restart_game(request):
         current_game = Game.objects.filter(status__in=['waiting', 'active']).first()
         
         if not current_game:
-            return Response({
+            return JsonResponse({
                 'error': 'No active or waiting game found'
-            }, status=status.HTTP_404_NOT_FOUND)
+            }, status=404)
         
         game_id = current_game.id
         bet_amount = current_game.bet_amount
@@ -1290,10 +1302,10 @@ def restart_game(request):
             from .tasks import task_refund_and_cancel_game
             task_refund_and_cancel_game.apply_async(args=[game_id, bet_amount], countdown=5)
             
-            return Response({
+            return JsonResponse({
                 'message': 'Message sent. Refund and cancel will be processed in 5 seconds.',
                 'message_sent': True
-            }, status=status.HTTP_200_OK)
+            }, status=200)
         
         # If only refund (no cancel)
         elif refund:
@@ -1322,65 +1334,91 @@ def restart_game(request):
                 admin_message.refund_processed = True
                 admin_message.save()
             
-            return Response({
+            return JsonResponse({
                 'message': f'Message sent and refunded {refunded_count} player(s).',
                 'refunded_count': refunded_count
-            }, status=status.HTTP_200_OK)
+            }, status=200)
         
         # If only cancel (no refund)
         elif cancel:
-            current_game.delete()
-            if admin_message:
-                admin_message.cancel_processed = True
-                admin_message.save()
-            
-            # Create new game
-            new_game = Game.objects.create(
-                status='waiting',
-                bet_amount=settings.bid_amount,
-                derash_amount=Decimal('0.00')
-            )
-            
-            return Response({
-                'message': 'Message sent and game cancelled. New game created.',
-                'new_game': GameSerializer(new_game).data
-            }, status=status.HTTP_200_OK)
+            # If there's a message, wait 3 seconds then cancel (similar to refund+cancel)
+            if message:
+                # Use Celery task to cancel game after delay
+                from .tasks import task_cancel_game
+                task_cancel_game.apply_async(args=[game_id], countdown=3)
+                
+                return JsonResponse({
+                    'message': 'Message sent. Game will be cancelled in 3 seconds.',
+                    'message_sent': True
+                }, status=200)
+            else:
+                # No message, cancel immediately
+                # Update admin_message first before deleting the game
+                if admin_message:
+                    admin_message.cancel_processed = True
+                    admin_message.save()
+                
+                # Delete the game (this will cascade delete related objects like AdminMessage if CASCADE is set)
+                current_game.delete()
+                
+                # Create new game
+                new_game = Game.objects.create(
+                    status='waiting',
+                    bet_amount=settings.bid_amount,
+                    derash_amount=Decimal('0.00')
+                )
+                
+                from .serializers import GameSerializer
+                return JsonResponse({
+                    'message': 'Game cancelled. New game created.',
+                    'new_game': GameSerializer(new_game).data
+                }, status=200)
         
         # Just send message (no refund, no cancel)
         else:
-            return Response({
+            return JsonResponse({
                 'message': 'Message sent to players.',
                 'message_sent': True
-            }, status=status.HTTP_200_OK)
+            }, status=200)
             
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return Response(
+        return JsonResponse(
             {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=500
         )
 
 
-@api_view(['POST'])
+@csrf_exempt
 def send_telegram_message(request):
     """Send message to all users via Telegram bot, optionally add balance"""
     # Check authentication (works for both admin and second admin)
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
-        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
     
     try:
+        import json
         from decimal import Decimal
         from .models import Transaction
         from telegram_bot.notifications import send_notification_sync
         
-        message = request.data.get('message', '').strip()
-        amount = Decimal(str(request.data.get('amount', 0) or 0))
+        # Parse JSON body
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        message = body.get('message', '').strip()
+        amount = Decimal(str(body.get('amount', 0) or 0))
         
         if not message:
-            return Response({
+            return JsonResponse({
                 'error': 'Message is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
+            }, status=400)
         
         # Get all users with telegram_id
         users = User.objects.filter(telegram_id__isnull=False)
@@ -1410,18 +1448,18 @@ def send_telegram_message(request):
                 print(f"Error sending to user {user.id}: {e}")
                 continue
         
-        return Response({
+        return JsonResponse({
             'message': f'Message sent to {sent_count} user(s)',
             'sent_count': sent_count,
             'credited_count': credited_count if amount > 0 else 0
-        }, status=status.HTTP_200_OK)
+        }, status=200)
         
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return Response(
+        return JsonResponse(
             {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=500
         )
 
 
@@ -1499,9 +1537,12 @@ def update_user_phone(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminUser])
 def admin_users_list(request):
     """Get list of all registered users with statistics"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+    
     users = User.objects.filter(telegram_id__isnull=False).order_by('-created_at')
     
     users_data = []
@@ -1535,9 +1576,12 @@ def admin_users_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminUser])
 def admin_user_detail(request, user_id):
     """Get detailed user information including transaction history"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+    
     user = get_object_or_404(User, id=user_id)
     
     # Get user statistics
@@ -1573,9 +1617,12 @@ def admin_user_detail(request, user_id):
 
 
 @api_view(['PUT', 'PATCH'])
-@permission_classes([IsAdminUser])
 def admin_user_edit(request, user_id):
     """Edit user information"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+    
     user = get_object_or_404(User, id=user_id)
     
     # Allow editing balance, phone_number, username, first_name, last_name
@@ -1599,9 +1646,12 @@ def admin_user_edit(request, user_id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAdminUser])
 def admin_users_delete(request):
     """Delete one or multiple users"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+    
     user_ids = request.data.get('user_ids', [])
     
     if not user_ids or not isinstance(user_ids, list):
