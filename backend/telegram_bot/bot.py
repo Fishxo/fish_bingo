@@ -146,6 +146,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("No user in update")
             return
         
+        # Check for referral code in command arguments (from invite link: /start?referrer_telegram_id)
+        referrer_telegram_id = None
+        if context.args and len(context.args) > 0:
+            try:
+                referrer_telegram_id = int(context.args[0])
+                # Prevent self-referral
+                if referrer_telegram_id == user.id:
+                    referrer_telegram_id = None
+            except (ValueError, TypeError):
+                referrer_telegram_id = None
+        
         # Check if user exists and has phone number
         try:
             async def get_user():
@@ -158,7 +169,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 welcome_msg = f"እንኳን ደህና መጡ፣ {user.first_name or user.username}!"
                 await show_main_menu(update, context, welcome_msg)
             else:
-                # User exists but not registered (no phone), show registration prompt
+                # User exists but not registered (no phone), store referral if provided
+                if referrer_telegram_id and not telegram_user.referred_by:
+                    try:
+                        async def get_referrer():
+                            return await sync_to_async(User.objects.get)(telegram_id=referrer_telegram_id)
+                        referrer = await db_operation_with_retry(get_referrer)
+                        # Only set referrer if they are registered (have phone number)
+                        if referrer and referrer.phone_number:
+                            telegram_user.referred_by = referrer
+                            async def save_user():
+                                await sync_to_async(telegram_user.save)()
+                            await db_operation_with_retry(save_user)
+                            logger.info(f"Stored referrer {referrer_telegram_id} for user {user.id}")
+                    except User.DoesNotExist:
+                        logger.warning(f"Referrer {referrer_telegram_id} not found")
+                    except Exception as e:
+                        logger.error(f"Error storing referrer: {e}")
+                
+                # Show registration prompt
                 welcome_msg = "እንኳን ወደ አሪፍ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
                 # Show only register button
                 keyboard = [
@@ -173,14 +202,36 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.callback_query.answer()
         except User.DoesNotExist:
             # New user - create user record but don't register yet
+            # Check if referrer exists before creating user
+            referrer_user = None
+            if referrer_telegram_id:
+                try:
+                    async def get_referrer():
+                        return await sync_to_async(User.objects.get)(telegram_id=referrer_telegram_id)
+                    referrer_user = await db_operation_with_retry(get_referrer)
+                    # Only set referrer if they are registered (have phone number)
+                    if not referrer_user or not referrer_user.phone_number:
+                        referrer_user = None
+                except User.DoesNotExist:
+                    referrer_user = None
+                except Exception as e:
+                    logger.error(f"Error checking referrer: {e}")
+                    referrer_user = None
+            
             async def create_user():
-                return await sync_to_async(User.objects.create)(
-                    telegram_id=user.id,
-                    username=user.username or f"user_{user.id}",
-                    first_name=user.first_name or '',
-                    last_name=user.last_name or '',
-                )
+                user_data = {
+                    'telegram_id': user.id,
+                    'username': user.username or f"user_{user.id}",
+                    'first_name': user.first_name or '',
+                    'last_name': user.last_name or '',
+                }
+                if referrer_user:
+                    user_data['referred_by'] = referrer_user
+                return await sync_to_async(User.objects.create)(**user_data)
             telegram_user = await db_operation_with_retry(create_user)
+            
+            if referrer_user:
+                logger.info(f"Created new user {user.id} with referrer {referrer_telegram_id}")
             
             # Show registration prompt
             welcome_msg = "እንኳን ወደ አሪፍ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
@@ -813,7 +864,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Normalize phone number (remove 251 country code and add 0)
         normalized_phone = normalize_phone_number(phone_number)
         
-        # Get or create user and update phone number
+        # Get or create user
         async def get_or_create_user():
             return await sync_to_async(User.objects.get_or_create)(
                 telegram_id=user.id,
@@ -821,10 +872,21 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'username': user.username or f"user_{user.id}",
                     'first_name': user.first_name or '',
                     'last_name': user.last_name or '',
-                    'phone_number': normalized_phone,
                 }
             )
         telegram_user, created = await db_operation_with_retry(get_or_create_user)
+        
+        # Check if this is first-time registration (user didn't have phone number before)
+        # IMPORTANT: Check BEFORE updating phone number
+        had_phone_before = bool(telegram_user.phone_number and telegram_user.phone_number.strip())
+        is_first_registration = not had_phone_before
+        
+        # Update phone number (always update to ensure it's current)
+        if not telegram_user.phone_number or telegram_user.phone_number != normalized_phone:
+            telegram_user.phone_number = normalized_phone
+            async def save_user():
+                await sync_to_async(telegram_user.save)()
+            await db_operation_with_retry(save_user)
         
         # Get bid_amount from GameSettings for registration gift
         from api.models import GameSettings
@@ -833,45 +895,149 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_settings = await db_operation_with_retry(get_settings)
         bid_amount = game_settings.bid_amount
         
-        # Check if this is first-time registration (user didn't have phone number before)
-        is_first_registration = False
-        if created:
-            # New user - definitely first registration
-            is_first_registration = True
-        elif not telegram_user.phone_number or telegram_user.phone_number.strip() == '':
-            # Existing user but no phone number - first time registering
-            is_first_registration = True
-        
-        # Update phone number if user already exists
-        if not created and telegram_user.phone_number != normalized_phone:
-            telegram_user.phone_number = normalized_phone
-            async def save_user():
-                await sync_to_async(telegram_user.save)()
-            await db_operation_with_retry(save_user)
-        
         keyboard = [
             [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # STEP 1: Give registration gift FIRST (most important - user must get this)
         if is_first_registration:
-            # First-time registration - add registration gift (bid_amount)
-            telegram_user.balance = Decimal(str(telegram_user.balance)) + Decimal(str(bid_amount))
-            async def save_user():
-                await sync_to_async(telegram_user.save)()
-            await db_operation_with_retry(save_user)
+            try:
+                telegram_user.balance = Decimal(str(telegram_user.balance)) + Decimal(str(bid_amount))
+                async def save_user():
+                    await sync_to_async(telegram_user.save)()
+                await db_operation_with_retry(save_user)
+                logger.info(f"Gave registration gift of {bid_amount} to user {telegram_user.telegram_id}")
+                
+                # Create transaction record for the gift (non-critical, log if fails)
+                try:
+                    from api.models import Transaction
+                    async def create_transaction():
+                        await sync_to_async(Transaction.objects.create)(
+                            user=telegram_user,
+                            transaction_type='deposit',
+                            amount=Decimal(str(bid_amount)),
+                            description=f'Registration gift'
+                        )
+                    await db_operation_with_retry(create_transaction)
+                except Exception as e:
+                    logger.error(f"Error creating registration gift transaction: {e}", exc_info=True)
+                    # Continue anyway - balance is already updated
+            except Exception as e:
+                logger.error(f"CRITICAL: Error giving registration gift: {e}", exc_info=True)
+                # This is critical - re-raise to show error to user
+                raise
+        
+        # STEP 2: Handle referral reward (after registration gift is given)
+        # Process referral reward if user has referrer and reward hasn't been given yet
+        try:
+            # IMPORTANT: Get fresh user data from database to ensure we have latest referred_by_id
+            async def get_fresh_user():
+                return await sync_to_async(User.objects.get)(id=telegram_user.id)
+            fresh_user = await db_operation_with_retry(get_fresh_user)
             
-            # Create transaction record for the gift
-            from api.models import Transaction
-            async def create_transaction():
-                await sync_to_async(Transaction.objects.create)(
-                    user=telegram_user,
-                    transaction_type='deposit',
-                    amount=Decimal(str(bid_amount)),
-                    description=f'Registration gift'
-                )
-            await db_operation_with_retry(create_transaction)
+            # Log referral status for debugging
+            logger.info(f"Checking referral for user {fresh_user.telegram_id} (id={fresh_user.id}): referred_by_id={fresh_user.referred_by_id}, referral_reward_given={fresh_user.referral_reward_given}")
             
+            # Check if user has referrer and reward hasn't been given
+            if fresh_user.referred_by_id and not fresh_user.referral_reward_given:
+                referrer_id = fresh_user.referred_by_id
+                logger.info(f"Processing referral reward for user {fresh_user.telegram_id} (id={fresh_user.id}), referrer_id={referrer_id}")
+                
+                try:
+                    # Get referrer from database using the system ID
+                    async def get_referrer():
+                        return await sync_to_async(User.objects.get)(id=referrer_id)
+                    referrer = await db_operation_with_retry(get_referrer)
+                    
+                    if not referrer:
+                        logger.warning(f"Referrer with id {referrer_id} not found for user {fresh_user.telegram_id}")
+                    elif not referrer.phone_number:
+                        logger.warning(f"Referrer {referrer.telegram_id} (id={referrer.id}) is not registered (no phone number) for user {fresh_user.telegram_id}")
+                    else:
+                        # Verify referrer exists and is registered - give reward
+                        logger.info(f"Giving referral reward: referrer={referrer.telegram_id} (id={referrer.id}), current balance={referrer.balance}, reward={bid_amount}")
+                        
+                        # Refresh referrer to get latest balance
+                        async def refresh_referrer():
+                            await sync_to_async(referrer.refresh_from_db)()
+                        await db_operation_with_retry(refresh_referrer)
+                        
+                        # Give reward to referrer (using system ID - correct)
+                        old_balance = referrer.balance
+                        referrer.balance = Decimal(str(referrer.balance)) + Decimal(str(bid_amount))
+                        async def save_referrer():
+                            await sync_to_async(referrer.save)()
+                        await db_operation_with_retry(save_referrer)
+                        
+                        # Verify balance was updated
+                        async def verify_referrer_balance():
+                            await sync_to_async(referrer.refresh_from_db)()
+                        await db_operation_with_retry(verify_referrer_balance)
+                        logger.info(f"✅ Gave referral reward of {bid_amount} to referrer {referrer.telegram_id} (id={referrer.id}), balance: {old_balance} -> {referrer.balance}")
+                        
+                        # Create transaction record for referral reward (non-critical)
+                        try:
+                            from api.models import Transaction
+                            async def create_referral_transaction():
+                                # Build name for transaction description
+                                invited_name = f"{fresh_user.first_name or ''} {fresh_user.last_name or ''}".strip()
+                                if not invited_name:
+                                    invited_name = fresh_user.first_name or fresh_user.username or "User"
+                                await sync_to_async(Transaction.objects.create)(
+                                    user=referrer,
+                                    transaction_type='deposit',
+                                    amount=Decimal(str(bid_amount)),
+                                    description=f'Referral reward - {invited_name} registered'
+                                )
+                            await db_operation_with_retry(create_referral_transaction)
+                            logger.info(f"Created referral transaction for referrer {referrer.telegram_id} (id={referrer.id})")
+                        except Exception as e:
+                            logger.error(f"Error creating referral transaction: {e}", exc_info=True)
+                            # Continue anyway - balance is already updated
+                        
+                        # Mark reward as given for THIS user's registration (prevents duplicate if user re-registers)
+                        fresh_user.referral_reward_given = True
+                        async def save_fresh_user():
+                            await sync_to_async(fresh_user.save)()
+                        await db_operation_with_retry(save_fresh_user)
+                        logger.info(f"Marked referral_reward_given=True for user {fresh_user.telegram_id} (id={fresh_user.id})")
+                        
+                        # Send notification to inviter (non-critical)
+                        if referrer.telegram_id:
+                            try:
+                                from telegram_bot.notifications import send_notification
+                                # Use full name (first_name + last_name) for better description, fallback to first_name, then username, then "User"
+                                invited_name = f"{fresh_user.first_name or ''} {fresh_user.last_name or ''}".strip()
+                                if not invited_name:
+                                    invited_name = fresh_user.first_name or fresh_user.username or "User"
+                                notification_msg = (
+                                    f"{invited_name} ን አስገብተዋል፣ {bid_amount} ብር አግኝተዋል፡፡"
+                                )
+                                await send_notification(referrer.telegram_id, notification_msg)
+                                logger.info(f"✅ Sent referral reward notification to inviter {referrer.telegram_id} (id={referrer.id})")
+                            except Exception as e:
+                                logger.error(f"Error sending referral notification to inviter {referrer.telegram_id}: {e}", exc_info=True)
+                except User.DoesNotExist:
+                    logger.error(f"Referrer with id {referrer_id} does not exist in database")
+                except Exception as e:
+                    # Log error but don't fail registration if referral reward fails
+                    logger.error(f"Error processing referral reward: {e}", exc_info=True)
+            elif fresh_user.referred_by_id:
+                logger.info(f"Referral reward already given for user {fresh_user.telegram_id} (id={fresh_user.id})")
+            else:
+                logger.info(f"User {fresh_user.telegram_id} (id={fresh_user.id}) has no referrer (referred_by_id is None)")
+                
+        except Exception as e:
+            # Log error but don't fail registration if checking referral fails
+            logger.error(f"Error checking/processing referral status: {e}", exc_info=True)
+        
+        # STEP 3: Refresh user and prepare success message
+        async def refresh_user():
+            await sync_to_async(telegram_user.refresh_from_db)()
+        await db_operation_with_retry(refresh_user)
+        
+        if is_first_registration:
             message_text = (
                 f"ተመዝግበዋል! ስጦታ {bid_amount} ብር ተበርክቶሎታል፡፡"
             )

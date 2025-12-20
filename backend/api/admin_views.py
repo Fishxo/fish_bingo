@@ -1009,9 +1009,10 @@ def second_admin_dashboard(request):
             real_users_count=Count('gamecards', distinct=True)
         ).filter(real_users_count__gt=0)
         
-        # Calculate total revenue using aggregation - use only() to limit fields
+        # Calculate total revenue using aggregation
+        # Note: Cannot use .only() with annotations, so we iterate normally
         total = Decimal('0')
-        for game in games_with_counts.only('bet_amount', 'real_users_count'):
+        for game in games_with_counts:
             total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
             cut = (total_collected * percentage_cut) / Decimal('100')
             total += cut
@@ -1322,9 +1323,10 @@ def admin_dashboard_api(request):
             real_users_count=Count('gamecards', distinct=True)
         ).filter(real_users_count__gt=0)
         
-        # Calculate total revenue using aggregation - use only() to limit fields
+        # Calculate total revenue using aggregation
+        # Note: Cannot use .only() with annotations, so we iterate normally
         total = Decimal('0')
-        for game in games_with_counts.only('bet_amount', 'real_users_count'):
+        for game in games_with_counts:
             total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
             cut = (total_collected * percentage_cut) / Decimal('100')
             total += cut
@@ -1646,9 +1648,10 @@ def second_admin_dashboard_api(request):
             real_users_count=Count('gamecards', distinct=True)
         ).filter(real_users_count__gt=0)
         
-        # Calculate total revenue using aggregation - use only() to limit fields
+        # Calculate total revenue using aggregation
+        # Note: Cannot use .only() with annotations, so we iterate normally
         total = Decimal('0')
-        for game in games_with_counts.only('bet_amount', 'real_users_count'):
+        for game in games_with_counts:
             total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
             cut = (total_collected * percentage_cut) / Decimal('100')
             total += cut
