@@ -8,37 +8,43 @@ logger = logging.getLogger(__name__)
 
 
 async def send_notification(telegram_id: int, message: str, photo_file_id: str = None):
-    """Send a notification message to a user via Telegram bot"""
+    """Send a notification message to a user via Telegram bot
+    Returns: (success: bool, message_id: int or None)
+    """
     try:
         token = settings.TELEGRAM_BOT_TOKEN
         if not token:
             logger.warning("TELEGRAM_BOT_TOKEN not set. Cannot send notification.")
-            return False
+            return False, None
         
         bot = Bot(token=token)
         
         if photo_file_id:
             # Send photo with caption
-            await bot.send_photo(
+            sent_message = await bot.send_photo(
                 chat_id=telegram_id,
                 photo=photo_file_id,
                 caption=message
             )
         else:
             # Send text message
-            await bot.send_message(
+            sent_message = await bot.send_message(
                 chat_id=telegram_id,
                 text=message
             )
         
-        return True
+        # Return success and message_id
+        message_id = sent_message.message_id if sent_message else None
+        return True, message_id
     except Exception as e:
         logger.error(f"Error sending Telegram notification to {telegram_id}: {e}")
-        return False
+        return False, None
 
 
 def send_notification_sync(telegram_id: int, message: str, photo_file_id: str = None):
-    """Synchronous wrapper for send_notification - works in both sync and async contexts"""
+    """Synchronous wrapper for send_notification - works in both sync and async contexts
+    Returns: (success: bool, message_id: int or None)
+    """
     import asyncio
     import concurrent.futures
     import threading
@@ -68,8 +74,8 @@ def send_notification_sync(telegram_id: int, message: str, photo_file_id: str = 
             return asyncio.run(_send())
     except concurrent.futures.TimeoutError:
         logger.error(f"Timeout sending notification to {telegram_id}")
-        return False
+        return False, None
     except Exception as e:
         logger.error(f"Error in send_notification_sync for telegram_id {telegram_id}: {e}", exc_info=True)
-        return False
+        return False, None
 

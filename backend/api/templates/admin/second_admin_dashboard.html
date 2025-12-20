@@ -919,6 +919,83 @@
                 </button>
             </div>
         </div>
+        
+        <!-- Individual Telegram Message Sending Section -->
+        <div class="section" style="margin-top: 40px; border-top: 2px solid #ddd; padding-top: 30px;">
+            <h2>📨 Send Telegram Message to Individual User</h2>
+            <div style="background: #f0f8e8; padding: 20px; border-radius: 8px; border: 2px solid #4caf50;">
+                <p style="margin: 0 0 15px 0; color: #2e7d32; font-weight: bold;">
+                    💡 Send a message to a specific user by phone number or user ID
+                </p>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: bold;">Phone Number or User ID:</label>
+                    <input type="text" id="individual_phone_or_id" placeholder="Enter phone number (e.g., 0912345678) or User ID (e.g., 123)" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                    <small style="color: #666; display: block; margin-top: 5px;">Enter either phone number or user ID (one is required)</small>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: bold;">Message:</label>
+                    <textarea id="individual_message" placeholder="Enter message to send to this user..." style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #ddd; border-radius: 5px;"></textarea>
+                </div>
+                <button onclick="sendIndividualMessage()" style="background: #4caf50; color: white; padding: 12px 24px; font-size: 16px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
+                    📤 Send to User
+                </button>
+            </div>
+        </div>
+        
+        <!-- Recent Broadcast Messages Section -->
+        <div class="section" style="margin-top: 40px; border-top: 2px solid #ddd; padding-top: 30px;">
+            <h2>📋 Recent Broadcast Messages</h2>
+            <div style="background: #fff; padding: 20px; border-radius: 8px; border: 2px solid #ddd;">
+                {% if recent_broadcasts %}
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="background: #f5f5f5;">
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">ID</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Message</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Amount</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Sent By</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Recipients</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Date</th>
+                                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for broadcast in recent_broadcasts %}
+                            <tr>
+                                <td style="padding: 10px; border: 1px solid #ddd;">{{ broadcast.id }}</td>
+                                <td style="padding: 10px; border: 1px solid #ddd; max-width: 300px; word-wrap: break-word;">
+                                    <div style="max-height: 60px; overflow-y: auto;">{{ broadcast.message_text|truncatewords:20 }}</div>
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #ddd;">
+                                    {% if broadcast.amount_added %}
+                                        {{ broadcast.amount_added }} ETB
+                                    {% else %}
+                                        -
+                                    {% endif %}
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #ddd;">
+                                    {{ broadcast.sent_by.username|default:"System" }}
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #ddd;">
+                                    {{ broadcast.recipients.count }} user(s)
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #ddd;">
+                                    {{ broadcast.created_at|date:"Y-m-d H:i" }}
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #ddd;">
+                                    <button onclick="deleteBroadcast({{ broadcast.id }})" style="background: #e74c3c; color: white; padding: 6px 12px; font-size: 14px; border: none; border-radius: 4px; cursor: pointer;">
+                                        🗑️ Delete
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p style="text-align: center; color: #666; padding: 20px;">No broadcast messages yet.</p>
+                {% endif %}
+            </div>
+        </div>
     </div>
     
     <script>
@@ -1891,14 +1968,137 @@
                 
                 const data = await response.json();
                 if (response.ok) {
-                    alert(`Message sent to ${data.sent_count || 'all'} users!`);
+                    alert(`✅ Message sent successfully to ${data.sent_count || 'all'} users!`);
                     document.getElementById('telegram_message').value = '';
                     document.getElementById('telegram_amount').value = '0';
+                    // Reload page to show the new broadcast in the recent list
+                    setTimeout(() => window.location.reload(), 1000);
                 } else {
                     alert(data.error || 'Failed to send message');
                 }
             } catch (error) {
                 console.error('Error sending message:', error);
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        // Send Individual Telegram Message
+        async function sendIndividualMessage() {
+            const phoneOrId = document.getElementById('individual_phone_or_id').value.trim();
+            const message = document.getElementById('individual_message').value.trim();
+            
+            if (!phoneOrId) {
+                alert('Please enter a phone number or user ID.');
+                return;
+            }
+            
+            if (!message) {
+                alert('Please enter a message.');
+                return;
+            }
+            
+            // Determine if it's a phone number or user ID (user ID is typically numeric only)
+            const isNumericOnly = /^\d+$/.test(phoneOrId);
+            const isPhoneNumber = phoneOrId.length >= 9 && phoneOrId.length <= 15;
+            
+            let requestBody;
+            if (isNumericOnly && !isPhoneNumber) {
+                // Looks like a user ID (numeric only, not phone-length)
+                requestBody = {
+                    user_id: phoneOrId,
+                    message: message
+                };
+            } else {
+                // Treat as phone number
+                requestBody = {
+                    phone_number: phoneOrId,
+                    message: message
+                };
+            }
+            
+            try {
+                const csrftoken = getCSRFToken();
+                if (!csrftoken) {
+                    alert('CSRF token not found. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const response = await fetch('/api/admin/send-individual-message/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': csrftoken,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 500));
+                    alert('Server returned an error. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert(`✅ Message sent successfully to user!\n\nUser: ${data.username || data.user_id}\nTelegram ID: ${data.telegram_id}`);
+                    document.getElementById('individual_phone_or_id').value = '';
+                    document.getElementById('individual_message').value = '';
+                } else {
+                    alert(data.error || 'Failed to send message');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        // Delete Broadcast Messages
+        async function deleteBroadcast(broadcastId) {
+            if (!confirm('⚠️ Are you sure you want to delete all messages from this broadcast?\n\nThis will delete the messages from all users\' phones.')) {
+                return;
+            }
+            
+            try {
+                const csrftoken = getCSRFToken();
+                if (!csrftoken) {
+                    alert('CSRF token not found. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const response = await fetch(`/api/admin/broadcasts/${broadcastId}/delete/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': csrftoken,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    credentials: 'same-origin'
+                });
+                
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 500));
+                    alert('Server returned an error. Please refresh the page and try again.');
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert(`✅ ${data.message}\n\nDeleted: ${data.deleted_count} message(s)\nFailed: ${data.failed_count || 0} message(s)`);
+                    // Reload page to refresh the list
+                    window.location.reload();
+                } else {
+                    alert(data.error || 'Failed to delete messages');
+                }
+            } catch (error) {
+                console.error('Error:', error);
                 alert('Error: ' + error.message);
             }
         }

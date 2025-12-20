@@ -251,7 +251,7 @@ def transfer(request):
                 f"አዲስ ሂሳብዎ: {final_balance} ብር"
             )
             logger.info(f"Attempting to send transfer notification to recipient {recipient.telegram_id} (username: {recipient.username})")
-            result = send_notification_sync(recipient.telegram_id, message)
+            result, _ = send_notification_sync(recipient.telegram_id, message)
             if result:
                 logger.info(f"Successfully sent transfer notification to recipient {recipient.telegram_id} (username: {recipient.username})")
             else:
@@ -294,7 +294,7 @@ def admin_notify(request):
         )
     
     from telegram_bot.notifications import send_notification_sync
-    success = send_notification_sync(telegram_id, message)
+    success, _ = send_notification_sync(telegram_id, message)
     
     if success:
         return Response({
@@ -1446,6 +1446,16 @@ def send_telegram_message(request):
                 'error': 'Message is required'
             }, status=400)
         
+        # Create broadcast message record
+        from .models import BroadcastMessage, BroadcastMessageRecipient
+        from django.utils import timezone
+        
+        broadcast = BroadcastMessage.objects.create(
+            message_text=message,
+            amount_added=amount if amount > 0 else None,
+            sent_by=request.user if request.user.is_authenticated else None
+        )
+        
         # Get all users with telegram_id
         users = User.objects.filter(telegram_id__isnull=False)
         sent_count = 0
@@ -1453,9 +1463,21 @@ def send_telegram_message(request):
         
         for user in users:
             try:
-                # Send message
-                send_notification_sync(user.telegram_id, message)
-                sent_count += 1
+                # Send message and get message_id
+                success, message_id = send_notification_sync(user.telegram_id, message)
+                
+                if success and message_id:
+                    # Store recipient record with message_id for deletion
+                    BroadcastMessageRecipient.objects.create(
+                        broadcast=broadcast,
+                        user=user,
+                        telegram_id=user.telegram_id,
+                        message_id=message_id
+                    )
+                    sent_count += 1
+                elif success:
+                    # Message sent but no message_id (shouldn't happen, but handle gracefully)
+                    sent_count += 1
                 
                 # Add balance if amount > 0
                 if amount > 0:
@@ -1477,8 +1499,171 @@ def send_telegram_message(request):
         return JsonResponse({
             'message': f'Message sent to {sent_count} user(s)',
             'sent_count': sent_count,
-            'credited_count': credited_count if amount > 0 else 0
+            'credited_count': credited_count if amount > 0 else 0,
+            'broadcast_id': broadcast.id
         }, status=200)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse(
+            {'error': str(e)},
+            status=500
+        )
+
+
+@csrf_exempt
+def delete_broadcast_messages(request, broadcast_id):
+    """Delete all messages from a broadcast"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        from .models import BroadcastMessage, BroadcastMessageRecipient
+        from telegram import Bot
+        from django.conf import settings
+        from django.utils import timezone
+        
+        broadcast = BroadcastMessage.objects.get(id=broadcast_id)
+        recipients = BroadcastMessageRecipient.objects.filter(
+            broadcast=broadcast,
+            deleted=False
+        )
+        
+        if not recipients.exists():
+            return JsonResponse({
+                'message': 'No messages to delete (already deleted or none sent)',
+                'deleted_count': 0
+            }, status=200)
+        
+        # Delete messages via Telegram API
+        token = settings.TELEGRAM_BOT_TOKEN
+        if not token:
+            return JsonResponse({'error': 'TELEGRAM_BOT_TOKEN not set'}, status=500)
+        
+        bot = Bot(token=token)
+        deleted_count = 0
+        failed_count = 0
+        
+        for recipient in recipients:
+            try:
+                # Delete message via Telegram API
+                bot.delete_message(
+                    chat_id=recipient.telegram_id,
+                    message_id=recipient.message_id
+                )
+                # Mark as deleted
+                recipient.deleted = True
+                recipient.deleted_at = timezone.now()
+                recipient.save()
+                deleted_count += 1
+            except Exception as e:
+                # Message might already be deleted, or user blocked bot, etc.
+                print(f"Error deleting message for user {recipient.user.id}: {e}")
+                failed_count += 1
+                # Still mark as deleted to avoid retrying
+                recipient.deleted = True
+                recipient.deleted_at = timezone.now()
+                recipient.save()
+        
+        return JsonResponse({
+            'message': f'Deleted {deleted_count} message(s)',
+            'deleted_count': deleted_count,
+            'failed_count': failed_count
+        }, status=200)
+        
+    except BroadcastMessage.DoesNotExist:
+        return JsonResponse({'error': 'Broadcast not found'}, status=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse(
+            {'error': str(e)},
+            status=500
+        )
+
+
+@csrf_exempt
+def send_individual_message(request):
+    """Send message to a specific user via Telegram bot by phone number or user ID"""
+    # Check authentication (works for both admin and second admin)
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        import json
+        from .phone_utils import find_user_by_phone
+        from telegram_bot.notifications import send_notification_sync
+        
+        # Parse JSON body
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        phone_number = body.get('phone_number', '').strip()
+        user_id = body.get('user_id', '').strip()
+        message = body.get('message', '').strip()
+        
+        if not message:
+            return JsonResponse({
+                'error': 'Message is required'
+            }, status=400)
+        
+        if not phone_number and not user_id:
+            return JsonResponse({
+                'error': 'Either phone_number or user_id is required'
+            }, status=400)
+        
+        # Find user
+        user = None
+        if user_id:
+            try:
+                user_id_int = int(user_id)
+                user = User.objects.filter(id=user_id_int).first()
+                if not user:
+                    return JsonResponse({
+                        'error': f'User with ID {user_id} not found'
+                    }, status=404)
+            except (ValueError, TypeError):
+                return JsonResponse({
+                    'error': 'Invalid user_id format'
+                }, status=400)
+        elif phone_number:
+            user = find_user_by_phone(phone_number)
+            if not user:
+                return JsonResponse({
+                    'error': f'User with phone number {phone_number} not found'
+                }, status=404)
+        
+        # Check if user has telegram_id
+        if not user.telegram_id:
+            return JsonResponse({
+                'error': f'User {user.username or user.id} does not have a Telegram ID (not registered via Telegram bot)'
+            }, status=400)
+        
+        # Send message
+        success, _ = send_notification_sync(user.telegram_id, message)
+        
+        if success:
+            return JsonResponse({
+                'success': True,
+                'message': f'Message sent to user {user.username or user.id} (Telegram ID: {user.telegram_id})',
+                'user_id': user.id,
+                'username': user.username,
+                'telegram_id': user.telegram_id
+            }, status=200)
+        else:
+            return JsonResponse({
+                'error': 'Failed to send message. Please check if the user has blocked the bot or if there is a network issue.'
+            }, status=500)
         
     except Exception as e:
         import traceback

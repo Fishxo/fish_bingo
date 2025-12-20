@@ -548,6 +548,43 @@ class AdminMessage(models.Model):
         ordering = ['-created_at']
 
 
+class BroadcastMessage(models.Model):
+    """Track broadcast messages sent to users for deletion"""
+    message_text = models.TextField()
+    amount_added = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, null=True, blank=True)
+    sent_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='broadcasts_sent')
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'broadcast_messages'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"Broadcast {self.id} - {self.created_at}"
+
+
+class BroadcastMessageRecipient(models.Model):
+    """Track individual message recipients and their message IDs for deletion"""
+    broadcast = models.ForeignKey(BroadcastMessage, on_delete=models.CASCADE, related_name='recipients')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='broadcast_messages_received')
+    telegram_id = models.BigIntegerField()
+    message_id = models.IntegerField(help_text="Telegram message ID for deletion")
+    sent_at = models.DateTimeField(auto_now_add=True)
+    deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'broadcast_message_recipients'
+        unique_together = ['broadcast', 'user']
+        indexes = [
+            models.Index(fields=['broadcast', 'deleted']),
+            models.Index(fields=['telegram_id', 'message_id']),
+        ]
+    
+    def __str__(self):
+        return f"Broadcast {self.broadcast.id} -> User {self.user.id} (Message ID: {self.message_id})"
+
+
 class SecondAdmin(models.Model):
     """Second admin credentials for limited access dashboard"""
     username = models.CharField(max_length=150, unique=True)

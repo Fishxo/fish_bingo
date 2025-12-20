@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.db.models import Sum, Count, Q, Prefetch
 from datetime import datetime, timedelta
-from .models import Deposit, Game, CalledNumber, Transaction, User, DepositRequest, WithdrawRequest, GameSettings, Transfer, AdminMessage, SecondAdmin
+from .models import Deposit, Game, CalledNumber, Transaction, User, DepositRequest, WithdrawRequest, GameSettings, Transfer, AdminMessage, SecondAdmin, BroadcastMessage
 from django.contrib.auth.hashers import make_password, check_password
 from .game_logic import call_number, start_game
 from .phone_utils import normalize_phone_number, find_user_by_phone
@@ -428,6 +428,7 @@ def admin_dashboard(request):
         'total_withdrawals': total_withdrawals,
         'total_balance': total_balance,
         'second_admin_username': second_admin_username,
+        'recent_broadcasts': BroadcastMessage.objects.all().order_by('-created_at')[:5].select_related('sent_by').prefetch_related('recipients'),
     }
     return render(request, 'admin/dashboard.html', context)
 
@@ -521,7 +522,7 @@ def verify_deposit_api(request, deposit_id):
                     f"መጠን: {deposit.amount} ብር\n"
                     f"አዲስ ሂሳብዎ: {deposit.user.balance} ብር"
                 )
-                send_notification_sync(deposit.user.telegram_id, message)
+                send_notification_sync(deposit.user.telegram_id, message)  # Ignore message_id for non-broadcast
             
             return JsonResponse({
                 'success': True,
@@ -539,7 +540,7 @@ def verify_deposit_api(request, deposit_id):
                     f"መጠን: {deposit.amount} ብር\n"
                     f"እባክዎ እንደገና ይሞክሩ።"
                 )
-                send_notification_sync(deposit.user.telegram_id, message)
+                send_notification_sync(deposit.user.telegram_id, message)  # Ignore message_id for non-broadcast
             
             return JsonResponse({
                 'success': False,
@@ -1273,6 +1274,7 @@ def second_admin_dashboard(request):
         'total_balance': total_balance,
         'total_automatic_games': total_automatic_games,
         'total_manual_games': total_manual_games,
+        'recent_broadcasts': BroadcastMessage.objects.all().order_by('-created_at')[:5].select_related('sent_by').prefetch_related('recipients'),
     }
     return render(request, 'admin/second_admin_dashboard.html', context)
 

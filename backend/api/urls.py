@@ -28,6 +28,8 @@ urlpatterns = [
     path('admin/games/<int:game_id>/end/', views.end_game, name='end-game'),
     path('admin/games/restart/', views.restart_game, name='restart-game'),
     path('admin/send-telegram-message/', views.send_telegram_message, name='send-telegram-message'),
+    path('admin/send-individual-message/', views.send_individual_message, name='send-individual-message'),
+    path('admin/broadcasts/<int:broadcast_id>/delete/', views.delete_broadcast_messages, name='delete-broadcast-messages'),
     # User management endpoints
     path('users/phone/', views.update_user_phone, name='update-user-phone'),
     path('admin/users/', views.admin_users_list, name='admin-users-list'),
