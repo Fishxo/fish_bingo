@@ -762,6 +762,7 @@ async def instruction_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "   - አግድም መስመር (ማንኛውም ረድፍ)\n"
         "   - ቋሚ መስመር (ማንኛውም አምድ)\n"
         "   - ሰያፍ መስመር\n"
+        "   - ኮርነር ቢንጎ\n"
         "   - ሙሉ ካርድ\n\n"
         "5. **ብዙ አሸናፊዎች**:\n"
         "   - በአንድ ጊዜ ወይም በ1 ሰከንድ ውስጥ ብዙ አሸናፊዎች ከተገኙ ደራሹን በእኩል ይከፋፈላሉ\n\n"
@@ -1782,8 +1783,9 @@ async def handle_deposit_platform_selection(update: Update, context: ContextType
         f"🏦 {platform_name}\n\n"
         f"የሂሳብ ባለቤት: {account_name}\n"
         f"የሂሳብ ቁጥር: {account_number}\n\n"
-        f"እባክዎ ወደ ላይ የተጠቀሰው ሂሳብ ገንዘብ ያስገቡ።\n"
-        f"ከዚያ ገቢ አድርጌዋለሁ የሚለውን ይጫኑ።"
+        f"📍 እባክዎ ወደ {platform_name} በመሄድ ወደተጠቀሰው ሂሳብ ገንዘብ ያስገቡ።\n"
+        f"ከዚያ ወደዚህ በመመለስ ገቢ አድርጌዋለሁ የሚለውን ይጫኑ።\n"
+        f"ከዚያ መጀመሪያ ያስተላለፉትን መጠን ቀጥሎ ከ {platform_name} የተላከልዎትን ቴክስት ያስገቡ።"
     )
     
     await query.edit_message_text(message, reply_markup=reply_markup)
