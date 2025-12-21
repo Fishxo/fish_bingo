@@ -321,26 +321,49 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
         from .auto_game_manager import check_and_create_new_game
         from .models import GameSettings
         
-        # Try to get from cache first
+        # PHASE 2 OPTIMIZATION #1: Multi-level caching with different TTLs
+        # Level 1: Short-term cache (1-2 seconds) - Game state (status, basic info)
+        # Level 2: Medium-term cache (5 seconds) - Full game data
+        # Level 3: Long-term cache (30-60 seconds) - Static settings
+        
         cache_key = 'game:current'
+        cache_key_state = f'game:current:state:{cache_key}'  # For state-only cache
+        
+        # Try short-term state cache first (1 second TTL)
+        cached_state = cache.get(cache_key_state)
+        if cached_state:
+            game_id = cached_state.get('id')
+            status = cached_state.get('status')
+            if game_id and status == 'active':
+                # Active game - try full data cache
+                cached_data = cache.get(cache_key)
+                if cached_data:
+                    return Response(cached_data)
+        
+        # Try medium-term full data cache (5 seconds)
         cached_data = cache.get(cache_key)
         game = None
+        
         if cached_data is not None:
             # Check if game still exists and is still current
             game_id = cached_data.get('id')
             if game_id:
-                game = Game.objects.filter(id=game_id).first()
+                # Use only() to fetch minimal fields for validation
+                game = Game.objects.filter(id=game_id).only('id', 'status', 'created_at').first()
                 if game and game.status in ['active', 'waiting']:
-                    # For active games, return cached data immediately
+                    # For active games, return cached data immediately (5-second cache)
                     if game.status == 'active':
+                        # Also cache state for faster future checks
+                        cache.set(cache_key_state, {'id': game_id, 'status': 'active'}, 1)
                         return Response(cached_data)
                     # For waiting games, continue to check fake users below
         
-        # Cache miss or waiting game - fetch from database
+        # Cache miss or waiting game - fetch from database with optimized query
         if not game:
+            # OPTIMIZATION #5: Use select_related and prefetch_related for efficient queries
             game = Game.objects.filter(
                 Q(status='active') | Q(status='waiting')
-            ).order_by('-created_at').first()
+            ).select_related('winner').prefetch_related('winners').order_by('-created_at').first()
         
         # If no game exists, create a new one
         # CRITICAL: Only create new game if the last completed game finished at least 8 seconds ago
@@ -506,7 +529,15 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(game)
         game_data = serializer.data
         
-        # Cache the serialized game data for 5 seconds (short TTL for real-time updates)
+        # PHASE 2 OPTIMIZATION #1: Multi-level caching
+        # Cache state (minimal data) for 1 second - for quick status checks
+        cache.set(cache_key_state, {
+            'id': game.id,
+            'status': game.status,
+            'created_at': game.created_at.isoformat() if game.created_at else None
+        }, 1)
+        
+        # Cache full game data for 5 seconds (medium-term cache)
         cache.set(cache_key, game_data, 5)
         
         return Response(game_data)

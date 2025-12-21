@@ -882,7 +882,7 @@ export default {
   top: 80px; /* Adjust this value - Start below top section and select card text */
   left: 0;
   right: 0;
-  bottom: 40vh; /* Adjust this value - Leave space for selected card at bottom */
+  bottom: 32vh; /* Increased space for cards section (reduced from 40vh) */
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px;
@@ -911,38 +911,38 @@ export default {
    To adjust the position of the selected card section, modify these values:
    
    - bottom: 0          → Change to move up/down (e.g., bottom: 20px moves it up)
-   - height: 40vh       → Change to make taller/shorter (e.g., 35vh or 45vh)
-   - max-height: 40vh   → Should match height value
-   - padding: 20px       → Change to adjust internal spacing
+   - height: 28vh       → Change to make taller/shorter (e.g., 25vh or 30vh)
+   - max-height: 28vh   → Should match height value
+   - padding: 5px 0px   → Change to adjust internal spacing
    ============================================ */
 .selected-card-section {
   position: fixed;
-  top: 90%; /* Change this to move the section up/down (e.g., bottom: 10px) */
+  bottom: 0; /* Positioned at bottom */
   left: 0;
   right: 0;
-  background: rgb(115, 69, 133);
-  padding:0px; /* Adjust this to change internal spacing */
-  border-top: 3px solid var(--purple-medium);
+  background: var(--purple-light);
+  padding: 5px 0px; /* Minimal vertical padding, no horizontal padding */
   box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
   z-index: 50;
-  height: 20px; /* Adjust this to change height (e.g., 35vh, 45vh) */
-  max-height: 40vh; /* Should match height value above */
+  height: 28vh; /* Reduced from 40vh to make more compact */
+  max-height: 28vh; /* Should match height value above */
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start; /* Align to top to reduce space */
 }
 
 .selected-card-header {
   text-align: center;
-  margin-bottom: 5px;
+  margin-bottom: 2px; /* Reduced from 5px to minimize space */
+  margin-top: 2px; /* Minimal top margin */
   flex-shrink: 0;
 }
 
 .selected-card-header h3 {
   margin: 0;
   font-size: 12px;
-  color: var(--purple-dark);
+  color: var(--purple-light);
 }
 
 .selected-card-display.compact {
@@ -954,10 +954,13 @@ export default {
   height: 100%;
   overflow: visible;
   position: relative;
+  padding: 0; /* Remove any default padding */
+  margin: 0; /* Remove any default margin */
 }
 
 .selected-card-display.compact :deep(.user-card) {
   transform: scale(1.2);
+  padding: 4px; /* Reduced padding for more compact display */
 }
 
 .game-paused-overlay {

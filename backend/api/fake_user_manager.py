@@ -186,7 +186,10 @@ def check_fake_user_bingo(card: FakeUserGameCard, called_numbers: set, game=None
     Check if a fake user card has a winning BINGO pattern
     Returns (has_bingo, pattern_type)
     Only checks patterns enabled in game settings.
+    
+    OPTIMIZATION: Early exit if card has less than 5 marked numbers.
     """
+    # Early exit optimization: minimum bingo requires 5 numbers in a line
     if len(card.selected_numbers) < 5:
         return (False, None)
     
@@ -285,6 +288,126 @@ def mark_number_on_fake_card(card: FakeUserGameCard, number: int):
         return True
     
     return False
+
+
+def mark_number_on_fake_card_in_memory(card: FakeUserGameCard, number: int) -> bool:
+    """
+    Mark a number on a fake user's card in memory (no database save).
+    Returns True if number was found and marked, False otherwise.
+    Use this for batch processing, then call bulk_update() on all cards.
+    """
+    layout = card.card_layout
+    if not layout:
+        return False
+    
+    number_found = False
+    
+    # Find and mark the number in the layout
+    for row in layout:
+        for cell in row:
+            if cell.get('number') == number:
+                # Mark the cell as marked (for display purposes)
+                cell['marked'] = True
+                number_found = True
+                break
+        if number_found:
+            break
+    
+    if number_found:
+        if number not in card.selected_numbers:
+            card.selected_numbers.append(number)
+        # Update the layout with marked cells (in memory only)
+        card.card_layout = layout
+        return True
+    
+    return False
+
+
+def batch_mark_number_on_fake_cards(game_id: int, number: int) -> tuple:
+    """
+    Batch mark a number on all fake user cards for a game.
+    Returns (updated_count, winners) where winners is a list of (card, pattern) tuples.
+    Uses bulk_update for efficient database writes.
+    """
+    from .models import FakeUserGameCard, Game, CalledNumber
+    
+    try:
+        # Fetch all fake cards once
+        fake_cards = list(FakeUserGameCard.objects.filter(
+            game_id=game_id,
+            is_winner=False
+        ).select_related('fake_user'))
+        
+        if not fake_cards:
+            return (0, [])
+        
+        # PHASE 2 OPTIMIZATION: Fetch called numbers from Redis (faster than database)
+        from .redis_utils import get_called_numbers_from_redis
+        called_numbers = get_called_numbers_from_redis(game_id)
+        called_numbers.add(number)  # Include the number we just called
+        
+        # Get game for pattern checking (once, not in loop)
+        try:
+            game = Game.objects.get(id=game_id)
+        except Game.DoesNotExist:
+            print(f"ERROR: Game {game_id} not found in batch_mark_number_on_fake_cards")
+            return (0, [])
+        
+        # Process all cards in memory
+        cards_to_update = []
+        winners = []
+        
+        for card in fake_cards:
+            # Mark number in memory
+            if mark_number_on_fake_card_in_memory(card, number):
+                cards_to_update.append(card)
+                
+                # Check if this card has bingo (in memory check)
+                has_bingo, pattern = check_fake_user_bingo(card, called_numbers, game)
+                
+                if has_bingo:
+                    # Mark as winner
+                    card.is_winner = True
+                    card.winning_pattern = pattern
+                    winners.append((card, pattern))
+                    # Winner cards will be saved individually (immediate write)
+        
+        # Batch update all non-winner cards that were modified
+        non_winner_cards_to_update = [c for c in cards_to_update if not c.is_winner]
+        if non_winner_cards_to_update:
+            try:
+                FakeUserGameCard.objects.bulk_update(
+                    non_winner_cards_to_update,
+                    ['card_layout', 'selected_numbers'],
+                    batch_size=50
+                )
+            except Exception as e:
+                print(f"ERROR in bulk_update for fake cards: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: try individual saves if bulk_update fails
+                for card in non_winner_cards_to_update:
+                    try:
+                        card.save(update_fields=['card_layout', 'selected_numbers'])
+                    except Exception as e2:
+                        print(f"ERROR saving individual fake card {card.id}: {e2}")
+        
+        # Save winner cards individually (they need immediate write)
+        for card, pattern in winners:
+            try:
+                card.save(update_fields=['is_winner', 'winning_pattern', 'card_layout', 'selected_numbers'])
+            except Exception as e:
+                print(f"ERROR saving winner fake card {card.id}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        return (len(cards_to_update), winners)
+    except Exception as e:
+        print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return empty result on error to prevent blocking number calling
+        return (0, [])
 
 
 def get_fake_user_winning_numbers(card: FakeUserGameCard, called_numbers: set) -> List[int]:

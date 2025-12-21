@@ -182,7 +182,11 @@ def call_number(game: Game, number: int) -> CalledNumber:
     game.current_call_count += 1
     game.save()
     
-    # Invalidate caches when a new number is called
+    # PHASE 2 OPTIMIZATION: Add to Redis cache for faster access
+    from .redis_utils import add_called_number_to_redis
+    add_called_number_to_redis(game.id, number)
+    
+    # Invalidate Django cache (for backward compatibility)
     cache.delete(f'called_numbers:{game.id}')
     cache.delete('game:current')
     
@@ -325,24 +329,9 @@ def claim_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
         else:
             raise ValueError('Game is not active')
     
-    # Verify all marked numbers on card were actually called
-    from django.core.cache import cache as django_cache
-    
-    # Try to get called numbers from cache first
-    called_numbers = None
-    if django_cache:
-        cache_key = f'called_numbers:{game.id}'
-        called_numbers = django_cache.get(cache_key)
-    
-    if called_numbers is None:
-        # Cache miss - fetch from database
-        called_numbers = list(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
-        # Cache for 10 seconds
-        if django_cache:
-            cache_key = f'called_numbers:{game.id}'
-            django_cache.set(cache_key, called_numbers, 10)
-    
-    called_numbers = set(called_numbers)
+    # PHASE 2 OPTIMIZATION: Get called numbers from Redis (much faster than database)
+    from .redis_utils import get_called_numbers_from_redis
+    called_numbers = get_called_numbers_from_redis(game.id)
     layout = card.card_layout
     
     if layout:

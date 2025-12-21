@@ -138,13 +138,10 @@ def task_check_bingo_for_all_cards(self, game_id: int):
                 # Get all winner cards
                 winner_cards = GameCard.objects.filter(game=game, is_winner=True)
                 
-                # Get last called number for winner data (to match fake user format)
-                from .models import CalledNumber
-                last_called = CalledNumber.objects.filter(game=game).order_by('-called_at').first()
-                last_called_number = last_called.number if last_called else None
-                
-                # Get all called numbers for winner data
-                called_numbers = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                # PHASE 2 OPTIMIZATION #2: Get called numbers from Redis (faster)
+                from .redis_utils import get_called_numbers_list_from_redis
+                called_numbers = get_called_numbers_list_from_redis(game.id)
+                last_called_number = called_numbers[-1] if called_numbers else None
                 
                 for winner_card in winner_cards:
                     # Recalculate winning pattern for this card
@@ -343,13 +340,16 @@ def task_auto_call_numbers(self, game_id: int):
         
         try:
             game = Game.objects.get(id=game_id)
+            print(f"Game {game_id}: Status = {game.status}, Winner = {game.winner}")
             
             if game.status != 'active':
+                print(f"Game {game_id}: Not active (status: {game.status}), stopping number calling")
                 release_number_calling_lock(game_id)
                 return {'error': 'Game is not active', 'stopped': True}
             
             # Check if game has a winner
             if game.winner:
+                print(f"Game {game_id}: Already has winner ({game.winner}), stopping number calling")
                 release_number_calling_lock(game_id)
                 return {'error': 'Game already has winner', 'stopped': True}
             
@@ -457,142 +457,139 @@ def task_auto_call_numbers(self, game_id: int):
                 except Exception as e:
                     print(f"WebSocket broadcast error in auto_call_numbers (number_called): {e}")
                 
-                # Mark number on fake user cards (optimized batch processing)
-                from .fake_user_manager import mark_number_on_fake_card, check_fake_user_bingo
-                from .models import FakeUserGameCard
-                # Use select_related for better performance and list() to evaluate query once
-                fake_cards = list(FakeUserGameCard.objects.filter(game=game, is_winner=False).select_related('fake_user'))
+                # OPTIMIZATION #1: Batch mark number on fake user cards
+                # This replaces individual save() calls with a single bulk_update()
+                from .fake_user_manager import batch_mark_number_on_fake_cards
+                # CalledNumber is already imported at the top of the file
                 
-                # Process fake cards in batch for better performance
-                called_numbers_set.add(number)
-                for fake_card in fake_cards:
-                    mark_number_on_fake_card(fake_card, number)
-                    # Check if fake user won (pass game to get enabled patterns)
-                    has_bingo, pattern = check_fake_user_bingo(fake_card, called_numbers_set, game)
-                    if has_bingo:
-                        # Fake user won!
-                        fake_card.is_winner = True
-                        fake_card.winning_pattern = pattern
-                        fake_card.save()
+                # Batch process all fake cards (with error handling)
+                try:
+                    updated_count, winners = batch_mark_number_on_fake_cards(game.id, number)
+                    print(f"Batch processed {updated_count} fake cards for number {number}, found {len(winners)} winners")
+                except Exception as e:
+                    print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue with number calling even if fake user processing fails
+                    winners = []
+                    updated_count = 0
+                
+                # Process any winners found
+                if winners:
+                    # Get the first winner (if multiple, process the first one)
+                    fake_card, pattern = winners[0]
+                    
+                    # Mark game as completed if not already
+                    game.refresh_from_db()
+                    if game.status == 'active' and not game.winner:
+                        game.status = 'completed'
+                        game.completed_at = timezone.now()
+                        game.save()
                         
-                        # Mark game as completed if not already
-                        game.refresh_from_db()
-                        if game.status == 'active' and not game.winner:
-                            game.status = 'completed'
-                            game.completed_at = timezone.now()
-                            game.save()
+                        # Broadcast fake user winner
+                        try:
+                            # PHASE 2 OPTIMIZATION #2: Get called numbers from Redis (faster)
+                            from .redis_utils import get_called_numbers_list_from_redis
+                            called_numbers = get_called_numbers_list_from_redis(game.id)
                             
-                            # Broadcast fake user winner
-                            try:
-                                # Get called numbers for this game (CalledNumber is already imported at top)
-                                called_numbers = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                            # For fake users, the number that made them win is the number we just called
+                            last_called_number = None
+                            if number and pattern and fake_card.card_layout:
+                                layout = fake_card.card_layout
+                                number_in_pattern = False
                                 
-                                # For fake users, the number that made them win is the number we just called
-                                # This is checked BEFORE it's broadcasted to other users, so the number variable
-                                # is definitely the one that completed the winning pattern
-                                # We just need to verify it's actually in the winning pattern
-                                last_called_number = None
-                                if number and pattern and fake_card.card_layout:
-                                    layout = fake_card.card_layout
-                                    number_in_pattern = False
-                                    
-                                    # Check if the number is in the winning pattern
-                                    if pattern.startswith('row_'):
-                                        row_idx = int(pattern.split('_')[1])
-                                        number_in_pattern = any(cell.get('number') == number for cell in layout[row_idx])
-                                    elif pattern.startswith('col_'):
-                                        col_idx = int(pattern.split('_')[1])
-                                        number_in_pattern = any(layout[row_idx][col_idx].get('number') == number for row_idx in range(5))
-                                    elif pattern == 'diagonal_1':
-                                        number_in_pattern = any(layout[i][i].get('number') == number for i in range(5))
-                                    elif pattern == 'diagonal_2':
-                                        number_in_pattern = any(layout[i][4-i].get('number') == number for i in range(5))
-                                    elif pattern == 'full_card':
-                                        number_in_pattern = any(cell.get('number') == number for row in layout for cell in row)
-                                    
-                                    # If the number is in the pattern, use it (it's the one that made them win)
-                                    if number_in_pattern:
-                                        last_called_number = number
-                                        print(f"Fake user winner: number {number} is in pattern {pattern}, using as last_called_number")
-                                    else:
-                                        print(f"WARNING: Fake user winner: number {number} is NOT in pattern {pattern}, but using it anyway")
+                                # Check if the number is in the winning pattern
+                                if pattern.startswith('row_'):
+                                    row_idx = int(pattern.split('_')[1])
+                                    number_in_pattern = any(cell.get('number') == number for cell in layout[row_idx])
+                                elif pattern.startswith('col_'):
+                                    col_idx = int(pattern.split('_')[1])
+                                    number_in_pattern = any(layout[row_idx][col_idx].get('number') == number for row_idx in range(5))
+                                elif pattern == 'diagonal_1':
+                                    number_in_pattern = any(layout[i][i].get('number') == number for i in range(5))
+                                elif pattern == 'diagonal_2':
+                                    number_in_pattern = any(layout[i][4-i].get('number') == number for i in range(5))
+                                elif pattern == 'full_card':
+                                    number_in_pattern = any(cell.get('number') == number for row in layout for cell in row)
                                 
-                                # Fallback: if we couldn't verify, use the number anyway (it should be correct)
-                                # since we check bingo right after calling it
-                                if last_called_number is None:
-                                    last_called_number = number if number else (called_numbers[-1] if called_numbers else None)
-                                    print(f"Fake user winner: Using fallback last_called_number: {last_called_number}")
-                                
-                                print(f"Fake user winner: Final last_called_number: {last_called_number}, number: {number}, pattern: {pattern}")
-                                
-                                # Calculate prize amount (derash_amount) - show even for fake users
-                                from decimal import Decimal
-                                game.refresh_from_db()
-                                prize_amount = float(game.derash_amount) if game.derash_amount else 0.0
-                                
-                                winner_data = {
+                                if number_in_pattern:
+                                    last_called_number = number
+                                    print(f"Fake user winner: number {number} is in pattern {pattern}, using as last_called_number")
+                                else:
+                                    print(f"WARNING: Fake user winner: number {number} is NOT in pattern {pattern}, but using it anyway")
+                            
+                            if last_called_number is None:
+                                last_called_number = number if number else (called_numbers[-1] if called_numbers else None)
+                                print(f"Fake user winner: Using fallback last_called_number: {last_called_number}")
+                            
+                            print(f"Fake user winner: Final last_called_number: {last_called_number}, number: {number}, pattern: {pattern}")
+                            
+                            # Calculate prize amount (derash_amount) - show even for fake users
+                            from decimal import Decimal
+                            game.refresh_from_db()
+                            prize_amount = float(game.derash_amount) if game.derash_amount else 0.0
+                            
+                            winner_data = {
+                                'winner': {
+                                    'id': None,
+                                    'username': fake_card.fake_user.name,
+                                    'name': fake_card.fake_user.name,
+                                    'is_fake': True
+                                },
+                                'winners': [{
                                     'winner': {
                                         'id': None,
                                         'username': fake_card.fake_user.name,
                                         'name': fake_card.fake_user.name,
                                         'is_fake': True
                                     },
-                                    'winners': [{
-                                        'winner': {
-                                            'id': None,
-                                            'username': fake_card.fake_user.name,
-                                            'name': fake_card.fake_user.name,
-                                            'is_fake': True
-                                        },
-                                        'card_number': fake_card.card_number,
-                                        'card_id': fake_card.id,
-                                        'card_layout': fake_card.card_layout,
-                                        'selected_numbers': fake_card.selected_numbers,  # Ticked numbers
-                                        'called_numbers': called_numbers,  # All called numbers
-                                        'last_called_number': last_called_number,  # The number that made them win
-                                        'winning_pattern': pattern,
-                                        'prize': prize_amount  # Show derash amount even for fake users
-                                    }],
                                     'card_number': fake_card.card_number,
                                     'card_id': fake_card.id,
                                     'card_layout': fake_card.card_layout,
-                                    'selected_numbers': fake_card.selected_numbers,  # Ticked numbers
-                                    'called_numbers': called_numbers,  # All called numbers
-                                    'last_called_number': last_called_number,  # The number that made them win
+                                    'selected_numbers': fake_card.selected_numbers,
+                                    'called_numbers': called_numbers,
+                                    'last_called_number': last_called_number,
                                     'winning_pattern': pattern,
-                                    'prize': prize_amount,  # Show derash amount even for fake users
-                                    'total_prize': prize_amount,
-                                    'winner_count': 1
+                                    'prize': prize_amount
+                                }],
+                                'card_number': fake_card.card_number,
+                                'card_id': fake_card.id,
+                                'card_layout': fake_card.card_layout,
+                                'selected_numbers': fake_card.selected_numbers,
+                                'called_numbers': called_numbers,
+                                'last_called_number': last_called_number,
+                                'winning_pattern': pattern,
+                                'prize': prize_amount,
+                                'total_prize': prize_amount,
+                                'winner_count': 1
+                            }
+                            
+                            # Add 2.5 second delay AFTER number call before showing winner banner for fake users
+                            time.sleep(2.5)
+                            
+                            async_to_sync(channel_layer.group_send)(
+                                f'game_{game.id}',
+                                {
+                                    'type': 'winner_declared',
+                                    'data': winner_data
                                 }
-                                
-                                # Add 2.5 second delay AFTER number call before showing winner banner for fake users
-                                # This makes it less obvious that fake users win
-                                # The delay happens after the number has been called and broadcasted
-                                time.sleep(2.5)
-                                
-                                async_to_sync(channel_layer.group_send)(
-                                    f'game_{game.id}',
-                                    {
-                                        'type': 'winner_declared',
-                                        'data': winner_data
-                                    }
-                                )
-                                print(f"Broadcasted fake user winner: {fake_card.fake_user.name} (card {fake_card.card_number})")
-                            except Exception as e:
-                                print(f"Error broadcasting fake user winner: {e}")
-                                import traceback
-                                traceback.print_exc()
-                            
-                            # Cleanup Redis keys for this game
-                            from .redis_utils import cleanup_game_redis_keys
-                            cleanup_game_redis_keys(game.id)
-                            
-                            # Invalidate cache
-                            cache.delete('game:current')
-                            
-                            # Release lock and stop calling numbers
-                            release_number_calling_lock(game_id)
-                            return {'success': True, 'fake_winner': True, 'stopped': True}
+                            )
+                            print(f"Broadcasted fake user winner: {fake_card.fake_user.name} (card {fake_card.card_number})")
+                        except Exception as e:
+                            print(f"Error broadcasting fake user winner: {e}")
+                            import traceback
+                            traceback.print_exc()
+                        
+                        # Cleanup Redis keys for this game
+                        from .redis_utils import cleanup_game_redis_keys
+                        cleanup_game_redis_keys(game.id)
+                        
+                        # Invalidate cache
+                        cache.delete('game:current')
+                        
+                        # Release lock and stop calling numbers
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'fake_winner': True, 'stopped': True, 'updated_cards': updated_count}
                 
                 # Check all real user cards for bingo after calling number
                 task_check_bingo_for_all_cards.delay(game_id)
@@ -609,9 +606,10 @@ def task_auto_call_numbers(self, game_id: int):
             
             # Schedule next call recursively (this prevents long-running tasks)
             # Wait according to settings before next call
+            print(f"Game {game_id}: Number {number} called successfully. Scheduling next call in {time_between_calls} seconds.")
             task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
             
-            return {'success': True, 'number': number, 'scheduled_next': True}
+            return {'success': True, 'number': number, 'scheduled_next': True, 'next_call_in': time_between_calls}
         finally:
             # Always release lock in case of any unexpected errors
             try:

@@ -235,6 +235,7 @@ def cleanup_game_redis_keys(game_id):
             get_bingo_window_key(game_id),
             get_bingo_winners_key(game_id),
             get_number_calling_lock_key(game_id),
+            get_called_numbers_key(game_id),  # Also clean up called numbers cache
         ]
         
         # Also clean up any card locks that might still exist (optional, they expire anyway)
@@ -244,4 +245,76 @@ def cleanup_game_redis_keys(game_id):
             r.delete(key)
     except Exception as e:
         print(f"Error cleaning up Redis keys for game {game_id}: {e}")
+
+
+# PHASE 2 OPTIMIZATION: Redis-based called numbers caching
+def get_called_numbers_key(game_id):
+    """Get Redis key for called numbers list"""
+    return f"game:{game_id}:called_numbers"
+
+
+def get_called_numbers_from_redis(game_id: int) -> set:
+    """
+    Get called numbers from Redis (faster than database query).
+    Returns set of called numbers, or empty set if Redis unavailable.
+    Falls back to database query if Redis fails.
+    """
+    r = get_redis_client()
+    if not r:
+        # Fallback to database
+        from .models import CalledNumber
+        return set(CalledNumber.objects.filter(game_id=game_id).values_list('number', flat=True))
+    
+    try:
+        key = get_called_numbers_key(game_id)
+        numbers = r.lrange(key, 0, -1)
+        return {int(n) for n in numbers if n.isdigit()}
+    except Exception as e:
+        print(f"Error getting called numbers from Redis: {e}")
+        # Fallback to database
+        from .models import CalledNumber
+        return set(CalledNumber.objects.filter(game_id=game_id).values_list('number', flat=True))
+
+
+def add_called_number_to_redis(game_id: int, number: int):
+    """
+    Add called number to Redis list.
+    This is much faster than querying the database.
+    """
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    try:
+        key = get_called_numbers_key(game_id)
+        r.lpush(key, str(number))
+        # Set expiry to 1 hour (game won't last that long, but safe cleanup)
+        r.expire(key, 3600)
+        return True
+    except Exception as e:
+        print(f"Error adding called number to Redis: {e}")
+        return False
+
+
+def get_called_numbers_list_from_redis(game_id: int) -> list:
+    """
+    Get called numbers as ordered list from Redis (for display purposes).
+    Returns list of numbers in order called, or empty list if Redis unavailable.
+    """
+    r = get_redis_client()
+    if not r:
+        # Fallback to database
+        from .models import CalledNumber
+        return list(CalledNumber.objects.filter(game_id=game_id).order_by('called_at').values_list('number', flat=True))
+    
+    try:
+        key = get_called_numbers_key(game_id)
+        numbers = r.lrange(key, 0, -1)
+        # Reverse to get chronological order (lpush adds to front, so reverse for oldest first)
+        return [int(n) for n in reversed(numbers) if n.isdigit()]
+    except Exception as e:
+        print(f"Error getting called numbers list from Redis: {e}")
+        # Fallback to database
+        from .models import CalledNumber
+        return list(CalledNumber.objects.filter(game_id=game_id).order_by('called_at').values_list('number', flat=True))
 

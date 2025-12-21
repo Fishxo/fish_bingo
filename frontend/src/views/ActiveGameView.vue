@@ -365,7 +365,7 @@ export default {
                   setTimeout(() => {
                     if (!this.wsConnected && this.interval) {
                       clearInterval(this.interval)
-                      this.interval = setInterval(this.loadGame, 2000) // Back to 2 seconds
+                      this.interval = setInterval(this.loadGame, 10000) // Back to 10 seconds (reduced from 2s)
                     }
                   }, 2000)
                 }
@@ -394,7 +394,7 @@ export default {
                 if (this.interval) {
                   clearInterval(this.interval)
                 }
-                this.interval = setInterval(this.loadGame, 2000) // Normal 2 second polling
+                this.interval = setInterval(this.loadGame, 10000) // Normal 10 second polling (reduced from 2s)
               }
             }
             
@@ -803,10 +803,11 @@ export default {
       this.ws.connect()
     },
     startPolling() {
+      // PHASE 2 OPTIMIZATION #4: Reduced polling frequency from 2s to 10s
       // Only start polling if WebSocket is not connected and interval is not already running
       if (!this.wsConnected && !this.interval) {
         console.log('Starting HTTP polling (WebSocket not connected)')
-        this.interval = setInterval(this.loadGame, 2000) // Poll every 2 seconds
+        this.interval = setInterval(this.loadGame, 10000) // Poll every 10 seconds (reduced from 2s)
       }
     },
     stopPolling() {
