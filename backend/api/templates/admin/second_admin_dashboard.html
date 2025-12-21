@@ -1328,70 +1328,180 @@
         }
         
         async function showMorePendingDeposits() {
-            try {
-                const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
-                const data = await response.json();
-                if (response.ok) {
-                    const tbody = document.getElementById('pending-deposits-tbody');
-                    for (let i = 5; i < data.pending_deposits.length; i++) {
-                        const row = createPendingDepositRow(data.pending_deposits[i]);
-                        tbody.appendChild(row);
+            const btn = document.getElementById('showMorePendingDepositsBtn');
+            const tbody = document.getElementById('pending-deposits-tbody');
+            const container = document.getElementById('pending-deposits-container');
+            
+            if (!btn || !tbody || !container) return;
+            
+            // Check if already expanded
+            const isExpanded = btn.dataset.expanded === 'true';
+            
+            if (isExpanded) {
+                // Collapse: remove rows beyond first 5
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const totalCount = rows.length;
+                rows.forEach((row, index) => {
+                    if (index >= 5) {
+                        row.remove();
                     }
-                    document.getElementById('pending-deposits-container').querySelector('.show-more-container')?.remove();
+                });
+                btn.textContent = `Show More (${totalCount - 5} more)`;
+                btn.dataset.expanded = 'false';
+            } else {
+                // Expand: show all
+                try {
+                    const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
+                    const data = await response.json();
+                    if (response.ok && data.pending_deposits) {
+                        // Remove existing rows beyond first 5
+                        const existingRows = Array.from(tbody.querySelectorAll('tr'));
+                        existingRows.forEach((row, index) => {
+                            if (index >= 5) row.remove();
+                        });
+                        
+                        // Add remaining rows
+                        for (let i = 5; i < data.pending_deposits.length; i++) {
+                            const row = createPendingDepositRow(data.pending_deposits[i]);
+                            tbody.appendChild(row);
+                        }
+                        
+                        // Update button
+                        btn.textContent = 'Show Less';
+                        btn.dataset.expanded = 'true';
+                    }
+                } catch (error) {
+                    console.error('Error showing more pending deposits:', error);
                 }
-            } catch (error) {
-                console.error('Error showing more pending deposits:', error);
             }
         }
         
         async function showMoreApprovedDeposits() {
-            try {
-                const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
-                const data = await response.json();
-                if (response.ok) {
-                    const tbody = document.getElementById('approved-deposits-tbody');
-                    for (let i = 5; i < data.approved_deposits.length; i++) {
-                        const row = createApprovedDepositRow(data.approved_deposits[i]);
-                        tbody.appendChild(row);
+            const btn = document.getElementById('showMoreApprovedDepositsBtn');
+            const tbody = document.getElementById('approved-deposits-tbody');
+            const container = document.getElementById('approved-deposits-container');
+            
+            if (!btn || !tbody || !container) return;
+            
+            const isExpanded = btn.dataset.expanded === 'true';
+            
+            if (isExpanded) {
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const totalCount = rows.length;
+                rows.forEach((row, index) => {
+                    if (index >= 5) {
+                        row.remove();
                     }
-                    document.getElementById('approved-deposits-container').querySelector('.show-more-container')?.remove();
+                });
+                btn.textContent = `Show More (${totalCount - 5} more)`;
+                btn.dataset.expanded = 'false';
+            } else {
+                try {
+                    const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
+                    const data = await response.json();
+                    if (response.ok && data.approved_deposits) {
+                        const existingRows = Array.from(tbody.querySelectorAll('tr'));
+                        existingRows.forEach((row, index) => {
+                            if (index >= 5) row.remove();
+                        });
+                        
+                        for (let i = 5; i < data.approved_deposits.length; i++) {
+                            const row = createApprovedDepositRow(data.approved_deposits[i]);
+                            tbody.appendChild(row);
+                        }
+                        
+                        btn.textContent = 'Show Less';
+                        btn.dataset.expanded = 'true';
+                    }
+                } catch (error) {
+                    console.error('Error showing more approved deposits:', error);
                 }
-            } catch (error) {
-                console.error('Error showing more approved deposits:', error);
             }
         }
         
         async function showMorePendingWithdraws() {
-            try {
-                const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
-                const data = await response.json();
-                if (response.ok) {
-                    const tbody = document.getElementById('pending-withdraws-tbody');
-                    for (let i = 5; i < data.pending_withdraws.length; i++) {
-                        const row = createPendingWithdrawRow(data.pending_withdraws[i]);
-                        tbody.appendChild(row);
+            const btn = document.getElementById('showMorePendingWithdrawsBtn');
+            const tbody = document.getElementById('pending-withdraws-tbody');
+            const container = document.getElementById('pending-withdraws-container');
+            
+            if (!btn || !tbody || !container) return;
+            
+            const isExpanded = btn.dataset.expanded === 'true';
+            
+            if (isExpanded) {
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const totalCount = rows.length;
+                rows.forEach((row, index) => {
+                    if (index >= 5) {
+                        row.remove();
                     }
-                    document.getElementById('pending-withdraws-container').querySelector('.show-more-container')?.remove();
+                });
+                btn.textContent = `Show More (${totalCount - 5} more)`;
+                btn.dataset.expanded = 'false';
+            } else {
+                try {
+                    const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
+                    const data = await response.json();
+                    if (response.ok && data.pending_withdraws) {
+                        const existingRows = Array.from(tbody.querySelectorAll('tr'));
+                        existingRows.forEach((row, index) => {
+                            if (index >= 5) row.remove();
+                        });
+                        
+                        for (let i = 5; i < data.pending_withdraws.length; i++) {
+                            const row = createPendingWithdrawRow(data.pending_withdraws[i]);
+                            tbody.appendChild(row);
+                        }
+                        
+                        btn.textContent = 'Show Less';
+                        btn.dataset.expanded = 'true';
+                    }
+                } catch (error) {
+                    console.error('Error showing more pending withdraws:', error);
                 }
-            } catch (error) {
-                console.error('Error showing more pending withdraws:', error);
             }
         }
         
         async function showMoreApprovedWithdraws() {
-            try {
-                const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
-                const data = await response.json();
-                if (response.ok) {
-                    const tbody = document.getElementById('approved-withdraws-tbody');
-                    for (let i = 5; i < data.approved_withdraws.length; i++) {
-                        const row = createApprovedWithdrawRow(data.approved_withdraws[i]);
-                        tbody.appendChild(row);
+            const btn = document.getElementById('showMoreApprovedWithdrawsBtn');
+            const tbody = document.getElementById('approved-withdraws-tbody');
+            const container = document.getElementById('approved-withdraws-container');
+            
+            if (!btn || !tbody || !container) return;
+            
+            const isExpanded = btn.dataset.expanded === 'true';
+            
+            if (isExpanded) {
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const totalCount = rows.length;
+                rows.forEach((row, index) => {
+                    if (index >= 5) {
+                        row.remove();
                     }
-                    document.getElementById('approved-withdraws-container').querySelector('.show-more-container')?.remove();
+                });
+                btn.textContent = `Show More (${totalCount - 5} more)`;
+                btn.dataset.expanded = 'false';
+            } else {
+                try {
+                    const response = await fetch('/secondadmin/api/refresh-deposits-withdrawals/');
+                    const data = await response.json();
+                    if (response.ok && data.approved_withdraws) {
+                        const existingRows = Array.from(tbody.querySelectorAll('tr'));
+                        existingRows.forEach((row, index) => {
+                            if (index >= 5) row.remove();
+                        });
+                        
+                        for (let i = 5; i < data.approved_withdraws.length; i++) {
+                            const row = createApprovedWithdrawRow(data.approved_withdraws[i]);
+                            tbody.appendChild(row);
+                        }
+                        
+                        btn.textContent = 'Show Less';
+                        btn.dataset.expanded = 'true';
+                    }
+                } catch (error) {
+                    console.error('Error showing more approved withdraws:', error);
                 }
-            } catch (error) {
-                console.error('Error showing more approved withdraws:', error);
             }
         }
         
