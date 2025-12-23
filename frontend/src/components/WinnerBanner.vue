@@ -131,13 +131,26 @@ export default {
   },
   computed: {
     displayWinner() {
-      if (!this.winner || typeof this.winner !== 'object' || Object.keys(this.winner).length === 0) {
-        return { username: 'Winner', name: 'Winner' }
+      // First try to get from winner object
+      if (this.winner && typeof this.winner === 'object' && Object.keys(this.winner).length > 0) {
+        if (this.winner.username || this.winner.name) {
+          return this.winner
+        }
       }
-      if (!this.winner.username && !this.winner.name) {
-        return { username: 'Winner', name: 'Winner' }
+      
+      // If winner is null/empty, try to get username from winners array (for fake users)
+      if (this.winners && this.winners.length > 0) {
+        const firstWinner = this.winners[0]
+        if (firstWinner.username) {
+          return { username: firstWinner.username, name: firstWinner.username }
+        }
+        if (firstWinner.winner && firstWinner.winner.username) {
+          return firstWinner.winner
+        }
       }
-      return this.winner
+      
+      // Fallback to "Winner" if nothing found
+      return { username: 'Winner', name: 'Winner' }
     },
     displayPrize() {
       const prize = this.prize !== null && this.prize !== undefined ? this.prize : 0

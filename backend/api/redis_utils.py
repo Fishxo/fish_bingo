@@ -61,6 +61,100 @@ def get_number_calling_lock_key(game_id):
     return f"game:{game_id}:number_calling_lock"
 
 
+def get_game_creation_lock_key():
+    """Get Redis key for global game creation lock (prevents multiple games from being created simultaneously)"""
+    return "game:creation:lock"
+
+
+def acquire_game_creation_lock(timeout=15):
+    """
+    Try to acquire global lock for game creation (atomic operation)
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        # If Redis unavailable, allow (fallback - should not happen in production)
+        return True
+    
+    try:
+        lock_key = get_game_creation_lock_key()
+        
+        # Try to acquire lock (SETNX - only sets if not exists)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            # Lock acquired, set timeout (15 seconds should be enough for game creation)
+            r.expire(lock_key, timeout)
+            return True
+        else:
+            # Lock exists - another process is already creating a game
+            return False
+    except Exception as e:
+        print(f"Error acquiring game creation lock: {e}")
+        # On error, allow (fallback - but log it)
+        return True
+
+
+def release_game_creation_lock():
+    """Release global game creation lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_game_creation_lock_key()
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing game creation lock: {e}")
+
+
+def get_bingo_claim_lock_key(game_id):
+    """Get Redis key for bingo claim lock (ensures only one claim processed at a time)"""
+    return f"game:{game_id}:bingo_claim_lock"
+
+
+def acquire_bingo_claim_lock(game_id, timeout=5):
+    """
+    Try to acquire lock for claiming bingo (atomic operation)
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        # If Redis unavailable, allow (fallback - should not happen in production)
+        return True
+    
+    try:
+        lock_key = get_bingo_claim_lock_key(game_id)
+        
+        # Try to acquire lock (SETNX - only sets if not exists)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            # Lock acquired, set timeout (5 seconds should be enough for bingo claim)
+            r.expire(lock_key, timeout)
+            return True
+        else:
+            # Lock exists - another process is already processing a bingo claim
+            return False
+    except Exception as e:
+        print(f"Error acquiring bingo claim lock: {e}")
+        # On error, allow (fallback - but log it)
+        return True
+
+
+def release_bingo_claim_lock(game_id):
+    """Release bingo claim lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_bingo_claim_lock_key(game_id)
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing bingo claim lock: {e}")
+
+
 def acquire_number_calling_lock(game_id, timeout=10):
     """
     Try to acquire lock for calling numbers in a game
@@ -136,7 +230,9 @@ def try_acquire_bingo_window(game_id):
 
 
 def add_bingo_winner(game_id, card_id, user_id):
-    """Add winner to Redis set"""
+    """Add winner to Redis set
+    user_id can be None for fake users
+    """
     r = get_redis_client()
     if not r:
         return False
@@ -144,7 +240,9 @@ def add_bingo_winner(game_id, card_id, user_id):
     try:
         winners_key = get_bingo_winners_key(game_id)
         # Store as card_id:user_id for later retrieval
-        r.sadd(winners_key, f"{card_id}:{user_id}")
+        # For fake users (user_id is None), store as "fake" instead of "None"
+        user_id_str = "fake" if user_id is None else str(user_id)
+        r.sadd(winners_key, f"{card_id}:{user_id_str}")
         # Set expiry on the set (2 seconds to be safe)
         r.expire(winners_key, 2)
         return True
@@ -154,7 +252,9 @@ def add_bingo_winner(game_id, card_id, user_id):
 
 
 def get_bingo_winners(game_id):
-    """Get all winners from Redis set"""
+    """Get all winners from Redis set
+    Returns list of dicts with 'card_id' and 'user_id' (None for fake users)
+    """
     r = get_redis_client()
     if not r:
         return []
@@ -164,15 +264,35 @@ def get_bingo_winners(game_id):
         winners = r.smembers(winners_key)
         result = []
         for winner_str in winners:
+            # Handle bytes from Redis
+            if isinstance(winner_str, bytes):
+                winner_str = winner_str.decode('utf-8')
+            
             parts = winner_str.split(':')
             if len(parts) == 2:
+                card_id = int(parts[0])
+                user_id_str = parts[1]
+                
+                # Handle fake users (stored as "fake")
+                if user_id_str == "fake":
+                    user_id = None
+                else:
+                    try:
+                        user_id = int(user_id_str)
+                    except ValueError:
+                        # Skip invalid entries
+                        print(f"WARNING: Invalid user_id in Redis winner: {user_id_str}")
+                        continue
+                
                 result.append({
-                    'card_id': int(parts[0]),
-                    'user_id': int(parts[1])
+                    'card_id': card_id,
+                    'user_id': user_id
                 })
         return result
     except Exception as e:
         print(f"Error getting bingo winners: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 

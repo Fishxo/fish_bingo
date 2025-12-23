@@ -364,26 +364,35 @@ def batch_mark_number_on_fake_cards(game_id: int, number: int) -> tuple:
         winners = []
         
         for card in fake_cards:
+            # CRITICAL: Double-check card is not already a winner (race condition protection)
+            # Refresh from DB to ensure we have latest state
+            card.refresh_from_db()
+            if card.is_winner:
+                # Skip cards that are already winners
+                continue
+            
             # Mark number in memory
             if mark_number_on_fake_card_in_memory(card, number):
                 cards_to_update.append(card)
                 
                 # Check if this card has bingo (in memory check)
+                # CRITICAL: Do NOT mark as winner here - let unified claim function handle it
                 has_bingo, pattern = check_fake_user_bingo(card, called_numbers, game)
                 
                 if has_bingo:
-                    # Mark as winner
-                    card.is_winner = True
-                    card.winning_pattern = pattern
-                    winners.append((card, pattern))
-                    # Winner cards will be saved individually (immediate write)
+                    # Only add to winners list - DO NOT mark as winner or save
+                    # The unified claim function will handle marking and saving
+                    # But first, double-check the card is still not a winner (another process might have claimed it)
+                    card.refresh_from_db()
+                    if not card.is_winner:
+                        winners.append((card, pattern))
         
-        # Batch update all non-winner cards that were modified
-        non_winner_cards_to_update = [c for c in cards_to_update if not c.is_winner]
-        if non_winner_cards_to_update:
+        # Batch update all cards that were modified (including potential winners)
+        # But DO NOT mark winners yet - unified function will do that
+        if cards_to_update:
             try:
                 FakeUserGameCard.objects.bulk_update(
-                    non_winner_cards_to_update,
+                    cards_to_update,
                     ['card_layout', 'selected_numbers'],
                     batch_size=50
                 )
@@ -392,20 +401,15 @@ def batch_mark_number_on_fake_cards(game_id: int, number: int) -> tuple:
                 import traceback
                 traceback.print_exc()
                 # Fallback: try individual saves if bulk_update fails
-                for card in non_winner_cards_to_update:
+                for card in cards_to_update:
                     try:
                         card.save(update_fields=['card_layout', 'selected_numbers'])
                     except Exception as e2:
                         print(f"ERROR saving individual fake card {card.id}: {e2}")
         
-        # Save winner cards individually (they need immediate write)
-        for card, pattern in winners:
-            try:
-                card.save(update_fields=['is_winner', 'winning_pattern', 'card_layout', 'selected_numbers'])
-            except Exception as e:
-                print(f"ERROR saving winner fake card {card.id}: {e}")
-                import traceback
-                traceback.print_exc()
+        # CRITICAL: Do NOT save winner cards here
+        # The unified claim function will mark them as winners and save them
+        # This ensures atomicity and prevents race conditions
         
         return (len(cards_to_update), winners)
     except Exception as e:

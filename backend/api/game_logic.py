@@ -6,7 +6,8 @@ from decimal import Decimal
 from .models import Game, GameCard, CalledNumber, User, Transaction
 from .redis_utils import (
     try_acquire_bingo_window, add_bingo_winner,
-    get_bingo_winners, cleanup_game_redis_keys
+    get_bingo_winners, cleanup_game_redis_keys,
+    acquire_bingo_claim_lock, release_bingo_claim_lock
 )
 
 
@@ -358,138 +359,154 @@ def get_winning_number(card: GameCard, winning_pattern: str, called_numbers: lis
 
 
 def claim_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
-    """Process a BINGO claim. Returns (success, winning_pattern)
-    
-    Uses Redis for 1-second winner window to handle multiple winners properly.
     """
-    # CRITICAL FIX: Always get a fresh game object from database
-    # The game object passed in might be stale, especially when called from API views
-    # This prevents race conditions with async tasks
-    game = Game.objects.get(id=game.id)
-    game.refresh_from_db()
-    print(f"CRITICAL claim_bingo START: Game {game.id} status={game.status}, winner={game.winner}, card.user={card.user.id}, card.is_winner={card.is_winner}")
+    Process a BINGO claim for REAL users.
+    This is a wrapper that calls the unified claim function.
     
-    # Check if card already won (refresh card too to ensure latest state)
-    card.refresh_from_db()
-    if card.is_winner:
-        raise ValueError('This card has already won')
+    Returns (success, winning_pattern)
+    Raises ValueError on failure
+    """
+    # Call unified function for real users
+    success, winning_pattern, error_message = claim_bingo_unified(card, game, is_fake_user=False)
     
-    # Check if game is active - Redis will handle the window timing
-    if game.status != 'active':
-        # CRITICAL FIX: Allow real users to claim even if game is completed by fake user
-        # Check if the winner is a fake user (game.winner is None for fake users)
-        # If so, allow real users to claim within the window
-        from .redis_utils import get_bingo_window_key, get_redis_client
-        r = get_redis_client()
-        if r:
-            window_key = get_bingo_window_key(game.id)
-            if r.exists(window_key):
-                # Window still open, allow claim (even if fake user won)
-                pass
-            elif game.status == 'completed':
-                # Game is completed - check if it was completed by a fake user
-                # Fake users don't set game.winner (it remains None)
-                # Real users set game.winner to the User object
-                if game.winner is None:
-                    # Fake user won - allow real user to claim if they have bingo
-                    # Check if this real user actually has bingo
-                    # (check_bingo is defined in this file, so we can call it directly)
-                    has_bingo, _ = check_bingo(card, game)
-                    if has_bingo:
-                        # Real user has bingo - allow claim even though fake user won
-                        # This gives real users priority over fake users
-                        print(f"CRITICAL: Real user {card.user.id} has bingo but fake user won. Allowing real user to claim.")
-                        # Set the window now to allow this claim
-                        from .redis_utils import try_acquire_bingo_window
-                        try_acquire_bingo_window(game.id)
-                    else:
-                        raise ValueError('በሌላ ተጫዋች ተቀድመዋል!')
-                else:
-                    # Real user already won
-                    raise ValueError('በሌላ ተጫዋች ተቀድመዋል!')
-        elif game.status == 'completed':
-            # Redis unavailable - check if fake user won
-            if game.winner is None:
-                # Fake user won - check if real user has bingo
-                # (check_bingo is defined in this file, so we can call it directly)
-                has_bingo, _ = check_bingo(card, game)
-                if has_bingo:
-                    # Allow claim
-                    pass
-                else:
-                    raise ValueError('በሌላ ተጫዋች ተቀድመዋል!')
-            else:
-                raise ValueError('በሌላ ተጫዋች ተቀድመዋል!')
-        else:
-            raise ValueError('Game is not active')
-    
-    # PHASE 2 OPTIMIZATION: Get called numbers from Redis (much faster than database)
-    from .redis_utils import get_called_numbers_from_redis
-    called_numbers = get_called_numbers_from_redis(game.id)
-    layout = card.card_layout
-    
-    if layout:
-        for row in layout:
-            for cell in row:
-                if cell.get('marked', False) and cell.get('number') is not None:
-                    if cell['number'] not in called_numbers:
-                        raise ValueError(f"Number {cell['number']} is marked but was not called")
-    
-    # Check if card has BINGO pattern
-    has_bingo, winning_pattern = check_bingo(card, game)
-    if not has_bingo:
-        raise ValueError('BINGO pattern not complete. Make sure you have a complete line marked.')
-    
-    # Use Redis for 1-second winner window (race-condition safe)
-    success, is_first_winner = try_acquire_bingo_window(game.id)
     if not success:
-        raise ValueError('በሌላ ተጫዋች ተቀድመዋል!')
+        raise ValueError(error_message or "Bingo claim failed")
     
-    # Mark card as winner and record claim time
-    claim_time = timezone.now()
-    card.is_winner = True
-    card.claimed_at = claim_time
-    card.save()
+    return (True, winning_pattern)
+
+
+def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    UNIFIED bingo claim function for BOTH real and fake users.
     
-    # Add this winner to Redis set
-    add_bingo_winner(game.id, card.id, card.user.id)
+    This is the SINGLE AUTHORITY for bingo claims - no other code should end games.
     
-    # Get all current winners from Redis (for synchronous processing)
-    redis_winners = get_bingo_winners(game.id)
+    Args:
+        card: Either GameCard (real user) or FakeUserGameCard (fake user)
+        game: Game object
+        is_fake_user: True if card is FakeUserGameCard, False if GameCard
     
-    # Get winner cards from database
-    winner_card_ids = [w['card_id'] for w in redis_winners]
-    all_winner_cards = list(GameCard.objects.filter(
-        id__in=winner_card_ids,
-        game=game,
-        is_winner=True
-    ).select_related('user'))
+    Returns:
+        (success: bool, winning_pattern: str, error_message: str)
+        - success: True if claim was successful
+        - winning_pattern: Pattern that won (if successful)
+        - error_message: Error message if claim failed
     
-    # If this is the first winner, mark game as completed
-    if is_first_winner:
-        from django.core.cache import cache as django_cache
-        
-        # CRITICAL FIX: Always get a fresh game object with latest status
-        # Multiple processes might be trying to complete the game simultaneously
-        # This is especially critical when system accounts are enabled
-        try:
-            # Try to use select_for_update (only works in transactions)
-            game = Game.objects.select_for_update().get(id=game.id)
-        except Exception as e:
-            # Not in a transaction (e.g., called from Celery task), use regular get
-            game = Game.objects.get(id=game.id)
-        
-        # CRITICAL: Refresh to ensure we have the absolute latest status
-        # This is essential to prevent race conditions with async tasks
+    This function:
+    - Uses Redis lock to ensure atomic claims
+    - Validates ONLY the claiming card (not others)
+    - Implements free_play logic (real priority when free_play is OFF)
+    - Ends game and broadcasts winner (single authority)
+    """
+    from .models import GameSettings, GameCard, FakeUserGameCard
+    from .redis_utils import get_called_numbers_from_redis
+    
+    # CRITICAL: Acquire Redis lock for atomic bingo claim
+    # This ensures only ONE claim is processed at a time across all machines
+    if not acquire_bingo_claim_lock(game.id, timeout=5):
+        return (False, None, "Another bingo claim is being processed. Please try again.")
+    
+    try:
+        # CRITICAL: Always get fresh game object from database
+        game = Game.objects.get(id=game.id)
         game.refresh_from_db()
         
-        # Double-check status after getting fresh data (another process might have completed it)
-        # CRITICAL: Only mark as completed if game is still active and has no winner
-        # This prevents overwriting a game that was already completed
-        if game.status == 'active' and not game.winner:
-            # CRITICAL FIX: Use update() to directly update the database without fetching the object
-            # This ensures the update is immediately visible to other processes/connections
-            # This is especially important when system accounts are enabled and async tasks are running
+        # Check if game is still active
+        if game.status != 'active':
+            if game.status == 'completed':
+                return (False, None, "Game is already completed")
+            return (False, None, f"Game is not active (status: {game.status})")
+        
+        # Refresh card to get latest state (including marked cells in layout)
+        # Use select_related to load relationships to avoid extra queries later
+        if is_fake_user:
+            card = FakeUserGameCard.objects.select_related('fake_user').get(id=card.id)
+        else:
+            card = GameCard.objects.select_related('user').get(id=card.id)
+        
+        # Check if card already won
+        if card.is_winner:
+            return (False, None, "This card has already won")
+        
+        # CRITICAL: Ensure card layout is loaded (it should be, but double-check)
+        if not card.card_layout:
+            return (False, None, "Card layout is missing")
+        
+        # Get called numbers from Redis
+        called_numbers = get_called_numbers_from_redis(game.id)
+        if not called_numbers:
+            return (False, None, "No numbers have been called yet")
+        
+        # Validate that all marked numbers on card were actually called
+        if is_fake_user:
+            # For fake users, check selected_numbers against called_numbers
+            marked_numbers = set(card.selected_numbers or [])
+            called_set = set(called_numbers)
+            if not marked_numbers.issubset(called_set):
+                return (False, None, "Some marked numbers were not called")
+            
+            # Check bingo using fake user bingo checker
+            from .fake_user_manager import check_fake_user_bingo
+            has_bingo, winning_pattern = check_fake_user_bingo(card, called_set, game)
+        else:
+            # For real users, validate card layout
+            layout = card.card_layout
+            if layout:
+                for row in layout:
+                    for cell in row:
+                        if cell.get('marked', False) and cell.get('number') is not None:
+                            if cell['number'] not in called_numbers:
+                                return (False, None, f"Number {cell['number']} is marked but was not called")
+            
+            # Check bingo using real user bingo checker
+            has_bingo, winning_pattern = check_bingo(card, game)
+        
+        if not has_bingo:
+            return (False, None, "BINGO pattern not complete")
+        
+        # CRITICAL: Check free_play setting for priority logic
+        # If free_play is OFF and this is a fake user, check if any real user has bingo
+        # If free_play is ON, it's truly random - first to claim wins
+        settings = GameSettings.get_settings(game_id=game.id)
+        free_play = getattr(settings, 'free_play', False)
+        
+        if is_fake_user and not free_play:
+            # free_play is OFF: Check if any real user has bingo (give them priority)
+            real_cards = GameCard.objects.filter(game=game, is_winner=False).select_related('user')
+            for real_card in real_cards:
+                real_has_bingo, _ = check_bingo(real_card, game)
+                if real_has_bingo:
+                    # Real user has bingo - reject fake user claim
+                    print(f"CRITICAL: Real user {real_card.user.id} has bingo! Rejecting fake user claim (free_play is OFF).")
+                    return (False, None, "Real user has priority (free_play is OFF)")
+        
+        # CRITICAL: Double-check game is still active (another process might have completed it)
+        game.refresh_from_db()
+        if game.status != 'active':
+            return (False, None, "Game was completed by another player")
+        
+        # Use Redis for 1-second winner window (race-condition safe)
+        success, is_first_winner = try_acquire_bingo_window(game.id)
+        if not success:
+            return (False, None, "Another player claimed bingo first")
+        
+        # Mark card as winner
+        claim_time = timezone.now()
+        card.is_winner = True
+        if is_fake_user:
+            card.winning_pattern = winning_pattern
+        else:
+            card.claimed_at = claim_time
+        card.save()
+        
+        # Add winner to Redis set
+        # For fake users, use None as user_id (they don't have User objects)
+        user_id = None if is_fake_user else card.user.id
+        add_bingo_winner(game.id, card.id, user_id)
+        
+        # If this is the first winner, mark game as completed
+        if is_first_winner:
+            # CRITICAL: Use atomic update() to ensure immediate visibility
             updated = Game.objects.filter(
                 id=game.id,
                 status='active',
@@ -497,81 +514,155 @@ def claim_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
             ).update(
                 status='completed',
                 completed_at=claim_time,
-                winner=card.user
+                winner=card.user if not is_fake_user else None  # Fake users don't set winner
             )
             
             if updated == 0:
-                # Another process already completed the game, refresh and check
+                # Another process already completed the game
                 game.refresh_from_db()
-                print(f"WARNING: Game {game.id} was already completed by another process (status: {game.status}, winner: {game.winner})")
-            else:
-                # Update was successful, refresh to get the updated object
-                game.refresh_from_db()
-                print(f"CRITICAL: Game {game.id} marked as completed with winner {card.user.id} using direct DB update (status: {game.status}, winner_id: {game.winner.id if game.winner else None})")
-                
-                # Final verification - get a completely fresh object to ensure persistence
-                final_check = Game.objects.get(id=game.id)
-                if final_check.status != 'completed' or final_check.winner != card.user:
-                    print(f"CRITICAL ERROR: Game {game.id} status NOT persisted after update()! DB shows: status={final_check.status}, winner={final_check.winner}")
-                else:
-                    print(f"SUCCESS: Game {game.id} status correctly persisted in database using update()")
-        else:
-            # Game was already completed by another process
+                print(f"WARNING: Game {game.id} was already completed by another process")
+                return (False, None, "Game was already completed")
+            
+            # Refresh to get updated object
             game.refresh_from_db()
-            print(f"Game {game.id} was already completed (status: {game.status}, winner: {game.winner})")
+            print(f"SUCCESS: Game {game.id} completed by {'fake user' if is_fake_user else f'real user {card.user.id}'}")
             
-            # CRITICAL: Invalidate cache immediately after saving
-            if django_cache:
-                django_cache.delete('game:current')
-                django_cache.delete(f'game:{game.id}')
-            
-            # CRITICAL FIX: Broadcast game_ended event immediately when game completes
-            # This ensures all users see the game as completed, not just the winner
+            # Broadcast winner immediately
             try:
                 from channels.layers import get_channel_layer
                 from asgiref.sync import async_to_sync
                 from .serializers import UserSerializer
+                from .redis_utils import get_called_numbers_list_from_redis
                 
                 channel_layer = get_channel_layer()
-                if channel_layer:
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'game_ended',
-                            'data': {
-                                'game_id': game.id,
-                                'status': 'completed',
-                                'completed_at': game.completed_at.isoformat() if game.completed_at else None,
-                                'winner': UserSerializer(card.user).data,
-                                'winner_count': 1  # Will be updated by async task
-                            }
+                called_numbers_list = get_called_numbers_list_from_redis(game.id)
+                
+                # Prepare winner data
+                if is_fake_user:
+                    # For fake users, find the winning number from the pattern
+                    winning_number = None
+                    if winning_pattern and called_numbers_list:
+                        # Try to find the number that completed the pattern
+                        layout = card.card_layout
+                        if layout:
+                            pattern_numbers = []
+                            if winning_pattern.startswith('row_'):
+                                row_idx = int(winning_pattern.split('_')[1])
+                                pattern_numbers = [cell.get('number') for cell in layout[row_idx] if cell.get('number') is not None]
+                            elif winning_pattern.startswith('col_'):
+                                col_idx = int(winning_pattern.split('_')[1])
+                                pattern_numbers = [layout[row_idx][col_idx].get('number') for row_idx in range(5) if layout[row_idx][col_idx].get('number') is not None]
+                            elif winning_pattern == 'diagonal_1':
+                                pattern_numbers = [layout[i][i].get('number') for i in range(5) if layout[i][i].get('number') is not None]
+                            elif winning_pattern == 'diagonal_2':
+                                pattern_numbers = [layout[i][4-i].get('number') for i in range(5) if layout[i][4-i].get('number') is not None]
+                            elif winning_pattern == 'corner':
+                                corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
+                                pattern_numbers = [cell.get('number') for cell in corners if cell.get('number') is not None]
+                            elif winning_pattern == 'full_card':
+                                pattern_numbers = [cell.get('number') for row in layout for cell in row if cell.get('number') is not None]
+                            
+                            # Find the last called number that's in the pattern
+                            for number in reversed(called_numbers_list):
+                                if number in pattern_numbers:
+                                    winning_number = number
+                                    break
+                    
+                    if not winning_number:
+                        winning_number = called_numbers_list[-1] if called_numbers_list else None
+                    
+                    # Card already has fake_user relationship loaded from line 422, no need to refresh again
+                    # Just ensure we have the latest card_layout (should already be up to date)
+                    card.refresh_from_db()
+                    
+                    # Create a winner object for fake users (so frontend can display name properly)
+                    fake_winner_obj = {
+                        'id': None,
+                        'username': card.fake_user.name,
+                        'name': card.fake_user.name,
+                        'is_fake': True
+                    }
+                    
+                    winner_data = {
+                        'winner': fake_winner_obj,  # Include winner object with username for frontend
+                        'username': card.fake_user.name,
+                        'is_fake': True,
+                        'card_number': card.card_number,
+                        'card_id': card.id,
+                        'card_layout': card.card_layout,  # Include card layout with marked cells
+                        'selected_numbers': card.selected_numbers or [],  # Include marked numbers
+                        'winning_pattern': winning_pattern,
+                        'last_called_number': winning_number,
+                        'called_numbers': called_numbers_list
+                    }
+                else:
+                    winning_number = get_winning_number(card, winning_pattern, called_numbers_list)
+                    
+                    # Card already has user relationship loaded from line 424, no need to refresh again
+                    # Just ensure we have the latest card_layout (should already be up to date)
+                    card.refresh_from_db()
+                    
+                    winner_data = {
+                        'winner': UserSerializer(card.user).data,
+                        'username': card.user.username,
+                        'is_fake': False,
+                        'card_number': card.card_number,
+                        'card_id': card.id,
+                        'card_layout': card.card_layout,  # Include card layout with marked cells
+                        'selected_numbers': card.selected_numbers or [],  # Include marked numbers
+                        'winning_pattern': winning_pattern,
+                        'last_called_number': winning_number,
+                        'called_numbers': called_numbers_list
+                    }
+                
+                # Broadcast winner_declared
+                async_to_sync(channel_layer.group_send)(
+                    f'game_{game.id}',
+                    {
+                        'type': 'winner_declared',
+                        'data': {
+                            'winners': [winner_data],
+                            'winner': winner_data['winner'],
+                            'total_prize': float(game.derash_amount) if game.derash_amount else 0.0,
+                            'prize': float(game.derash_amount) if game.derash_amount else 0.0,
+                            'winner_count': 1
                         }
-                    )
+                    }
+                )
+                
+                # Broadcast game_ended
+                async_to_sync(channel_layer.group_send)(
+                    f'game_{game.id}',
+                    {
+                        'type': 'game_ended',
+                        'data': {
+                            'game_id': game.id,
+                            'status': 'completed',
+                            'completed_at': game.completed_at.isoformat() if game.completed_at else None,
+                            'winner': winner_data['winner'],
+                            'winner_count': 1
+                        }
+                    }
+                )
+                
+                print(f"Broadcasted winner: {'fake user ' + card.fake_user.name if is_fake_user else 'real user ' + str(card.user.id)}")
             except Exception as e:
-                print(f"WebSocket broadcast error in claim_bingo (game_ended): {e}")
+                print(f"WebSocket broadcast error in claim_bingo_unified: {e}")
+                import traceback
+                traceback.print_exc()
             
-            # Invalidate game cache when game completes
-            if django_cache:
-                django_cache.delete('game:current')
+            # Trigger async task to finalize all winners after 1 second window
+            from .tasks import task_process_bingo_winners
+            task_process_bingo_winners.apply_async(
+                args=[game.id],
+                countdown=1
+            )
         
-        # Trigger async task to finalize all winners after 1 second window
-        # This ensures all winners within the 1-second window are properly processed
-        from .tasks import task_process_bingo_winners
-        task_process_bingo_winners.apply_async(
-            args=[game.id],
-            countdown=1  # Wait 1 second for all winners to claim
-        )
-    elif game.status != 'completed':
-        # Not first winner but game should be completed by now
-        game.refresh_from_db()
+        return (True, winning_pattern, None)
     
-    # Add all winners to ManyToMany field
-    for winner_card in all_winner_cards:
-        game.winners.add(winner_card.user)
-    
-    # Prize distribution happens in async task after 1-second window
-    # This ensures all winners within the window are included in prize split
-    return (True, winning_pattern)
+    finally:
+        # Always release the lock
+        release_bingo_claim_lock(game.id)
 
 
 def start_game(game: Game) -> bool:

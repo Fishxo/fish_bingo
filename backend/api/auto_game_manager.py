@@ -8,81 +8,166 @@ from .game_logic import start_game
 import random
 
 
-def create_new_game_after_completion(completed_game):
-    """Create a new waiting game after a game completes"""
-    # Get settings from database
-    settings = GameSettings.get_settings()
-    # Create new game with bet amount from settings
-    new_game = Game.objects.create(
-        status='waiting',
-        bet_amount=settings.bid_amount,
-        derash_amount=0
-    )
+def create_new_game_after_completion(completed_game, lock_acquired=False):
+    """Create a new waiting game after a game completes
+    CRITICAL: Uses lock to prevent multiple game creation
     
-    # Add fake users immediately if system accounts are enabled
+    Args:
+        completed_game: The game that just completed
+        lock_acquired: If True, assumes lock is already held (for internal calls)
+    """
+    from .redis_utils import acquire_game_creation_lock, release_game_creation_lock
+    
+    lock_held_by_this_call = False
+    
+    # CRITICAL: Acquire lock only if not already held
+    if not lock_acquired:
+        if not acquire_game_creation_lock(timeout=15):
+            print("CRITICAL: Game creation lock already held - another process is creating a game. Skipping.")
+            # Check if a game was created by the other process
+            existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+            if existing_game:
+                return existing_game
+            return None
+        lock_held_by_this_call = True
+    
     try:
-        allow_system_account = getattr(settings, 'allow_system_account', False)
-        if allow_system_account:
-            add_fake_users_to_game_immediately(new_game)
-    except Exception as e:
-        # If fake user addition fails, log and continue
-        print(f"Warning: Failed to add fake users in create_new_game_after_completion: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    return new_game
+        # CRITICAL: Double-check no existing games (another process might have created one)
+        existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+        if existing_game:
+            print(f"CRITICAL: Found existing game {existing_game.id} (status: {existing_game.status}) - not creating new game")
+            return existing_game
+        
+        # Add delay before creating new game to give real players time to join card selection
+        import time
+        time.sleep(5)  # 5 second delay before creating new game
+        
+        # CRITICAL: Triple-check after delay (another process might have created one during delay)
+        existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+        if existing_game:
+            print(f"CRITICAL: Found existing game {existing_game.id} after delay - not creating new game")
+            return existing_game
+        
+        # Get settings from database
+        settings = GameSettings.get_settings()
+        # Create new game with bet amount from settings
+        new_game = Game.objects.create(
+            status='waiting',
+            bet_amount=settings.bid_amount,
+            derash_amount=0
+        )
+        
+        print(f"Created new waiting game {new_game.id} after completion of game {completed_game.id}")
+        
+        # Add fake users immediately if system accounts are enabled
+        try:
+            allow_system_account = getattr(settings, 'allow_system_account', False)
+            if allow_system_account:
+                add_fake_users_to_game_immediately(new_game)
+        except Exception as e:
+            # If fake user addition fails, log and continue
+            print(f"Warning: Failed to add fake users in create_new_game_after_completion: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return new_game
+    finally:
+        # Only release lock if we acquired it in this call
+        if lock_held_by_this_call:
+            release_game_creation_lock()
 
 
 def check_and_create_new_game():
-    """Check if we need to create a new game"""
-    # Check if there's already a waiting or active game
-    existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
-    
-    if existing_game:
-        # Ensure fake users are added if system accounts are enabled
-        if existing_game.status == 'waiting':
+    """Check if we need to create a new game
+    CRITICAL: Uses lock to prevent multiple game creation
+    """
+    try:
+        from .redis_utils import acquire_game_creation_lock, release_game_creation_lock
+        
+        # CRITICAL: First check without lock (fast path)
+        existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+        
+        if existing_game:
+            # Ensure fake users are added if system accounts are enabled
+            if existing_game.status == 'waiting':
+                try:
+                    settings = GameSettings.get_settings()
+                    allow_system_account = getattr(settings, 'allow_system_account', False)
+                    if allow_system_account:
+                        from .fake_user_manager import get_fake_user_count_for_game
+                        fake_count = get_fake_user_count_for_game(existing_game)
+                        if fake_count == 0:
+                            add_fake_users_to_game_immediately(existing_game)
+                except Exception as e:
+                    # If fake user addition fails, log and continue
+                    print(f"Warning: Failed to add fake users in check_and_create_new_game: {e}")
+                    import traceback
+                    traceback.print_exc()
+            return existing_game
+        
+        # CRITICAL: Acquire lock before creating new game
+        if not acquire_game_creation_lock(timeout=15):
+            print("CRITICAL: Game creation lock already held - another process is creating a game. Checking for existing game...")
+            # Wait a bit and check if a game was created by the other process
+            import time
+            time.sleep(0.5)  # Short wait
+            existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+            if existing_game:
+                print(f"CRITICAL: Found existing game {existing_game.id} after lock wait - returning it")
+                return existing_game
+            # If still no game, return None (don't create duplicate)
+            print("CRITICAL: No game found after lock wait - another process should be creating it")
+            return None
+        
+        try:
+            # CRITICAL: Double-check after acquiring lock (another process might have created one)
+            existing_game = Game.objects.filter(status__in=['waiting', 'active']).first()
+            if existing_game:
+                print(f"CRITICAL: Found existing game {existing_game.id} after acquiring lock - not creating new game")
+                return existing_game
+            
+            # Get the most recent completed game
+            last_completed = Game.objects.filter(status='completed').order_by('-completed_at').first()
+            
+            if last_completed:
+                # Create new game with bet amount from settings (pass lock_acquired=True since we already have the lock)
+                # NOTE: create_new_game_after_completion has the 5-second delay built in
+                result = create_new_game_after_completion(last_completed, lock_acquired=True)
+                return result
+            
+            # If no games exist at all, create a new one with bet amount from settings
+            # NOTE: No delay here - this is for initial game creation, not after completion
+            settings = GameSettings.get_settings()
+            new_game = Game.objects.create(
+                status='waiting',
+                bet_amount=settings.bid_amount,
+                derash_amount=0
+            )
+            
+            print(f"Created new waiting game {new_game.id} (no previous games)")
+            
+            # Add fake users immediately if system accounts are enabled
             try:
-                settings = GameSettings.get_settings()
                 allow_system_account = getattr(settings, 'allow_system_account', False)
                 if allow_system_account:
-                    from .fake_user_manager import get_fake_user_count_for_game
-                    fake_count = get_fake_user_count_for_game(existing_game)
-                    if fake_count == 0:
-                        add_fake_users_to_game_immediately(existing_game)
+                    add_fake_users_to_game_immediately(new_game)
             except Exception as e:
                 # If fake user addition fails, log and continue
-                print(f"Warning: Failed to add fake users in check_and_create_new_game: {e}")
+                print(f"Warning: Failed to add fake users in check_and_create_new_game (new game): {e}")
                 import traceback
                 traceback.print_exc()
-        return existing_game
-    
-    # Get the most recent completed game
-    last_completed = Game.objects.filter(status='completed').order_by('-completed_at').first()
-    
-    if last_completed:
-        # Create new game with bet amount from settings
-        return create_new_game_after_completion(last_completed)
-    
-    # If no games exist at all, create a new one with bet amount from settings
-    settings = GameSettings.get_settings()
-    new_game = Game.objects.create(
-        status='waiting',
-        bet_amount=settings.bid_amount,
-        derash_amount=0
-    )
-    
-    # Add fake users immediately if system accounts are enabled
-    try:
-        allow_system_account = getattr(settings, 'allow_system_account', False)
-        if allow_system_account:
-            add_fake_users_to_game_immediately(new_game)
+            
+            return new_game
+        finally:
+            # Always release the lock
+            release_game_creation_lock()
     except Exception as e:
-        # If fake user addition fails, log and continue
-        print(f"Warning: Failed to add fake users in check_and_create_new_game (new game): {e}")
+        # Catch any exceptions and log them
+        print(f"ERROR in check_and_create_new_game: {e}")
         import traceback
         traceback.print_exc()
-    
-    return new_game
+        # Return None on error - view will handle it
+        return None
 
 
 def add_fake_users_to_game_immediately(game):

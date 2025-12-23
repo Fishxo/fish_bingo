@@ -712,7 +712,21 @@ export default {
         // Handle multiple winners (new format)
         if (data.winners && data.winners.length > 0) {
           this.winners = data.winners
-          this.winner = data.winners[0].winner // Primary winner for backward compatibility
+          // For fake users, winner might be null but username is in the winner data
+          // Use winner object if available, otherwise create one from username
+          if (data.winners[0].winner) {
+            this.winner = data.winners[0].winner
+          } else if (data.winners[0].username) {
+            // Fake user - create winner object from username
+            this.winner = {
+              id: null,
+              username: data.winners[0].username,
+              name: data.winners[0].username,
+              is_fake: true
+            }
+          } else {
+            this.winner = data.winners[0].winner || null
+          }
           this.winnerPrize = data.prize || data.winners[0].prize || 0
           this.totalPrize = data.total_prize || null
           
@@ -751,7 +765,20 @@ export default {
         } else {
           // Single winner (backward compatible format)
           this.winners = null
-          this.winner = data.winner
+          // For fake users, winner might be null but username is available
+          if (data.winner) {
+            this.winner = data.winner
+          } else if (data.username) {
+            // Fake user - create winner object from username
+            this.winner = {
+              id: null,
+              username: data.username,
+              name: data.username,
+              is_fake: data.is_fake || false
+            }
+          } else {
+            this.winner = data.winner || null
+          }
           this.winnerPrize = data.prize || this.game?.total_derash || 0
           
           // Set winnerCard for single winner format
