@@ -194,6 +194,10 @@ def call_number(game: Game, number: int) -> CalledNumber:
     from .redis_utils import add_called_number_to_redis
     add_called_number_to_redis(game.id, number)
     
+    # PHASE 4 OPTIMIZATION: Sync game state to Redis (status, call_count)
+    from .redis_utils import sync_game_state_to_redis
+    sync_game_state_to_redis(game)
+    
     # Invalidate Django cache (for backward compatibility)
     cache.delete(f'called_numbers:{game.id}')
     cache.delete('game:current')
@@ -410,11 +414,25 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         return (False, None, "Another bingo claim is being processed. Please try again.")
     
     try:
-        # CRITICAL: Always get fresh game object from database
-        game = Game.objects.get(id=game.id)
-        game.refresh_from_db()
+        # PHASE 4 OPTIMIZATION: Check game state from Redis cache first (faster than DB)
+        from .redis_utils import get_game_state_from_redis
+        cached_state = get_game_state_from_redis(game.id)
         
-        # Check if game is still active
+        # If cache has status, use it (faster check)
+        if cached_state and 'status' in cached_state:
+            if cached_state['status'] != 'active':
+                if cached_state['status'] == 'completed':
+                    return (False, None, "Game is already completed")
+                return (False, None, f"Game is not active (status: {cached_state['status']})")
+        
+        # CRITICAL: Always get fresh game object from database for critical operations
+        game = Game.objects.get(id=game.id)
+        
+        # Only refresh if cache didn't have status (fallback)
+        if not cached_state or 'status' not in cached_state:
+            game.refresh_from_db()
+        
+        # Double-check game is still active (using DB as source of truth)
         if game.status != 'active':
             if game.status == 'completed':
                 return (False, None, "Game is already completed")
@@ -483,10 +501,18 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                     print(f"CRITICAL: Real user {real_card.user.id} has bingo! Rejecting fake user claim (free_play is OFF).")
                     return (False, None, "Real user has priority (free_play is OFF)")
         
-        # CRITICAL: Double-check game is still active (another process might have completed it)
-        game.refresh_from_db()
-        if game.status != 'active':
-            return (False, None, "Game was completed by another player")
+        # PHASE 4 OPTIMIZATION: Check game state from Redis cache (faster than DB refresh)
+        cached_state = get_game_state_from_redis(game.id)
+        if cached_state and 'status' in cached_state and cached_state['status'] != 'active':
+            # Cache says game is not active, but verify with DB
+            game.refresh_from_db()
+            if game.status != 'active':
+                return (False, None, "Game was completed by another player")
+        else:
+            # Cache miss or status not in cache, refresh from DB
+            game.refresh_from_db()
+            if game.status != 'active':
+                return (False, None, "Game was completed by another player")
         
         # Use Redis for 1-second winner window (race-condition safe)
         success, is_first_winner = try_acquire_bingo_window(game.id)
@@ -525,6 +551,10 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                 game.refresh_from_db()
                 print(f"WARNING: Game {game.id} was already completed by another process")
                 return (False, None, "Game was already completed")
+            
+            # PHASE 4 OPTIMIZATION: Sync game state to Redis immediately (before refresh)
+            from .redis_utils import sync_game_state_to_redis
+            sync_game_state_to_redis(game)
             
             # Refresh to get updated object
             game.refresh_from_db()
@@ -909,6 +939,10 @@ def start_game(game: Game) -> bool:
     game.status = 'active'
     game.started_at = timezone.now()
     game.save()
+    
+    # PHASE 4 OPTIMIZATION: Sync game state to Redis immediately when game starts
+    from .redis_utils import sync_game_state_to_redis
+    sync_game_state_to_redis(game)
     
     # Final refresh to ensure all values are synced
     game.refresh_from_db()

@@ -493,9 +493,32 @@ def task_auto_call_numbers(self, game_id: int):
             return {'success': True, 'skipped': True, 'reason': 'Lock already held'}
         
         try:
-            game = Game.objects.get(id=game_id)
-            print(f"Game {game_id}: Status = {game.status}, Winner = {game.winner}")
+            # PHASE 4 OPTIMIZATION: Check game state from Redis cache first (faster than DB)
+            from .redis_utils import get_game_state_from_redis
+            cached_state = get_game_state_from_redis(game_id)
             
+            # If cache has status, use it for fast check
+            if cached_state and 'status' in cached_state:
+                if cached_state['status'] != 'active':
+                    print(f"Game {game_id}: Not active (status: {cached_state['status']}), stopping number calling")
+                    release_number_calling_lock(game_id)
+                    return {'error': 'Game is not active', 'stopped': True}
+                
+                # Check winner from cache if available
+                if cached_state.get('winner_id'):
+                    print(f"Game {game_id}: Already has winner (from cache), stopping number calling")
+                    release_number_calling_lock(game_id)
+                    return {'error': 'Game already has winner', 'stopped': True}
+            
+            # Get game from DB (needed for operations, but we've already checked status from cache)
+            game = Game.objects.get(id=game_id)
+            
+            # Only refresh if cache didn't have status (fallback)
+            if not cached_state or 'status' not in cached_state:
+                game.refresh_from_db()
+                print(f"Game {game_id}: Status = {game.status}, Winner = {game.winner}")
+            
+            # Double-check with DB (source of truth)
             if game.status != 'active':
                 print(f"Game {game_id}: Not active (status: {game.status}), stopping number calling")
                 release_number_calling_lock(game_id)
@@ -525,12 +548,26 @@ def task_auto_call_numbers(self, game_id: int):
             if not remaining:
                 # All numbers called, wait a bit for BINGO claims
                 time.sleep(5)
+                
+                # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'status' in cached_state:
+                    if cached_state['status'] != 'active' or cached_state.get('winner_id'):
+                        # Game completed or has winner, no need to refresh
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'message': 'All numbers called, game completed', 'stopped': True}
+                
+                # Refresh from DB to verify
                 game.refresh_from_db()
                 if game.status == 'active' and not game.winner:
                     # No winner, end the game
                     game.status = 'completed'
                     game.completed_at = timezone.now()
                     game.save()
+                    
+                    # PHASE 4 OPTIMIZATION: Sync game state to Redis immediately
+                    from .redis_utils import sync_game_state_to_redis, invalidate_game_state_cache
+                    sync_game_state_to_redis(game)
                     
                     # Cleanup Redis keys for this game
                     from .redis_utils import cleanup_game_redis_keys
@@ -580,6 +617,7 @@ def task_auto_call_numbers(self, game_id: int):
             # CRITICAL: time_between_calls is already fetched from cached settings above
             try:
                 # Double-check that number hasn't been called by another instance (race condition protection)
+                # Note: We still need DB check for called numbers (not cached in game state)
                 game.refresh_from_db()
                 if CalledNumber.objects.filter(game=game, number=number).exists():
                     print(f"WARNING: Number {number} was already called (race condition detected), skipping")
@@ -592,8 +630,14 @@ def task_auto_call_numbers(self, game_id: int):
                 
                 # CRITICAL FIX: Broadcast number_called BEFORE checking for bingo
                 # This ensures users see the number even if a fake user wins immediately
-                # Refresh game from database to get updated current_call_count
-                game.refresh_from_db()
+                # PHASE 4 OPTIMIZATION: Get call_count from Redis cache (faster than DB refresh)
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'call_count' in cached_state:
+                    call_count = cached_state['call_count']
+                else:
+                    # Cache miss, refresh from DB
+                    game.refresh_from_db()
+                    call_count = game.current_call_count
                 
                 # Broadcast number called FIRST, before checking for winners
                 try:
@@ -604,7 +648,7 @@ def task_auto_call_numbers(self, game_id: int):
                             'data': {
                                 'number': called_number.number,
                                 'letter': called_number.letter,
-                                'call_count': game.current_call_count
+                                'call_count': call_count
                             }
                         }
                     )
@@ -618,6 +662,15 @@ def task_auto_call_numbers(self, game_id: int):
                 
                 # CRITICAL FIX: Check if game already has a winner (real user) BEFORE processing fake cards
                 # This prevents fake users from winning after a real user has already won
+                # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'status' in cached_state:
+                    if cached_state['status'] == 'completed' or cached_state.get('winner_id'):
+                        print(f"Game {game_id}: Already has winner or is completed (from cache), skipping fake user processing")
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'message': 'Game already has winner', 'stopped': True}
+                
+                # Verify with DB (source of truth)
                 game.refresh_from_db()
                 if game.status == 'completed' or game.winner:
                     print(f"Game {game_id}: Already has winner or is completed, skipping fake user processing")
@@ -638,6 +691,15 @@ def task_auto_call_numbers(self, game_id: int):
                 
                 # CRITICAL FIX: Check again if game has a winner after processing fake cards
                 # A real user might have won while we were processing fake cards
+                # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'status' in cached_state:
+                    if cached_state['status'] == 'completed' or cached_state.get('winner_id'):
+                        print(f"Game {game_id}: Winner found after processing fake cards (from cache), stopping")
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'message': 'Game has winner', 'stopped': True}
+                
+                # Verify with DB
                 game.refresh_from_db()
                 if game.status == 'completed' or game.winner:
                     print(f"Game {game_id}: Winner found after processing fake cards, stopping")
@@ -673,6 +735,16 @@ def task_auto_call_numbers(self, game_id: int):
                     time.sleep(3)
                     
                     # Double-check game is still active after delay (real user might have claimed)
+                    # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                    cached_state = get_game_state_from_redis(game_id)
+                    if cached_state and 'status' in cached_state:
+                        if cached_state['status'] != 'active' or cached_state.get('winner_id'):
+                            print(f"Game {game_id}: Already completed or has winner after delay (from cache), skipping fake user claim")
+                            release_number_calling_lock(game_id)
+                            task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
+                            return {'success': True, 'game_completed_during_delay': True}
+                    
+                    # Verify with DB
                     game.refresh_from_db()
                     if game.status != 'active' or game.winner:
                         print(f"Game {game_id}: Already completed or has winner after delay, skipping fake user claim")
@@ -712,6 +784,15 @@ def task_auto_call_numbers(self, game_id: int):
                 
                 # CRITICAL FIX: Check game status BEFORE triggering bingo check
                 # This prevents race conditions when a real user manually claims bingo
+                # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'status' in cached_state:
+                    if cached_state['status'] == 'completed' or cached_state.get('winner_id'):
+                        print(f"CRITICAL: Game {game_id}: Game already completed or has winner before bingo check (from cache), stopping immediately")
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'number': number, 'stopped': True, 'reason': 'Game already completed'}
+                
+                # Verify with DB
                 game.refresh_from_db()
                 print(f"CRITICAL task_auto_call_numbers: Before bingo check - Game {game_id} status={game.status}, winner={game.winner}")
                 if game.status == 'completed' or game.winner:
@@ -726,6 +807,16 @@ def task_auto_call_numbers(self, game_id: int):
                 # CRITICAL FIX: Check if game was completed by a real user after calling number
                 # Wait a brief moment for bingo checking to complete, then check game status
                 time.sleep(0.5)  # Small delay to allow bingo checking task to process
+                
+                # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+                cached_state = get_game_state_from_redis(game_id)
+                if cached_state and 'status' in cached_state:
+                    if cached_state['status'] == 'completed' or cached_state.get('winner_id'):
+                        print(f"Game {game_id}: Game completed or has winner after calling number {number} (from cache), stopping number calling")
+                        release_number_calling_lock(game_id)
+                        return {'success': True, 'number': number, 'stopped': True, 'reason': 'Game completed'}
+                
+                # Verify with DB
                 game.refresh_from_db()
                 
                 # If game is now completed or has a winner, stop calling numbers immediately
@@ -743,6 +834,15 @@ def task_auto_call_numbers(self, game_id: int):
             
             # CRITICAL FIX: Double-check game status before scheduling next call
             # This prevents scheduling calls after game has ended
+            # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
+            cached_state = get_game_state_from_redis(game_id)
+            if cached_state and 'status' in cached_state:
+                if cached_state['status'] != 'active' or cached_state.get('winner_id'):
+                    print(f"Game {game_id}: Game status changed to {cached_state['status']} or has winner (from cache), stopping number calling")
+                    release_number_calling_lock(game_id)
+                    return {'success': True, 'stopped': True, 'reason': 'Game ended'}
+            
+            # Verify with DB
             game.refresh_from_db()
             if game.status != 'active' or game.winner:
                 print(f"Game {game_id}: Game status changed to {game.status} or has winner, stopping number calling")
