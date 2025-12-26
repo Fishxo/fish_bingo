@@ -37,9 +37,13 @@ EXPOSE 8000
 # Copy superuser creation script
 COPY backend/create_prod_superuser.py /app/create_prod_superuser.py
 
-# Copy startup script that runs both Django app and Telegram bot
+# Copy all startup scripts for different process groups
 COPY start-app.sh /start-app.sh
-RUN chmod +x /start-app.sh
+COPY start-gameplay.sh /start-gameplay.sh
+COPY start-registration.sh /start-registration.sh
+COPY start-admin.sh /start-admin.sh
+COPY start-celery.sh /start-celery.sh
+RUN chmod +x /start-app.sh /start-gameplay.sh /start-registration.sh /start-admin.sh /start-celery.sh
 
 # Create entrypoint script
 RUN echo '#!/bin/bash\nset -e\necho "Running migrations..."\npython manage.py migrate --noinput\necho "Creating superuser if needed..."\npython create_prod_superuser.py || echo "Superuser creation skipped"\necho "Collecting static files (including frontend assets)..."\npython manage.py collectstatic --noinput || true\necho "Verifying frontend files..."\nls -la /app/frontend_dist/ || echo "Frontend dist not found"\nls -la /app/frontend_dist/assets/ 2>/dev/null || echo "Frontend assets not found"\necho "Starting server..."\nexec "$@"' > /entrypoint.sh && chmod +x /entrypoint.sh

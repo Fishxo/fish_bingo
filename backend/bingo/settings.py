@@ -79,6 +79,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',  # For static files in production
     'corsheaders.middleware.CorsMiddleware',
+    'api.rate_limit_middleware.RateLimitMiddleware',  # Rate limiting for promo-safe registration
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -281,13 +282,49 @@ CELERY_TIMEZONE = 'UTC'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes soft limit
-CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Process one task at a time for game operations
+CELERY_WORKER_PREFETCH_MULTIPLIER = 2  # Allow 2 tasks prefetched (set via command line, but keep for reference)
 CELERY_TASK_ACKS_LATE = True  # Acknowledge tasks after completion
+
+# Queue configuration - CRITICAL for preventing gameplay starvation
+# Separate queues ensure gameplay tasks are never blocked by registration/reward tasks
+# Note: Task names use the format 'app_name.tasks.task_function_name'
+CELERY_TASK_ROUTES = {
+    # Gameplay tasks (critical, time-sensitive) -> gameplay queue
+    'api.tasks.task_call_number': {'queue': 'gameplay'},
+    'api.tasks.task_auto_call_numbers': {'queue': 'gameplay'},
+    'api.tasks.task_check_bingo_for_all_cards': {'queue': 'gameplay'},
+    'api.tasks.task_process_bingo_winners': {'queue': 'gameplay'},
+    
+    # NEW Redis-first gameplay tasks -> gameplay queue (CRITICAL)
+    'api.tasks.task_call_next_number': {'queue': 'gameplay'},
+    'api.tasks.task_mark_cards_for_number': {'queue': 'gameplay'},
+    'api.tasks.task_check_bingo_for_number': {'queue': 'gameplay'},
+    'api.tasks.task_finalize_game': {'queue': 'gameplay'},
+    'api.tasks.task_broadcast_winner': {'queue': 'gameplay'},
+    'api.tasks.task_reset_game_runtime': {'queue': 'gameplay'},
+    'api.tasks.task_check_game_status_after_number': {'queue': 'gameplay'},
+    
+    # Registration/reward tasks (can be slower, DB-heavy) -> registration queue
+    'api.tasks.task_process_registration_rewards': {'queue': 'registration'},
+    
+    # Other tasks -> default queue
+    # (card generation, refunds, fake users, etc.)
+}
+
+# Ensure queues are created automatically
+CELERY_TASK_CREATE_MISSING_QUEUES = True
+
+# IMPORTANT: If queues don't exist or workers aren't listening, tasks will fail
+# The worker in start-celery.sh must listen to: gameplay,default,registration
+
+# Default queue for tasks without explicit routing
+CELERY_TASK_DEFAULT_QUEUE = 'default'
+CELERY_TASK_DEFAULT_EXCHANGE = 'default'
+CELERY_TASK_DEFAULT_ROUTING_KEY = 'default'
 
 # Memory optimization settings
 CELERY_WORKER_MAX_TASKS_PER_CHILD = 50  # Restart worker after 50 tasks to prevent memory leaks
 CELERY_WORKER_MAX_MEMORY_PER_CHILD = 200000  # Kill worker if it exceeds 200MB (in KB)
-CELERY_WORKER_POOL = 'solo'  # Use solo pool (single-threaded) to reduce memory usage
 CELERY_TASK_IGNORE_RESULT = True  # Don't store task results to save memory
 CELERY_RESULT_EXPIRES = 3600  # Expire results after 1 hour
 

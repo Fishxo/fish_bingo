@@ -5,7 +5,7 @@ from celery import shared_task
 from django.utils import timezone
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
-from .models import Game, GameCard, CalledNumber, User
+from .models import Game, GameCard, CalledNumber, User, FakeUserGameCard
 from .game_logic import call_number, check_bingo, claim_bingo, generate_bingo_card, create_game_card
 from decimal import Decimal
 import random
@@ -16,7 +16,17 @@ from typing import List
 channel_layer = get_channel_layer()
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, queue='gameplay', name='api.tasks.test_celery_connection')
+def test_celery_connection(self):
+    """Simple test task to verify Celery is working"""
+    print("✅ CELERY IS WORKING! Test task executed successfully!")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("✅ CELERY IS WORKING! Test task executed successfully!")
+    return {'success': True, 'message': 'Celery is working'}
+
+
+@shared_task(bind=True, max_retries=3, queue='gameplay')
 def task_call_number(self, game_id: int, number: int):
     """
     Background task to call a number in a game.
@@ -94,7 +104,7 @@ def _get_card_current_mode(card):
     return last_mode_entry.get('mode', 'manual')
 
 
-@shared_task(bind=True)
+@shared_task(bind=True, queue='gameplay')
 def task_check_bingo_for_all_cards(self, game_id: int):
     """
     Background task to check all cards in a game for bingo patterns.
@@ -235,7 +245,7 @@ def task_check_bingo_for_all_cards(self, game_id: int):
         return {'error': str(e)}
 
 
-@shared_task(bind=True)
+@shared_task(bind=True, queue='gameplay')
 def task_process_bingo_winners(self, game_id: int):
     """
     Process all bingo winners after 1-second window expires.
@@ -296,6 +306,10 @@ def task_process_bingo_winners(self, game_id: int):
         # Award prizes to real winners only (fake users don't get prizes)
         print(f"Processing {all_winner_count} winners ({real_winner_count} real, {len(fake_winner_cards)} fake) for game {game_id}, total prize: {total_prize}, prize per real winner: {prize_per_winner}")
         
+        # CRITICAL FIX: Use atomic transaction and F() expressions for balance updates
+        from django.db import transaction
+        from django.db.models import F
+        
         for winner_card in real_winner_cards:
             # Check if transaction already exists (to prevent double-payment)
             existing_transaction = Transaction.objects.filter(
@@ -305,22 +319,35 @@ def task_process_bingo_winners(self, game_id: int):
             ).first()
             
             if not existing_transaction:
-                print(f"Awarding prize {prize_per_winner} to user {winner_card.user.id} (card {winner_card.card_number})")
-                winner_card.user.refresh_from_db()
-                old_balance = winner_card.user.balance
-                winner_card.user.balance = Decimal(str(winner_card.user.balance)) + prize_per_winner
-                winner_card.user.save()
-                
-                Transaction.objects.create(
-                    user=winner_card.user,
-                    transaction_type='win',
-                    amount=prize_per_winner,
-                    game=game,
-                    description=f'Won game {game.id} (split among {real_winner_count} real winners) with card {winner_card.card_number}'
-                )
-                print(f"User {winner_card.user.id} balance updated: {old_balance} -> {winner_card.user.balance}")
+                try:
+                    with transaction.atomic():
+                        # Use F() expression for atomic balance update (prevents race conditions)
+                        user = User.objects.select_for_update().get(id=winner_card.user.id)
+                        old_balance = user.balance
+                        
+                        # Atomic balance update using F() expression
+                        User.objects.filter(id=user.id).update(balance=F('balance') + prize_per_winner)
+                        
+                        # Refresh to get updated balance
+                        user.refresh_from_db()
+                        
+                        # Create transaction record
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type='win',
+                            amount=prize_per_winner,
+                            game=game,
+                            description=f'Won game {game.id} (split among {real_winner_count} real winners) with card {winner_card.card_number}'
+                        )
+                        
+                        print(f"✅ Awarded prize {prize_per_winner} to user {user.id} (card {winner_card.card_number}), balance: {old_balance} -> {user.balance}")
+                except Exception as e:
+                    print(f"❌ ERROR awarding prize to user {winner_card.user.id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue processing other winners even if one fails
             else:
-                print(f"User {winner_card.user.id} already received prize (transaction exists)")
+                print(f"⚠️ User {winner_card.user.id} already received prize (transaction exists)")
         
         # Broadcast final winners list with correct prize split
         from .serializers import UserSerializer
@@ -470,7 +497,7 @@ def task_process_bingo_winners(self, game_id: int):
         return {'error': str(e)}
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, max_retries=3, queue='gameplay')
 def task_auto_call_numbers(self, game_id: int):
     """
     Background task to automatically call numbers for a game.
@@ -481,7 +508,7 @@ def task_auto_call_numbers(self, game_id: int):
     try:
         # CRITICAL: Acquire lock to ensure only one instance calls numbers at a time
         from .redis_utils import acquire_number_calling_lock, release_number_calling_lock
-        if not acquire_number_calling_lock(game_id, timeout=10):
+        if not acquire_number_calling_lock(game_id, timeout=30):
             # Another instance is already calling a number, skip this execution
             print(f"Number calling lock already held for game {game_id}, skipping this execution")
             # Reschedule for next call using cached settings from game start
@@ -538,16 +565,25 @@ def task_auto_call_numbers(self, game_id: int):
             # Get current called numbers
             called_numbers = list(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
             
-            # If this is the first call, wait 3 seconds after game starts (matches frontend countdown)
+            # If this is the first call, schedule the actual first number call with 3-second delay
+            # CRITICAL FIX: Use Celery countdown instead of time.sleep() to avoid blocking worker
+            # But we need to actually call the number, not just reschedule
             if len(called_numbers) == 0:
-                time.sleep(3)
+                release_number_calling_lock(game_id)
+                # Schedule first number call with 3-second delay (matches frontend countdown)
+                task_call_first_number.apply_async(args=[game_id], countdown=3)
+                return {'success': True, 'scheduled_first_call': True, 'delay': 3}
             
             available_numbers = list(range(1, 76))
             remaining = [n for n in available_numbers if n not in called_numbers]
             
             if not remaining:
-                # All numbers called, wait a bit for BINGO claims
-                time.sleep(5)
+                # All numbers called, schedule check after 5 seconds for BINGO claims
+                # CRITICAL FIX: Use Celery countdown instead of time.sleep() to avoid blocking worker
+                release_number_calling_lock(game_id)
+                # Schedule final check after 5 seconds
+                task_check_all_numbers_called.apply_async(args=[game_id], countdown=5)
+                return {'success': True, 'all_numbers_called': True, 'checking_for_winners': True}
                 
                 # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
                 cached_state = get_game_state_from_redis(game_id)
@@ -729,10 +765,15 @@ def task_auto_call_numbers(self, game_id: int):
                     # Fake users are treated as passive event responders, not game controllers
                     from .game_logic import claim_bingo_unified
                     
-                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) has bingo - waiting 3 seconds before claiming")
+                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) has bingo - scheduling claim after 3 seconds")
                     
-                    # Add 3-second delay before fake user claims bingo (gives real users time to claim first)
-                    time.sleep(3)
+                    # CRITICAL FIX: Use Celery countdown instead of time.sleep() to avoid blocking worker
+                    # Schedule fake user claim after 3-second delay (gives real users time to claim first)
+                    release_number_calling_lock(game_id)
+                    task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=3)
+                    # Schedule next number call
+                    task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
+                    return {'success': True, 'fake_winner_scheduled': True, 'fake_card_id': fake_card.id}
                     
                     # Double-check game is still active after delay (real user might have claimed)
                     # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
@@ -805,8 +846,11 @@ def task_auto_call_numbers(self, game_id: int):
                 task_check_bingo_for_all_cards.delay(game_id)
                 
                 # CRITICAL FIX: Check if game was completed by a real user after calling number
-                # Wait a brief moment for bingo checking to complete, then check game status
-                time.sleep(0.5)  # Small delay to allow bingo checking task to process
+                # Schedule a check after 0.5 seconds to allow bingo checking task to process
+                # CRITICAL FIX: Use Celery countdown instead of time.sleep() to avoid blocking worker
+                release_number_calling_lock(game_id)
+                task_check_game_status_after_number.apply_async(args=[game_id, number], countdown=0.5)
+                return {'success': True, 'number': number, 'status_check_scheduled': True}
                 
                 # PHASE 4 OPTIMIZATION: Check game state from Redis cache first
                 cached_state = get_game_state_from_redis(game_id)
@@ -874,6 +918,132 @@ def task_auto_call_numbers(self, game_id: int):
         if self.request.retries < self.max_retries:
             raise self.retry(exc=e, countdown=5)
         return {'error': str(e), 'stopped': True}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_call_first_number(self, game_id: int):
+    """
+    Call the first number after initial 3-second delay.
+    CRITICAL FIX: Separate task to handle first call delay without blocking worker.
+    This prevents infinite loop where task_auto_call_numbers keeps rescheduling itself.
+    """
+    try:
+        from .redis_utils import acquire_number_calling_lock, release_number_calling_lock, get_game_state_from_redis
+        from .models import GameSettings
+        
+        # Check game state from Redis cache first
+        cached_state = get_game_state_from_redis(game_id)
+        if cached_state and 'status' in cached_state:
+            if cached_state['status'] != 'active':
+                return {'error': 'Game is not active', 'stopped': True}
+            if cached_state.get('winner_id'):
+                return {'error': 'Game already has winner', 'stopped': True}
+        
+        # Get game
+        game = Game.objects.get(id=game_id)
+        if game.status != 'active' or game.winner:
+            return {'error': 'Game is not active or has winner', 'stopped': True}
+        
+        # Check if numbers already called (another process might have started)
+        called_numbers = list(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
+        if len(called_numbers) > 0:
+            # Numbers already being called, just continue with normal flow
+            settings = GameSettings.get_settings(game_id=game_id)
+            time_between_calls = settings.time_between_calls or 3
+            task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
+            return {'success': True, 'already_started': True}
+        
+        # Acquire lock and call first number
+        if not acquire_number_calling_lock(game_id, timeout=30):
+            # Lock held, reschedule
+            settings = GameSettings.get_settings(game_id=game_id)
+            time_between_calls = settings.time_between_calls or 3
+            task_auto_call_numbers.apply_async(args=[game_id], countdown=1)
+            return {'success': True, 'lock_held': True}
+        
+        try:
+            # Call first number - use normal number calling logic
+            from .fake_user_manager import get_safe_number_to_call
+            import random
+            
+            available_numbers = list(range(1, 76))
+            number = random.choice(available_numbers)
+            
+            # Double-check number not called (shouldn't happen, but safety check)
+            if CalledNumber.objects.filter(game=game, number=number).exists():
+                # Pick another number
+                remaining = [n for n in available_numbers if n not in [number]]
+                if remaining:
+                    number = random.choice(remaining)
+                else:
+                    release_number_calling_lock(game_id)
+                    return {'error': 'All numbers already called'}
+            
+            # Call the number
+            called_number = call_number(game, number)
+            
+            # Get call count from cache or DB
+            cached_state = get_game_state_from_redis(game_id)
+            if cached_state and 'call_count' in cached_state:
+                call_count = cached_state['call_count']
+            else:
+                game.refresh_from_db()
+                call_count = game.current_call_count
+            
+            # Broadcast number called
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f'game_{game.id}',
+                    {
+                        'type': 'number_called',
+                        'data': {
+                            'number': called_number.number,
+                            'letter': called_number.letter,
+                            'call_count': call_count
+                        }
+                    }
+                )
+            except Exception as e:
+                print(f"WebSocket broadcast error: {e}")
+            
+            # Trigger fake card processing (non-blocking, separate task)
+            from .fake_user_manager import batch_mark_number_on_fake_cards
+            try:
+                updated_count, winners = batch_mark_number_on_fake_cards(game.id, number)
+                print(f"Batch processed {updated_count} fake cards for number {number}, found {len(winners)} winners")
+                
+                # Process fake winners if any (but don't block)
+                if winners:
+                    fake_card, pattern = winners[0]
+                    from .models import FakeUserGameCard
+                    fake_card = FakeUserGameCard.objects.get(id=fake_card.id)
+                    if not fake_card.is_winner:
+                        # Schedule fake user claim after 3-second delay
+                        task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=3)
+            except Exception as e:
+                print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
+            
+            # Trigger bingo check (non-blocking)
+            task_check_bingo_for_all_cards.delay(game_id)
+            
+            # Release lock
+            release_number_calling_lock(game_id)
+            
+            # Schedule next call
+            settings = GameSettings.get_settings(game_id=game_id)
+            time_between_calls = settings.time_between_calls or 3
+            
+            # Schedule status check after 0.5 seconds, which will schedule next call if game still active
+            task_check_game_status_after_number.apply_async(args=[game_id, number], countdown=0.5)
+            
+            return {'success': True, 'number': number, 'first_call': True, 'next_scheduled': True}
+        finally:
+            release_number_calling_lock(game_id)
+    except Exception as e:
+        print(f"Error in task_call_first_number: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
 
 
 @shared_task(bind=True)
@@ -1507,6 +1677,1255 @@ def task_select_fake_card_with_changes(self, game_id: int, fake_user_id: int):
         if self.request.retries < self.max_retries:
             raise self.retry(exc=e, countdown=2)
         return {'error': str(e), 'stopped': True}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_check_all_numbers_called(self, game_id: int):
+    """
+    Check if all numbers are called and handle game completion.
+    This is scheduled after all numbers are called to give time for BINGO claims.
+    CRITICAL FIX: Separate task to avoid blocking number calling.
+    """
+    try:
+        from .redis_utils import get_game_state_from_redis
+        game = Game.objects.get(id=game_id)
+        
+        # Check game state from Redis cache first
+        cached_state = get_game_state_from_redis(game_id)
+        if cached_state and 'status' in cached_state:
+            if cached_state['status'] != 'active' or cached_state.get('winner_id'):
+                # Game completed or has winner, no need to refresh
+                return {'success': True, 'message': 'Game already completed or has winner', 'stopped': True}
+        
+        # Refresh from DB to verify
+        game.refresh_from_db()
+        if game.status == 'active' and not game.winner:
+            # No winner, end the game
+            game.status = 'completed'
+            game.completed_at = timezone.now()
+            game.save()
+            
+            # Sync game state to Redis immediately
+            from .redis_utils import sync_game_state_to_redis, cleanup_game_redis_keys
+            sync_game_state_to_redis(game)
+            cleanup_game_redis_keys(game.id)
+            
+            # Invalidate cache
+            cache.delete('game:current')
+            
+            # Broadcast game ended
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f'game_{game.id}',
+                    {
+                        'type': 'game_ended',
+                        'data': {
+                            'game_id': game.id,
+                            'no_winner': True
+                        }
+                    }
+                )
+            except Exception as e:
+                print(f"WebSocket broadcast error: {e}")
+        
+        return {'success': True, 'message': 'All numbers called check completed'}
+    except Exception as e:
+        print(f"Error in task_check_all_numbers_called: {e}")
+        return {'error': str(e)}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_process_fake_user_claim(self, game_id: int, fake_card_id: int):
+    """
+    Process fake user bingo claim after delay.
+    CRITICAL FIX: Separate task to avoid blocking number calling with time.sleep().
+    """
+    try:
+        from .models import FakeUserGameCard
+        from .redis_utils import get_game_state_from_redis
+        from .game_logic import claim_bingo_unified
+        
+        # Check game state from Redis cache first
+        cached_state = get_game_state_from_redis(game_id)
+        if cached_state and 'status' in cached_state:
+            if cached_state['status'] != 'active' or cached_state.get('winner_id'):
+                print(f"Game {game_id}: Already completed or has winner (from cache), skipping fake user claim")
+                return {'success': True, 'game_completed_during_delay': True}
+        
+        # Verify with DB
+        game = Game.objects.get(id=game_id)
+        game.refresh_from_db()
+        if game.status != 'active' or game.winner:
+            print(f"Game {game_id}: Already completed or has winner, skipping fake user claim")
+            return {'success': True, 'game_completed_during_delay': True}
+        
+        # Get fake card
+        fake_card = FakeUserGameCard.objects.get(id=fake_card_id)
+        
+        # Double-check card is not already a winner
+        fake_card.refresh_from_db()
+        if fake_card.is_winner:
+            print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) already won - skipping")
+            return {'success': True, 'card_already_won': True}
+        
+        print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) claiming bingo after delay")
+        
+        # Call unified function for fake user
+        success, winning_pattern, error_message = claim_bingo_unified(fake_card, game, is_fake_user=True)
+        
+        if success:
+            print(f"SUCCESS: Fake user {fake_card.fake_user.name} claimed bingo successfully")
+            return {'success': True, 'fake_winner': True, 'stopped': True}
+        else:
+            print(f"Fake user claim failed: {error_message}")
+            return {'success': True, 'fake_claim_failed': True, 'reason': error_message}
+    except Exception as e:
+        print(f"Error in task_process_fake_user_claim: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay', name='api.tasks.task_call_next_number')
+def task_call_next_number(self, game_id: int):
+    """
+    EVENT-DRIVEN NUMBER CALLING - Redis-first architecture.
+    
+    This is the NEW freeze-proof number calling task:
+    - Redis is source of truth (no DB queries)
+    - Fast execution (<200ms)
+    - No locks, no sleeps, no blocking
+    - Fire-and-forget scheduling
+    
+    Flow:
+    1. Read game state from Redis
+    2. If not active or has winner → exit
+    3. If first call (no numbers called) → schedule with 3-second delay
+    4. Pick next number
+    5. Store in Redis
+    6. Broadcast via WebSocket
+    7. Schedule next call with countdown
+    8. Trigger bingo check (separate task)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🎯 task_call_next_number STARTED for game {game_id}")
+    print(f"🎯 task_call_next_number STARTED for game {game_id}")
+    
+    try:
+        from .redis_utils import (
+            get_game_live_state, add_called_number_live,
+            get_called_numbers_from_redis
+        )
+        from .models import GameSettings
+        import random
+        
+        logger.info(f"Game {game_id}: Reading Redis state...")
+        # Read game state from Redis (source of truth)
+        state = get_game_live_state(game_id)
+        logger.info(f"Game {game_id}: Redis state: {state}")
+        print(f"Game {game_id}: Redis state: {state}")
+        
+        # CRITICAL FIX: If state is missing, try to initialize it (resilience)
+        if not state or len(state) == 0:
+            logger.warning(f"⚠️ [CALL NUMBER] Game {game_id}: Redis state not found, attempting to initialize...")
+            print(f"⚠️ [CALL NUMBER] Game {game_id}: Redis state not found, attempting to initialize...")
+            
+            # Try to get game from DB to check status
+            try:
+                game = Game.objects.get(id=game_id)
+                if game.status == 'active':
+                    # Game is active but Redis state missing - try to initialize
+                    from .redis_utils import initialize_game_live_state
+                    from .models import GameSettings
+                    settings = GameSettings.get_settings()
+                    call_interval = settings.time_between_calls or 3
+                    
+                    init_success = initialize_game_live_state(game_id, "active", call_interval)
+                    if init_success:
+                        # Re-read state
+                        state = get_game_live_state(game_id)
+                        logger.info(f"✅ [CALL NUMBER] Game {game_id}: Redis state initialized, new state: {state}")
+                        print(f"✅ [CALL NUMBER] Game {game_id}: Redis state initialized")
+                    else:
+                        logger.error(f"❌ [CALL NUMBER] Game {game_id}: Failed to initialize Redis state")
+                        print(f"❌ [CALL NUMBER] Game {game_id}: Failed to initialize Redis state")
+                        return {'error': 'Game state not found in Redis and initialization failed', 'stopped': True}
+                else:
+                    # Game is not active - don't initialize, just stop
+                    logger.info(f"Game {game_id}: Game status is '{game.status}', not initializing Redis state")
+                    return {'error': f'Game is not active (status: {game.status})', 'stopped': True}
+            except Game.DoesNotExist:
+                logger.error(f"❌ [CALL NUMBER] Game {game_id}: Game not found in database")
+                return {'error': 'Game not found', 'stopped': True}
+            except Exception as e:
+                logger.error(f"❌ [CALL NUMBER] Game {game_id}: Error checking game status: {e}")
+                import traceback
+                traceback.print_exc()
+                return {'error': f'Error checking game: {str(e)}', 'stopped': True}
+        
+        # Final check - if state is still empty, stop
+        if not state or len(state) == 0:
+            logger.error(f"❌ [CALL NUMBER] Game {game_id}: Redis state still empty after initialization attempt")
+            print(f"❌ ERROR: Game {game_id} live state not found in Redis. Task stopping.")
+            return {'error': 'Game state not found in Redis', 'stopped': True}
+        
+        if state.get('status') != 'active':
+            print(f"Game {game_id}: Not active (status: {state.get('status')}), stopping")
+            return {'stopped': True, 'reason': f"Game not active (status: {state.get('status')})"}
+        
+        if state.get('winner_card_id'):
+            print(f"Game {game_id}: Already has winner, stopping")
+            return {'stopped': True, 'reason': 'Game already has winner'}
+        
+        # Get called numbers from Redis
+        called_numbers = get_called_numbers_from_redis(game_id)
+        
+        # CRITICAL: If this is the first call (no numbers called yet), proceed immediately
+        # The 3-second delay is handled by the initial call from start_game using countdown
+        # This task should only be called AFTER the initial delay, so we proceed to call the number
+        is_first_call = len(called_numbers) == 0
+        if is_first_call:
+            print(f"Game {game_id}: First number call - proceeding immediately")
+        
+        # Check if all numbers called
+        if len(called_numbers) >= 75:
+            # All numbers called - schedule final check
+            task_check_all_numbers_called.apply_async(args=[game_id], countdown=5)
+            return {'stopped': True, 'reason': 'All numbers called'}
+        
+        # Pick next number
+        available = [n for n in range(1, 76) if n not in called_numbers]
+        if not available:
+            print(f"Game {game_id}: No available numbers (all called)")
+            task_check_all_numbers_called.apply_async(args=[game_id], countdown=5)
+            return {'stopped': True, 'reason': 'No available numbers'}
+        
+        number = random.choice(available)
+        
+        # REDIS-FIRST: Add to Redis only (fast, no DB hit during gameplay)
+        # DB records will be created at game end for history
+        call_count = add_called_number_live(game_id, number)
+        if call_count == 0:
+            print(f"❌ ERROR: Failed to add number {number} to Redis for game {game_id}")
+            return {'error': 'Failed to add number to Redis', 'stopped': True}
+        
+        # Get letter for number
+        from .models import CalledNumber
+        letter = CalledNumber.get_letter_for_number(number)
+        
+        print(f"✅ Game {game_id}: Called number {number} ({letter}) - call #{call_count} [Redis-only, DB write at game end]")
+        
+        # Broadcast number called (non-blocking)
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f'game_{game_id}',
+                {
+                    'type': 'number_called',
+                    'data': {
+                        'number': number,
+                        'letter': letter,
+                        'call_count': call_count
+                    }
+                }
+            )
+        except Exception as e:
+            print(f"WebSocket broadcast error: {e}")
+        
+        # CRITICAL FIX: Mark cards FIRST, then check bingo (add delay to avoid race condition)
+        # Marking must complete before bingo check, otherwise bingo check sees unmarked cards
+        # We add a small delay to bingo check to ensure marking completes first
+        task_mark_cards_for_number.delay(game_id, number)
+        
+        # Add 0.3 second delay to bingo check to ensure marking has time to complete
+        # This is a workaround - ideally we'd chain tasks, but this is simpler and more reliable
+        task_check_bingo_for_number.apply_async(args=[game_id, number], countdown=0.3)
+        
+        # CRITICAL: Schedule next call ONLY if game is still active
+        # Re-check state before scheduling (game might have ended during this task)
+        state_after = get_game_live_state(game_id)
+        if state_after and state_after.get('status') == 'active' and not state_after.get('winner_card_id'):
+            call_interval = state_after.get('call_interval', 3)
+            # Use explicit task name to ensure routing works
+            from celery import current_app
+            task = current_app.tasks['api.tasks.task_call_next_number']
+            result = task.apply_async(args=[game_id], countdown=call_interval)
+            print(f"✅ Game {game_id}: Scheduled next call in {call_interval} seconds (task_id: {result.id})")
+            logger.info(f"Game {game_id}: Scheduled next call in {call_interval} seconds (task_id: {result.id})")
+            return {'success': True, 'number': number, 'call_count': call_count, 'next_in': call_interval}
+        else:
+            # Game ended or has winner - don't schedule next call
+            print(f"Game {game_id}: Stopped scheduling (status: {state_after.get('status') if state_after else 'None'}, winner: {state_after.get('winner_card_id') if state_after else 'None'})")
+            return {'success': True, 'number': number, 'call_count': call_count, 'stopped': True, 'reason': 'Game ended'}
+    except Exception as e:
+        print(f"❌ ERROR in task_call_next_number for game {game_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e), 'stopped': True}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_mark_cards_for_number(self, game_id: int, number: int):
+    """
+    Mark number on all cards that contain it (Redis-first).
+    Separate task so it doesn't block number calling.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🎯 [MARK] Game {game_id}: Starting to mark number {number} on cards")
+    print(f"🎯 [MARK] Game {game_id}: Starting to mark number {number} on cards")
+    
+    try:
+        from .redis_utils import mark_number_on_card_live
+        from .models import GameCard, FakeUserGameCard
+        
+        # Get all real cards for this game
+        real_cards = GameCard.objects.filter(game_id=game_id, is_winner=False).only('id')
+        real_card_count = real_cards.count()
+        logger.info(f"🎯 [MARK] Game {game_id}: Found {real_card_count} real cards to check")
+        print(f"🎯 [MARK] Game {game_id}: Found {real_card_count} real cards to check")
+        
+        # Mark on real cards (Redis)
+        marked_count = 0
+        for card in real_cards:
+            if mark_number_on_card_live(game_id, card.id, number):
+                marked_count += 1
+                logger.debug(f"🎯 [MARK] Game {game_id}: Marked number {number} on card {card.id}")
+        
+        logger.info(f"🎯 [MARK] Game {game_id}: Marked number {number} on {marked_count}/{real_card_count} real cards")
+        print(f"🎯 [MARK] Game {game_id}: Marked number {number} on {marked_count}/{real_card_count} real cards")
+        
+        # Mark on fake cards (Redis) - treat them the same
+        fake_cards = FakeUserGameCard.objects.filter(game_id=game_id, is_winner=False).only('id')
+        fake_card_count = fake_cards.count()
+        logger.info(f"🎯 [MARK] Game {game_id}: Found {fake_card_count} fake cards to check")
+        print(f"🎯 [MARK] Game {game_id}: Found {fake_card_count} fake cards to check")
+        
+        fake_marked_count = 0
+        for card in fake_cards:
+            if mark_number_on_card_live(game_id, card.id, number):
+                fake_marked_count += 1
+                logger.debug(f"🎯 [MARK] Game {game_id}: Marked number {number} on fake card {card.id}")
+        
+        total_marked = marked_count + fake_marked_count
+        logger.info(f"🎯 [MARK] Game {game_id}: Marked number {number} on {fake_marked_count}/{fake_card_count} fake cards")
+        logger.info(f"✅ [MARK] Game {game_id}: Total marked: {total_marked} cards (real: {marked_count}, fake: {fake_marked_count})")
+        print(f"✅ [MARK] Game {game_id}: Total marked: {total_marked} cards (real: {marked_count}, fake: {fake_marked_count})")
+        
+        return {'success': True, 'marked_count': total_marked, 'real_marked': marked_count, 'fake_marked': fake_marked_count}
+    except Exception as e:
+        logger.error(f"❌ [MARK] Game {game_id}: Error marking number {number}: {e}")
+        print(f"❌ [MARK] Game {game_id}: Error marking number {number}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_check_bingo_for_number(self, game_id: int, number: int):
+    """
+    Check bingo for cards that contain the called number (event-based).
+    Only checks cards that have this number - much faster.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Starting bingo check for number {number}")
+    print(f"🔍 [BINGO CHECK] Game {game_id}: Starting bingo check for number {number}")
+    
+    try:
+        from .redis_utils import (
+            get_game_live_state, get_card_marked_numbers_live,
+            set_game_winner, get_called_numbers_from_redis
+        )
+        from .models import GameCard, FakeUserGameCard
+        
+        # Check if game already has winner
+        state = get_game_live_state(game_id)
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Redis state: {state}")
+        print(f"🔍 [BINGO CHECK] Game {game_id}: Redis state: {state}")
+        
+        if state.get('winner_card_id'):
+            logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Already has winner (card_id: {state.get('winner_card_id')}), skipping")
+            print(f"⚠️ [BINGO CHECK] Game {game_id}: Already has winner, skipping")
+            return {'skipped': True, 'reason': 'Game already has winner'}
+        
+        # Get all cards that might have this number
+        # Only check cards that could have bingo (have this number)
+        called_numbers = get_called_numbers_from_redis(game_id)
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
+        print(f"🔍 [BINGO CHECK] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
+        
+        # Get real cards
+        real_cards = GameCard.objects.filter(game_id=game_id, is_winner=False).select_related('user')
+        real_card_count = real_cards.count()
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
+        print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
+        
+        # Check each card for bingo (using Redis marked numbers)
+        checked_count = 0
+        for card in real_cards:
+            # Get marked numbers from Redis
+            marked = get_card_marked_numbers_live(game_id, card.id)
+            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} has {len(marked) if marked else 0} marked numbers")
+            
+            # Only check if card has this number marked
+            if number not in marked:
+                continue
+            
+            checked_count += 1
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking card {card.id} (user: {card.user.id if card.user else 'None'}) for bingo")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking card {card.id} for bingo")
+            
+            # Check if card has bingo (using marked numbers from Redis)
+            # Load card layout from DB (one-time per card)
+            if not card.card_layout:
+                logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Card {card.id} has no layout, skipping")
+                continue
+            
+            # Check bingo patterns (pass game_id to check enabled patterns)
+            has_bingo, pattern = _check_bingo_from_marked(card.card_layout, marked, game_id)
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check result: has_bingo={has_bingo}, pattern={pattern}")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}")
+            
+            if has_bingo:
+                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! Card {card.id}, User {card.user.id}, Pattern: {pattern}")
+                print(f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! Card {card.id}, User {card.user.id}, Pattern: {pattern}")
+                
+                # Try to set winner atomically
+                winner_set = set_game_winner(game_id, card.id, card.user.id)
+                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner returned: {winner_set}")
+                print(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner returned: {winner_set}")
+                
+                if winner_set:
+                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: Winner set successfully! Triggering finalization...")
+                    print(f"✅ [BINGO CHECK] Game {game_id}: Winner set successfully! Triggering finalization...")
+                    # Winner set - trigger finalization
+                    result = task_finalize_game.delay(game_id)
+                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
+                    print(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
+                    return {'winner': True, 'card_id': card.id, 'pattern': pattern, 'user_id': card.user.id}
+                else:
+                    logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Winner already set by another process")
+                    print(f"⚠️ [BINGO CHECK] Game {game_id}: Winner already set by another process")
+        
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checked {checked_count} real cards with number {number}, no winners")
+        print(f"🔍 [BINGO CHECK] Game {game_id}: Checked {checked_count} real cards with number {number}, no winners")
+        
+        # Check fake cards too (same logic)
+        fake_cards = FakeUserGameCard.objects.filter(game_id=game_id, is_winner=False).select_related('fake_user')
+        fake_card_count = fake_cards.count()
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
+        print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
+        
+        # CRITICAL FIX: Wait a tiny bit to ensure marking has completed
+        # This is a workaround for the race condition - marking and bingo check run in parallel
+        import time
+        time.sleep(0.2)  # Wait 200ms for marking to complete
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Waited for marking to complete, now checking fake cards")
+        
+        fake_checked_count = 0
+        fake_cards_list = list(fake_cards)  # Convert to list to ensure we iterate all
+        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Converted {len(fake_cards_list)} fake cards to list for iteration")
+        
+        for idx, card in enumerate(fake_cards_list):
+            # Get marked numbers from Redis
+            marked = get_card_marked_numbers_live(game_id, card.id)
+            marked_count = len(marked) if marked else 0
+            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} ({idx+1}/{len(fake_cards_list)}) has {marked_count} marked numbers")
+            
+            # Only check if card has this number marked
+            if number not in marked:
+                logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} doesn't have number {number} marked, skipping")
+                continue
+            
+            fake_checked_count += 1
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking fake card {card.id} ({idx+1}/{len(fake_cards_list)}) for bingo - marked: {marked_count} numbers")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking fake card {card.id} for bingo")
+            
+            if not card.card_layout:
+                logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Fake card {card.id} has no layout, skipping")
+                continue
+            
+            # CRITICAL: Log marked numbers and layout for debugging
+            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} marked numbers: {sorted(marked) if marked else 'empty'}")
+            if card.card_layout and len(card.card_layout) > 0:
+                first_row_numbers = [cell.get('number') for cell in card.card_layout[0] if cell.get('number') is not None]
+                logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} layout first row numbers: {first_row_numbers}")
+            
+            # Check bingo patterns (pass game_id to check enabled patterns)
+            has_bingo, pattern = _check_bingo_from_marked(card.card_layout, marked, game_id)
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}, marked_count={marked_count}, marked={sorted(marked) if marked else 'empty'}")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo: has_bingo={has_bingo}, pattern={pattern}, marked={len(marked)} numbers")
+            
+            if has_bingo:
+                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: FAKE USER BINGO! Card {card.id}, Pattern: {pattern}, Marked: {marked_count} numbers")
+                print(f"🎉 [BINGO CHECK] Game {game_id}: FAKE USER BINGO! Card {card.id}, Pattern: {pattern}")
+                
+                # Fake user winner - set winner but no user_id
+                winner_set = set_game_winner(game_id, card.id, None)
+                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner (fake) returned: {winner_set}")
+                print(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner (fake) returned: {winner_set}")
+                
+                if winner_set:
+                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: Fake winner set! Triggering finalization...")
+                    print(f"✅ [BINGO CHECK] Game {game_id}: Fake winner set! Triggering finalization...")
+                    result = task_finalize_game.delay(game_id)
+                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
+                    print(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
+                    return {'winner': True, 'card_id': card.id, 'pattern': pattern, 'is_fake': True, 'marked_count': marked_count}
+                else:
+                    logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Failed to set fake winner (already set?)")
+                    print(f"⚠️ [BINGO CHECK] Game {game_id}: Failed to set fake winner")
+        
+        logger.info(f"✅ [BINGO CHECK] Game {game_id}: Checked all {fake_card_count} fake cards, checked {fake_checked_count} that had number {number} marked")
+        print(f"✅ [BINGO CHECK] Game {game_id}: Checked {fake_checked_count}/{fake_card_count} fake cards")
+        
+        logger.info(f"✅ [BINGO CHECK] Game {game_id}: No winners found. Checked {checked_count} real + {fake_checked_count} fake cards")
+        print(f"✅ [BINGO CHECK] Game {game_id}: No winners found. Checked {checked_count} real + {fake_checked_count} fake cards")
+        return {'checked': True, 'no_winners': True, 'real_checked': checked_count, 'fake_checked': fake_checked_count}
+    except Exception as e:
+        logger.error(f"❌ [BINGO CHECK] Game {game_id}: Error checking bingo for number {number}: {e}")
+        print(f"❌ [BINGO CHECK] Game {game_id}: Error checking bingo for number {number}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+
+def _check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) -> tuple:
+    """
+    Check if card has bingo using marked numbers set.
+    Returns (has_bingo: bool, pattern: str or None)
+    
+    CRITICAL: Checks only enabled patterns from GameSettings.
+    """
+    if not layout or len(marked_numbers) < 5:
+        return (False, None)
+    
+    # Get enabled winning patterns from settings
+    from .models import GameSettings
+    settings = GameSettings.get_settings(game_id=game_id)
+    enabled_patterns = getattr(settings, 'winning_patterns', [])
+    
+    # If no patterns specified, default to all patterns (backward compatibility)
+    if not enabled_patterns:
+        enabled_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
+    
+    enabled_patterns_set = set(enabled_patterns)
+    
+    # Helper to check if cell is marked
+    def is_marked(cell):
+        if cell.get('letter') == 'FREE':
+            return True
+        # CRITICAL FIX: Ensure number comparison works (handle both int and str)
+        cell_number = cell.get('number')
+        if cell_number is None:
+            return False
+        # Convert to int for comparison (marked_numbers is set of ints)
+        try:
+            cell_number_int = int(cell_number)
+            return cell_number_int in marked_numbers
+        except (ValueError, TypeError):
+            return False
+    
+    # IMPORTANT: If only 'full_card' is enabled, skip all other pattern checks
+    only_full_card = enabled_patterns_set == {'full_card'}
+    
+    # Check horizontal lines (any row) - skip if only full_card is enabled
+    if not only_full_card and 'horizontal' in enabled_patterns_set:
+        for row_idx, row in enumerate(layout):
+            if all(is_marked(cell) for cell in row):
+                return (True, f'row_{row_idx}')
+    
+    # Check vertical lines (any column) - skip if only full_card is enabled
+    if not only_full_card and 'vertical' in enabled_patterns_set:
+        for col_idx in range(5):
+            if all(is_marked(layout[row_idx][col_idx]) for row_idx in range(5)):
+                return (True, f'col_{col_idx}')
+    
+    # Check diagonal (top-left to bottom-right) - skip if only full_card is enabled
+    if not only_full_card and 'diagonal' in enabled_patterns_set:
+        if all(is_marked(layout[i][i]) for i in range(5)):
+            return (True, 'diagonal_1')
+        # Check diagonal (top-right to bottom-left)
+        if all(is_marked(layout[i][4-i]) for i in range(5)):
+            return (True, 'diagonal_2')
+    
+    # Check corner bingo (4 corners + FREE cell) - skip if only full_card is enabled
+    if not only_full_card and 'corner' in enabled_patterns_set:
+        corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
+        if all(is_marked(cell) for cell in corners):
+            return (True, 'corner')
+    
+    # Check full card - ONLY wins if ALL cells are marked
+    if 'full_card' in enabled_patterns_set:
+        if all(is_marked(cell) for row in layout for cell in row):
+            return (True, 'full_card')
+    
+    return (False, None)
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_finalize_game(self, game_id: int):
+    """
+    Finalize game - write final state to database.
+    This is the ONLY place that writes to DB during/after gameplay.
+    Called after winner is determined.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🏁 [FINALIZE] Game {game_id}: Starting game finalization")
+    print(f"🏁 [FINALIZE] Game {game_id}: Starting game finalization")
+    
+    try:
+        from .redis_utils import (
+            get_game_live_state, get_called_numbers_list_from_redis,
+            cleanup_game_live_state
+        )
+        from .models import Game, GameCard, FakeUserGameCard, CalledNumber, Transaction
+        from django.db import transaction
+        from django.db.models import F
+        from decimal import Decimal
+        
+        # Get final state from Redis
+        state = get_game_live_state(game_id)
+        called_numbers = get_called_numbers_list_from_redis(game_id)
+        
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Redis state: {state}")
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Redis state: {state}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Called numbers: {called_numbers}")
+        
+        if not state:
+            logger.error(f"❌ [FINALIZE] Game {game_id}: Game state not found in Redis")
+            print(f"❌ [FINALIZE] Game {game_id}: Game state not found in Redis")
+            return {'error': 'Game state not found in Redis'}
+        
+        # Get game from DB
+        game = Game.objects.get(id=game_id)
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, current status: {game.status}, derash_amount: {game.derash_amount}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, current status: {game.status}, derash_amount: {game.derash_amount}")
+        
+        # CRITICAL: Recalculate derash before finalization to ensure accurate prize calculation
+        # This ensures derash_amount is up-to-date with all cards (real + fake)
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Recalculating derash before finalization")
+        print(f"🏁 [FINALIZE] Game {game_id}: Recalculating derash - current derash_amount: {game.derash_amount}")
+        game.recalculate_derash()
+        game.refresh_from_db()
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Derash recalculated - new derash_amount: {game.derash_amount}, total_derash: {game.total_derash}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Derash recalculated - derash_amount: {game.derash_amount}, total_derash: {game.total_derash}")
+        
+        # Get winner from Redis state
+        winner_card_id = state.get('winner_card_id')
+        winner_user_id = state.get('winner_user_id')
+        
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner from Redis - card_id={winner_card_id}, user_id={winner_user_id}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Winner from Redis - card_id={winner_card_id}, user_id={winner_user_id}")
+        
+        # Write final state to DB
+        with transaction.atomic():
+            # Update game status
+            game.status = 'completed'
+            game.completed_at = timezone.now()
+            game.current_call_count = len(called_numbers)
+            logger.info(f"🏁 [FINALIZE] Game {game_id}: Updating game status to 'completed', call_count={len(called_numbers)}")
+            
+            if winner_card_id:
+                # Check if real user or fake user
+                if winner_user_id:
+                    # Real user winner
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Processing real user winner - card_id={winner_card_id}, user_id={winner_user_id}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Processing real user winner")
+                    winner_card = GameCard.objects.get(id=winner_card_id)
+                    game.winner = winner_card.user
+                    game.winners.add(winner_card.user)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Set winner in DB - user: {winner_card.user.username} (id: {winner_card.user.id})")
+                else:
+                    # Fake user winner
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Processing fake user winner - card_id={winner_card_id}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Processing fake user winner")
+                    fake_card = FakeUserGameCard.objects.get(id=winner_card_id)
+                    # Fake users don't get prizes, but game still ends
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - no prize awarded")
+            
+            game.save()
+            logger.info(f"🏁 [FINALIZE] Game {game_id}: Game saved to DB")
+            
+            # Create CalledNumber records in DB (for history)
+            for num in called_numbers:
+                CalledNumber.objects.get_or_create(
+                    game=game,
+                    number=num,
+                    defaults={'letter': CalledNumber.get_letter_for_number(num)}
+                )
+            
+            # Process prizes for real winners (CRITICAL: Must happen before broadcast)
+            # CRITICAL: Refresh game inside transaction to get latest derash_amount
+            game.refresh_from_db()
+            derash_to_award = game.derash_amount if game.derash_amount and game.derash_amount > 0 else Decimal('0')
+            logger.info(f"🏁 [FINALIZE] Game {game_id}: Prize pool (inside transaction) - derash_amount={game.derash_amount}, total_derash={game.total_derash}, derash_to_award={derash_to_award}")
+            print(f"🏁 [FINALIZE] Game {game_id}: Prize pool - derash_amount={game.derash_amount}, derash_to_award={derash_to_award}")
+            
+            # CRITICAL: Verify derash is not 0
+            if derash_to_award == 0:
+                logger.error(f"❌ [FINALIZE] Game {game_id}: derash_to_award is 0! derash_amount={game.derash_amount}")
+                print(f"❌ [FINALIZE] Game {game_id}: ERROR - derash_to_award is 0!")
+            
+            if winner_user_id and derash_to_award > 0:
+                winner_cards = GameCard.objects.filter(game=game, is_winner=True)
+                real_winners = [c for c in winner_cards if c.user_id]
+                
+                if real_winners:
+                    prize_per_winner = derash_to_award / len(real_winners)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Awarding prizes - derash_amount={derash_to_award}, real_winners={len(real_winners)}, prize_per_winner={prize_per_winner}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Awarding {prize_per_winner} to {len(real_winners)} real winners")
+                    
+                    for winner_card in real_winners:
+                        # CRITICAL: Reload winner_card to get fresh user object
+                        winner_card.refresh_from_db()
+                        winner_card.user.refresh_from_db()
+                        old_balance = winner_card.user.balance
+                        
+                        # Atomic balance update using F() expression
+                        User.objects.filter(id=winner_card.user.id).update(
+                            balance=F('balance') + prize_per_winner
+                        )
+                        
+                        # Reload user to verify balance update
+                        winner_card.user.refresh_from_db()
+                        new_balance = winner_card.user.balance
+                        logger.info(f"🏁 [FINALIZE] Game {game_id}: Awarded {prize_per_winner} to user {winner_card.user.id} ({winner_card.user.username}), balance: {old_balance} -> {new_balance}")
+                        print(f"🏁 [FINALIZE] Game {game_id}: User {winner_card.user.username} balance updated: {old_balance} -> {new_balance}")
+                        
+                        # Verify balance was actually updated
+                        if new_balance != old_balance + prize_per_winner:
+                            logger.error(f"❌ [FINALIZE] Game {game_id}: Balance update mismatch! Expected: {old_balance + prize_per_winner}, Got: {new_balance}")
+                            print(f"❌ [FINALIZE] Game {game_id}: Balance update mismatch! Expected: {old_balance + prize_per_winner}, Got: {new_balance}")
+                        
+                        # Create transaction
+                        Transaction.objects.create(
+                            user=winner_card.user,
+                            transaction_type='win',
+                            amount=prize_per_winner,
+                            game=game,
+                            description=f'Won game {game.id}'
+                        )
+                else:
+                    logger.warning(f"⚠️ [FINALIZE] Game {game_id}: No real winners found to award prize")
+                    print(f"⚠️ [FINALIZE] Game {game_id}: No real winners found")
+            else:
+                logger.warning(f"⚠️ [FINALIZE] Game {game_id}: No prize to award - winner_user_id={winner_user_id}, derash={derash_to_award}")
+                print(f"⚠️ [FINALIZE] Game {game_id}: No prize to award")
+        
+        # CRITICAL: Broadcast winner_declared FIRST (frontend listens for this)
+        # Get winner card data for broadcast (works for both real and fake users)
+        winner_data = None
+        if winner_card_id:
+            logger.info(f"🏁 [FINALIZE] Game {game_id}: Preparing winner data for broadcast")
+            print(f"🏁 [FINALIZE] Game {game_id}: Preparing winner data for broadcast")
+            try:
+                # Check if real user or fake user winner
+                is_fake_winner = (winner_user_id is None)
+                
+                if is_fake_winner:
+                    # Fake user winner
+                    from .models import FakeUserGameCard
+                    fake_card = FakeUserGameCard.objects.get(id=winner_card_id)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded fake winner card {winner_card_id}, fake_user: {fake_card.fake_user.name}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - {fake_card.fake_user.name}")
+                    
+                    # Get called numbers for winner data
+                    called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Got {len(called_numbers_list)} called numbers from DB")
+                    
+                    # Check bingo pattern using Redis marked numbers
+                    from .redis_utils import get_card_marked_numbers_live
+                    marked = get_card_marked_numbers_live(game_id, fake_card.id)
+                    has_bingo, pattern = _check_bingo_from_marked(fake_card.card_layout, marked, game_id)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake card bingo check - has_bingo={has_bingo}, pattern={pattern}")
+                    
+                    # Calculate prize (fake users don't get prizes, but show total prize for display)
+                    # CRITICAL: Refresh game to get latest derash_amount after recalculation
+                    game.refresh_from_db()
+                    total_prize_display = float(game.derash_amount) if game.derash_amount and game.derash_amount > 0 else 0.0
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake winner - derash_amount={game.derash_amount}, total_derash={game.total_derash}, total_prize_display={total_prize_display}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake winner - derash_amount={game.derash_amount}, total_prize_display={total_prize_display}")
+                    
+                    # CRITICAL: For fake users, show total_prize in the 'prize' field for frontend display
+                    # Frontend might be looking at 'prize' not 'total_prize'
+                    winner_data = {
+                        'winners': [{
+                            'winner': {
+                                'id': None,
+                                'username': fake_card.fake_user.name,
+                                'name': fake_card.fake_user.name,
+                                'is_fake': True
+                            },
+                            'username': fake_card.fake_user.name,
+                            'is_fake': True,
+                            'card_number': fake_card.card_number,
+                            'card_id': fake_card.id,
+                            'card_layout': fake_card.card_layout,
+                            'winning_pattern': pattern if has_bingo else None,
+                            'selected_numbers': [],
+                            'called_numbers': called_numbers_list,
+                            'last_called_number': called_numbers_list[-1] if called_numbers_list else None,
+                            'prize': total_prize_display  # Show total prize for display (fake users don't receive it)
+                        }],
+                        'winner': {
+                            'id': None,
+                            'username': fake_card.fake_user.name,
+                            'name': fake_card.fake_user.name,
+                            'is_fake': True
+                        },
+                        'card_number': fake_card.card_number,
+                        'card_id': fake_card.id,
+                        'card_layout': fake_card.card_layout,
+                        'winning_pattern': pattern if has_bingo else None,
+                        'prize': total_prize_display,  # Show total prize for display (fake users don't receive it)
+                        'total_prize': total_prize_display,  # Also include in total_prize field
+                        'winner_count': 1,
+                        'last_called_number': called_numbers_list[-1] if called_numbers_list else None,
+                        'called_numbers': called_numbers_list
+                    }
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake winner data - prize={total_prize_display}, total_prize={total_prize_display}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared - prize field: {total_prize_display}")
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared successfully")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared - {fake_card.fake_user.name}")
+                else:
+                    # Real user winner
+                    from .serializers import UserSerializer
+                    from .game_logic import check_bingo, get_winning_number
+                    
+                    winner_card = GameCard.objects.get(id=winner_card_id)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded winner card {winner_card_id}, user: {winner_card.user.username}")
+                    
+                    # Get called numbers for winner data (from DB since we just created them)
+                    called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Got {len(called_numbers_list)} called numbers from DB")
+                    
+                    # CRITICAL: Get marked numbers from Redis (like fake users) for proper winning line display
+                    from .redis_utils import get_card_marked_numbers_live
+                    marked_numbers = get_card_marked_numbers_live(game_id, winner_card.id)
+                    marked_numbers_list = sorted(list(marked_numbers)) if marked_numbers else []
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Got {len(marked_numbers_list)} marked numbers from Redis for winner card")
+                    
+                    # Check bingo pattern
+                    has_bingo, pattern = check_bingo(winner_card, game)
+                    winning_number = get_winning_number(winner_card, pattern if has_bingo else None, called_numbers_list)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Bingo check - has_bingo={has_bingo}, pattern={pattern}, winning_number={winning_number}")
+                    
+                    # Calculate prize for display (already awarded above)
+                    # CRITICAL: Refresh game to get latest derash_amount after recalculation
+                    game.refresh_from_db()
+                    winner_cards = GameCard.objects.filter(game=game, is_winner=True)
+                    real_winners = [c for c in winner_cards if c.user_id]
+                    derash_for_display = float(game.derash_amount) if game.derash_amount and game.derash_amount > 0 else 0.0
+                    prize_per_winner = float(derash_for_display / len(real_winners)) if real_winners and derash_for_display > 0 else 0.0
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Prize calculation for display - derash_amount={game.derash_amount}, total_derash={game.total_derash}, winners={len(real_winners)}, prize_per_winner={prize_per_winner}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Prize for display - derash_amount={game.derash_amount}, real_winners={len(real_winners)}, prize_per_winner={prize_per_winner}")
+                    
+                    # CRITICAL: Verify prize is not 0
+                    if prize_per_winner == 0.0:
+                        logger.error(f"❌ [FINALIZE] Game {game_id}: Prize is 0! derash_amount={game.derash_amount}, real_winners={len(real_winners)}")
+                        print(f"❌ [FINALIZE] Game {game_id}: WARNING - Prize is 0! derash_amount={game.derash_amount}")
+                    
+                    winner_data = {
+                        'winners': [{
+                            'winner': UserSerializer(winner_card.user).data,
+                            'username': winner_card.user.username,
+                            'is_fake': False,
+                            'card_number': winner_card.card_number,
+                            'card_id': winner_card.id,
+                            'card_layout': winner_card.card_layout,
+                            'winning_pattern': pattern if has_bingo else None,
+                            'selected_numbers': marked_numbers_list,  # CRITICAL: Use marked numbers from Redis for winning line
+                            'called_numbers': called_numbers_list,
+                            'last_called_number': winning_number,
+                            'prize': prize_per_winner  # CRITICAL: Ensure this is a float, not Decimal
+                        }],
+                        'winner': UserSerializer(winner_card.user).data,
+                        'card_number': winner_card.card_number,
+                        'card_id': winner_card.id,
+                        'card_layout': winner_card.card_layout,
+                        'winning_pattern': pattern if has_bingo else None,
+                        'prize': prize_per_winner,  # CRITICAL: Ensure this is a float, not Decimal
+                        'total_prize': derash_for_display,  # Use calculated derash_amount
+                        'winner_count': len(real_winners),
+                        'last_called_number': winning_number,
+                        'called_numbers': called_numbers_list
+                    }
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner data prepared successfully - prize={prize_per_winner}, total_prize={derash_for_display}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Winner data prepared - winner: {winner_card.user.username}, prize: {prize_per_winner}, total_prize: {derash_for_display}")
+                    # CRITICAL: Log the actual data being sent
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner data structure - prize field: {prize_per_winner}, total_prize field: {derash_for_display}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Data structure - prize: {prize_per_winner}, total_prize: {derash_for_display}")
+            except Exception as e:
+                logger.error(f"❌ [FINALIZE] Game {game_id}: Error preparing winner data: {e}")
+                print(f"❌ [FINALIZE] Game {game_id}: Error preparing winner data: {e}")
+                import traceback
+                traceback.print_exc()
+                # Try to create minimal winner data even on error
+                try:
+                    if winner_user_id:
+                        # Real user - create minimal data
+                        winner_card = GameCard.objects.get(id=winner_card_id)
+                        from .serializers import UserSerializer
+                        game.refresh_from_db()
+                        derash_for_display = float(game.derash_amount) if game.derash_amount and game.derash_amount > 0 else 0.0
+                        winner_cards = GameCard.objects.filter(game=game, is_winner=True)
+                        real_winners = [c for c in winner_cards if c.user_id]
+                        prize_per_winner = float(derash_for_display / len(real_winners)) if real_winners and derash_for_display > 0 else 0.0
+                        logger.info(f"🏁 [FINALIZE] Game {game_id}: Error recovery (real) - derash={derash_for_display}, prize={prize_per_winner}")
+                        
+                        # Get marked numbers from Redis for winning line
+                        from .redis_utils import get_card_marked_numbers_live
+                        marked_numbers = get_card_marked_numbers_live(game_id, winner_card.id)
+                        marked_numbers_list = sorted(list(marked_numbers)) if marked_numbers else []
+                        called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                        winner_data = {
+                            'winners': [{
+                                'winner': UserSerializer(winner_card.user).data,
+                                'username': winner_card.user.username,
+                                'is_fake': False,
+                                'card_number': winner_card.card_number,
+                                'card_id': winner_card.id,
+                                'selected_numbers': marked_numbers_list,  # Use marked numbers for winning line
+                                'prize': prize_per_winner  # Ensure float
+                            }],
+                            'winner': UserSerializer(winner_card.user).data,
+                            'prize': prize_per_winner,  # Ensure float
+                            'total_prize': derash_for_display,
+                            'called_numbers': called_numbers_list
+                        }
+                        logger.info(f"🏁 [FINALIZE] Game {game_id}: Created minimal winner data after error - prize: {prize_per_winner}")
+                    else:
+                        # Fake user - create minimal data
+                        from .models import FakeUserGameCard
+                        fake_card = FakeUserGameCard.objects.get(id=winner_card_id)
+                        game.refresh_from_db()
+                        total_prize_display = float(game.derash_amount) if game.derash_amount and game.derash_amount > 0 else 0.0
+                        logger.info(f"🏁 [FINALIZE] Game {game_id}: Error recovery (fake) - derash={game.derash_amount}, total_prize={total_prize_display}")
+                        called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                        winner_data = {
+                            'winners': [{
+                                'winner': {'id': None, 'username': fake_card.fake_user.name, 'is_fake': True},
+                                'username': fake_card.fake_user.name,
+                                'is_fake': True,
+                                'prize': total_prize_display  # Show total prize for display
+                            }],
+                            'winner': {'id': None, 'username': fake_card.fake_user.name, 'is_fake': True},
+                            'prize': total_prize_display,  # Show total prize for display
+                            'total_prize': total_prize_display,
+                            'called_numbers': called_numbers_list
+                        }
+                        logger.info(f"🏁 [FINALIZE] Game {game_id}: Created minimal fake winner data after error - total_prize: {total_prize_display}")
+                except Exception as e2:
+                    logger.error(f"❌ [FINALIZE] Game {game_id}: Failed to create minimal winner data: {e2}")
+                    winner_data = None
+        else:
+            logger.warning(f"⚠️ [FINALIZE] Game {game_id}: No winner data to broadcast (card_id={winner_card_id}, user_id={winner_user_id})")
+            print(f"⚠️ [FINALIZE] Game {game_id}: No winner data to broadcast")
+        
+        # Broadcast winner_declared (frontend listens for this event)
+        # CRITICAL: For fake winners, delay broadcast by 3 seconds to give real players a chance
+        if winner_data:
+            is_fake_winner = (winner_user_id is None)
+            
+            if is_fake_winner:
+                # Fake winner - delay broadcast by 3 seconds
+                logger.info(f"📢 [FINALIZE] Game {game_id}: Fake winner detected - delaying broadcast by 3 seconds")
+                print(f"📢 [FINALIZE] Game {game_id}: Fake winner - delaying broadcast by 3 seconds")
+                task_broadcast_winner.apply_async(args=[game_id, winner_data], countdown=3)
+                logger.info(f"✅ [FINALIZE] Game {game_id}: winner_declared broadcast scheduled for 3 seconds later")
+            else:
+                # Real winner - broadcast immediately
+                logger.info(f"📢 [FINALIZE] Game {game_id}: Broadcasting winner_declared event (real winner)")
+                print(f"📢 [FINALIZE] Game {game_id}: Broadcasting winner_declared event (real winner)")
+                try:
+                    # CRITICAL: Log the exact data being broadcast
+                    logger.info(f"📢 [FINALIZE] Game {game_id}: Broadcasting winner_declared with data - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
+                    print(f"📢 [FINALIZE] Game {game_id}: Broadcasting - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
+                    
+                    async_to_sync(channel_layer.group_send)(
+                        f'game_{game.id}',
+                        {
+                            'type': 'winner_declared',
+                            'data': winner_data
+                        }
+                    )
+                    logger.info(f"✅ [FINALIZE] Game {game_id}: winner_declared broadcast successful, winner: {winner_user_id}, prize in data: {winner_data.get('prize', 'N/A')}")
+                    print(f"✅ [FINALIZE] Game {game_id}: winner_declared broadcast successful - prize: {winner_data.get('prize', 'N/A')}")
+                except Exception as e:
+                    logger.error(f"❌ [FINALIZE] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
+                    print(f"❌ [FINALIZE] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            logger.warning(f"⚠️ [FINALIZE] Game {game_id}: Skipping winner_declared broadcast - no winner_data")
+        
+        # Broadcast game_ended
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f'game_{game.id}',
+                {
+                    'type': 'game_ended',
+                    'data': {
+                        'game_id': game.id,
+                        'status': 'completed',
+                        'winner_id': winner_user_id,
+                        'completed_at': game.completed_at.isoformat() if game.completed_at else None
+                    }
+                }
+            )
+        except Exception as e:
+            print(f"WebSocket broadcast error (game_ended): {e}")
+        
+        # CRITICAL: Cleanup ALL Redis state AFTER broadcasting
+        # This prevents any scheduled tasks from seeing stale state
+        cleanup_game_live_state(game_id)
+        
+        # Also clean up old cache keys that might exist
+        try:
+            from .redis_utils import invalidate_game_state_cache, cleanup_game_redis_keys
+            invalidate_game_state_cache(game_id)
+            cleanup_game_redis_keys(game_id)  # Old cleanup function for backward compatibility
+        except (ImportError, AttributeError):
+            pass  # Functions may not exist in all versions
+        
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Game finalization completed")
+        print(f"🏁 [FINALIZE] Game {game_id}: Game finalization completed")
+    
+    except Exception as e:
+        logger.error(f"❌ [FINALIZE] Game {game_id}: Error in task_finalize_game: {e}")
+        print(f"Error in task_finalize_game: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@shared_task(bind=True, queue='gameplay')
+def task_broadcast_winner(self, game_id: int, winner_data: dict):
+    """
+    Broadcast winner_declared event after delay (for fake winners).
+    This gives real players 3 seconds to claim before fake winner is shown.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        from .models import Game
+        
+        game = Game.objects.get(id=game_id)
+        channel_layer = get_channel_layer()
+        
+        logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared event")
+        print(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared event")
+        
+        # CRITICAL: Log the exact data being broadcast
+        logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting winner_declared with data - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
+        print(f"📢 [BROADCAST] Game {game_id}: Broadcasting - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
+        
+        async_to_sync(channel_layer.group_send)(
+            f'game_{game.id}',
+            {
+                'type': 'winner_declared',
+                'data': winner_data
+            }
+        )
+        logger.info(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful, prize in data: {winner_data.get('prize', 'N/A')}")
+        print(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful - prize: {winner_data.get('prize', 'N/A')}")
+    except Exception as e:
+        logger.error(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
+        print(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {'success': False, 'error': str(e)}
+        return {'error': str(e)}
+
+
+@shared_task(bind=True, max_retries=2, queue='gameplay')
+def task_check_game_status_after_number(self, game_id: int, number: int):
+    """
+    Check game status after number call to see if game was completed.
+    CRITICAL FIX: Separate task to avoid blocking number calling with time.sleep().
+    """
+    try:
+        # Use new Redis-first live state (source of truth)
+        from .redis_utils import get_game_live_state
+        from .models import GameSettings
+        
+        # Check game live state from Redis
+        state = get_game_live_state(game_id)
+        if not state or state.get('status') != 'active' or state.get('winner_card_id'):
+            print(f"Game {game_id}: Game completed or has winner after calling number {number}, stopping number calling")
+            return {'success': True, 'number': number, 'stopped': True, 'reason': 'Game completed'}
+        
+        # Game still active, continue calling numbers using new Redis-first task
+        settings = GameSettings.get_settings(game_id=game_id)
+        time_between_calls = settings.time_between_calls or 3
+        
+        # Use new Redis-first task (not old task_auto_call_numbers)
+        from .tasks import task_call_next_number
+        task_call_next_number.apply_async(args=[game_id], countdown=time_between_calls)
+        return {'success': True, 'number': number, 'game_still_active': True, 'next_call_scheduled': True}
+    except Exception as e:
+        print(f"Error in task_check_game_status_after_number: {e}")
+        return {'error': str(e)}
+
+
+@shared_task(bind=True, max_retries=3, queue='registration')
+def task_process_registration_rewards(self, user_id: int, is_first_registration: bool):
+    """
+    Process registration rewards asynchronously (PROMO-SAFE)
+    
+    This task handles:
+    - Registration gift (if first registration)
+    - Referral reward (if user has referrer)
+    - Transaction records
+    - Fraud checks
+    
+    All operations are wrapped in atomic transaction to prevent partial updates.
+    """
+    from django.db import transaction
+    from .models import User, Transaction, GameSettings
+    from .redis_utils import (
+        acquire_reward_lock, release_reward_lock,
+        acquire_referral_lock, release_referral_lock
+    )
+    from decimal import Decimal
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Acquire reward lock to prevent duplicate processing
+        if not acquire_reward_lock(user_id, timeout=30):
+            logger.warning(f"Reward lock already held for user {user_id}, skipping")
+            return {'error': 'Reward already being processed', 'skipped': True}
+        
+        try:
+            with transaction.atomic():
+                # Get fresh user data
+                user = User.objects.select_for_update().get(id=user_id)
+                
+                # TEMPORARILY DISABLED: Registration and referral rewards set to 0
+                # Get GameSettings (should be cached, but get fresh if needed)
+                game_settings = GameSettings.get_settings()
+                bid_amount = Decimal(str(game_settings.bid_amount))
+                
+                # Registration reward amount (TEMPORARILY DISABLED - set to 0)
+                registration_reward = Decimal('0')
+                
+                # STEP 1: Grant registration gift (if first registration) - DISABLED
+                if is_first_registration:
+                    # Registration gift is disabled - no balance update
+                    # Still create transaction record with 0 amount for tracking
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type='deposit',
+                        amount=registration_reward,
+                        description='Registration gift (disabled)'
+                    )
+                    
+                    logger.info(f"⏸️ Registration gift disabled (would have been {bid_amount}) for user {user.telegram_id} (id={user.id})")
+                
+                # STEP 2: Process referral reward (if applicable)
+                # Get fresh user data again to check referral status
+                user.refresh_from_db()
+                
+                if user.referred_by_id and not user.referral_reward_given:
+                    referrer_id = user.referred_by_id
+                    
+                    # Acquire referral lock to prevent spam payouts
+                    if not acquire_referral_lock(referrer_id, timeout=60):
+                        logger.warning(f"Referral lock already held for referrer {referrer_id}, will retry")
+                        # Release reward lock before retry
+                        release_reward_lock(user_id)
+                        # Retry after 5 seconds
+                        raise self.retry(countdown=5, exc=Exception("Referral lock busy"))
+                    
+                    try:
+                        # Get referrer with lock
+                        referrer = User.objects.select_for_update().get(id=referrer_id)
+                        
+                        # Fraud checks
+                        if not referrer.phone_number:
+                            logger.warning(f"Referrer {referrer.telegram_id} (id={referrer.id}) is not registered (no phone number)")
+                        else:
+                            # Referral reward amount (TEMPORARILY DISABLED - set to 0)
+                            referral_reward = Decimal('0')
+                            
+                            # Referral reward is disabled - no balance update
+                            # Still create transaction record with 0 amount for tracking
+                            # Build invited user name for transaction description
+                            invited_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+                            if not invited_name:
+                                invited_name = user.first_name or user.username or "User"
+                            
+                            # Create referral transaction with 0 amount
+                            Transaction.objects.create(
+                                user=referrer,
+                                transaction_type='deposit',
+                                amount=referral_reward,
+                                description=f'Referral reward (disabled) - {invited_name} registered'
+                            )
+                            
+                            # Mark referral reward as given (even though amount is 0)
+                            user.referral_reward_given = True
+                            user.save(update_fields=['referral_reward_given'])
+                            
+                            logger.info(f"⏸️ Referral reward disabled (would have been {bid_amount}) for referrer {referrer.telegram_id} (id={referrer.id})")
+                            
+                            # Notification disabled since no reward was given
+                            # (Commented out to avoid confusion)
+                            # if referrer.telegram_id:
+                            #     try:
+                            #         from telegram_bot.notifications import send_notification_sync
+                            #         notification_msg = (
+                            #             f"{invited_name} ን አስገብተዋል፣ {bid_amount} ብር አግኝተዋል፡፡"
+                            #         )
+                            #         result, _ = send_notification_sync(referrer.telegram_id, notification_msg)
+                            #         if result:
+                            #             logger.info(f"✅ Sent referral notification to referrer {referrer.telegram_id}")
+                            #         else:
+                            #             logger.warning(f"Failed to send referral notification to referrer {referrer.telegram_id}")
+                            #     except Exception as e:
+                            #         logger.error(f"Error sending referral notification: {e}", exc_info=True)
+                    finally:
+                        # Always release referral lock
+                        release_referral_lock(referrer_id)
+                elif user.referred_by_id:
+                    logger.info(f"Referral reward already given for user {user.telegram_id} (id={user.id})")
+                else:
+                    logger.info(f"User {user.telegram_id} (id={user.id}) has no referrer")
+                
+                return {
+                    'success': True,
+                    'user_id': user_id,
+                    'registration_gift_given': is_first_registration,
+                    'referral_reward_given': user.referral_reward_given if user.referred_by_id else False
+                }
+        
+        finally:
+            # Always release reward lock
+            release_reward_lock(user_id)
+            
+    except User.DoesNotExist:
+        logger.error(f"User {user_id} not found in task_process_registration_rewards")
+        release_reward_lock(user_id)
+        return {'error': f'User {user_id} not found', 'failed': True}
+    except Exception as e:
+        logger.error(f"Error in task_process_registration_rewards: {e}", exc_info=True)
+        release_reward_lock(user_id)
+        # Retry up to 3 times
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e, countdown=5)
+        return {'error': str(e), 'failed': True}
 
 
 @shared_task(bind=True, max_retries=2)

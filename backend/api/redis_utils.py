@@ -5,6 +5,7 @@ Handles multiple winner support, card locking, and cleanup
 import redis
 import os
 from django.conf import settings
+from django.utils import timezone
 
 
 def get_redis_client():
@@ -155,10 +156,11 @@ def release_bingo_claim_lock(game_id):
         print(f"Error releasing bingo claim lock: {e}")
 
 
-def acquire_number_calling_lock(game_id, timeout=10):
+def acquire_number_calling_lock(game_id, timeout=30):
     """
     Try to acquire lock for calling numbers in a game
     Returns True if lock acquired, False if already locked
+    CRITICAL FIX: Increased timeout from 10s to 30s to prevent lock expiration during task execution
     """
     r = get_redis_client()
     if not r:
@@ -172,7 +174,7 @@ def acquire_number_calling_lock(game_id, timeout=10):
         acquired = r.setnx(lock_key, "1")
         
         if acquired:
-            # Lock acquired, set timeout (10 seconds should be enough for one number call)
+            # Lock acquired, set timeout (30 seconds should be enough for one number call + safety margin)
             r.expire(lock_key, timeout)
             return True
         else:
@@ -744,4 +746,533 @@ def batch_broadcast_to_game(game_id: int, events: list):
         import traceback
         traceback.print_exc()
         return False
+
+
+# ============================================================================
+# REGISTRATION LOCKS & RATE LIMITING (PROMO-SAFE)
+# ============================================================================
+
+def get_registration_lock_key(telegram_id: int):
+    """Get Redis key for registration lock"""
+    return f"register:lock:{telegram_id}"
+
+
+def acquire_registration_lock(telegram_id: int, timeout: int = 60) -> bool:
+    """
+    Acquire lock for registration to prevent concurrent registrations
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        # If Redis unavailable, allow (fallback - should not happen in production)
+        return True
+    
+    try:
+        lock_key = get_registration_lock_key(telegram_id)
+        # Try to acquire lock (SETNX - only sets if not exists)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            # Lock acquired, set timeout
+            r.expire(lock_key, timeout)
+            return True
+        else:
+            # Lock exists - another process is already processing registration
+            return False
+    except Exception as e:
+        print(f"Error acquiring registration lock: {e}")
+        # On error, allow (fallback - but log it)
+        return True
+
+
+def release_registration_lock(telegram_id: int):
+    """Release registration lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_registration_lock_key(telegram_id)
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing registration lock: {e}")
+
+
+def get_reward_lock_key(user_id: int):
+    """Get Redis key for reward lock (prevents duplicate rewards)"""
+    return f"reward:lock:{user_id}"
+
+
+def acquire_reward_lock(user_id: int, timeout: int = 30) -> bool:
+    """
+    Acquire lock for reward processing to prevent duplicate rewards
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        return True
+    
+    try:
+        lock_key = get_reward_lock_key(user_id)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            r.expire(lock_key, timeout)
+            return True
+        return False
+    except Exception as e:
+        print(f"Error acquiring reward lock: {e}")
+        return True
+
+
+def release_reward_lock(user_id: int):
+    """Release reward lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_reward_lock_key(user_id)
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing reward lock: {e}")
+
+
+def get_referral_lock_key(referrer_id: int):
+    """Get Redis key for referral reward lock (prevents spam payouts)"""
+    return f"referral:lock:{referrer_id}"
+
+
+def acquire_referral_lock(referrer_id: int, timeout: int = 60) -> bool:
+    """
+    Acquire lock for referral reward processing
+    Returns True if lock acquired, False if already locked
+    """
+    r = get_redis_client()
+    if not r:
+        return True
+    
+    try:
+        lock_key = get_referral_lock_key(referrer_id)
+        acquired = r.setnx(lock_key, "1")
+        
+        if acquired:
+            r.expire(lock_key, timeout)
+            return True
+        return False
+    except Exception as e:
+        print(f"Error acquiring referral lock: {e}")
+        return True
+
+
+def release_referral_lock(referrer_id: int):
+    """Release referral lock"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        lock_key = get_referral_lock_key(referrer_id)
+        r.delete(lock_key)
+    except Exception as e:
+        print(f"Error releasing referral lock: {e}")
+
+
+# ============================================================================
+# RATE LIMITING (REDIS-BASED)
+# ============================================================================
+
+def get_rate_limit_key(action: str, identifier: str):
+    """Get Redis key for rate limiting"""
+    return f"ratelimit:{action}:{identifier}"
+
+
+def check_rate_limit(action: str, identifier: str, limit: int, window_seconds: int) -> tuple:
+    """
+    Check if action is within rate limit
+    Returns (is_allowed, remaining_attempts)
+    
+    Args:
+        action: Action name (e.g., 'register', 'reward')
+        identifier: Unique identifier (IP, telegram_id, etc.)
+        limit: Maximum number of attempts
+        window_seconds: Time window in seconds
+    """
+    r = get_redis_client()
+    if not r:
+        # If Redis unavailable, allow (fallback - should not happen in production)
+        return True, limit
+    
+    try:
+        key = get_rate_limit_key(action, identifier)
+        current = r.get(key)
+        
+        if current is None:
+            # First attempt - set counter with expiration
+            r.setex(key, window_seconds, 1)
+            return True, limit - 1
+        else:
+            current_count = int(current)
+            if current_count >= limit:
+                # Rate limit exceeded
+                ttl = r.ttl(key)
+                return False, 0
+            else:
+                # Increment counter
+                new_count = r.incr(key)
+                if new_count == 1:
+                    # Set expiration on first increment
+                    r.expire(key, window_seconds)
+                remaining = max(0, limit - new_count)
+                return True, remaining
+    except Exception as e:
+        print(f"Error checking rate limit: {e}")
+        # On error, allow (fallback - but log it)
+        return True, limit
+
+
+def reset_rate_limit(action: str, identifier: str):
+    """Reset rate limit for an identifier"""
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        key = get_rate_limit_key(action, identifier)
+        r.delete(key)
+    except Exception as e:
+        print(f"Error resetting rate limit: {e}")
+
+
+# ============================================================================
+# EVENT-DRIVEN GAME STATE (REDIS-FIRST ARCHITECTURE)
+# ============================================================================
+# These functions treat Redis as the source of truth during gameplay.
+# Database is only written at game end (finalize_game task).
+
+def get_game_live_state_key(game_id: int):
+    """Get Redis key for live game state (source of truth during gameplay)"""
+    return f"game:{game_id}:live"
+
+
+def initialize_game_live_state(game_id: int, status: str = "active", call_interval: int = 3):
+    """
+    Initialize live game state in Redis.
+    This is called when game starts - Redis becomes source of truth.
+    CRITICAL: Cleans up any existing state first to ensure fresh start.
+    """
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    try:
+        # CRITICAL: Clean up any existing state first
+        # This ensures we start fresh even if previous game didn't clean up
+        cleanup_game_live_state(game_id)
+        
+        key = get_game_live_state_key(game_id)
+        
+        # CRITICAL FIX: Use hset instead of deprecated hmset (Redis 4.0+)
+        # hmset is deprecated and may fail silently
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Use hset with mapping (Redis 4.0+ compatible)
+            # Fallback to individual hset calls if mapping not supported
+            try:
+                r.hset(key, mapping={
+                    "status": status,
+                    "current_index": "0",  # Index in called_numbers list
+                    "winner_card_id": "",  # Empty = no winner yet
+                    "winner_user_id": "",  # Empty = no winner yet
+                    "call_interval": str(call_interval),
+                    "started_at": str(timezone.now().isoformat())
+                })
+            except TypeError:
+                # Fallback for older Redis versions that don't support mapping parameter
+                r.hset(key, "status", status)
+                r.hset(key, "current_index", "0")
+                r.hset(key, "winner_card_id", "")
+                r.hset(key, "winner_user_id", "")
+                r.hset(key, "call_interval", str(call_interval))
+                r.hset(key, "started_at", str(timezone.now().isoformat()))
+            
+            r.expire(key, 3600)  # 1 hour expiry
+            
+            # Verify state was set correctly
+            verify_state = r.hgetall(key)
+            logger.info(f"✅ [INIT] Game {game_id}: Redis state initialized: {verify_state}")
+            print(f"✅ [INIT] Game {game_id}: Redis state initialized: {verify_state}")
+            
+            if not verify_state or len(verify_state) == 0:
+                logger.error(f"❌ [INIT] Game {game_id}: Redis state initialization failed - state is empty!")
+                print(f"❌ [INIT] Game {game_id}: Redis state initialization failed!")
+                return False
+        except Exception as e:
+            logger.error(f"❌ [INIT] Game {game_id}: Error initializing Redis state: {e}")
+            print(f"❌ [INIT] Game {game_id}: Error initializing Redis state: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # Initialize called numbers list (ensure it's empty)
+        called_numbers_key = get_called_numbers_key(game_id)
+        r.delete(called_numbers_key)  # Clear any old data
+        
+        print(f"✅ Initialized fresh Redis live state for game {game_id}")
+        return True
+    except Exception as e:
+        print(f"Error initializing game live state: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def get_game_live_state(game_id: int) -> dict:
+    """
+    Get live game state from Redis (source of truth during gameplay).
+    Returns empty dict if game not found or Redis unavailable.
+    """
+    r = get_redis_client()
+    if not r:
+        return {}
+    
+    try:
+        key = get_game_live_state_key(game_id)
+        state = r.hgetall(key)
+        
+        if not state:
+            return {}
+        
+        # Parse values safely
+        result = {
+            "status": state.get("status", "unknown"),
+            "current_index": 0,
+            "winner_card_id": None,
+            "winner_user_id": None,
+            "call_interval": 3,
+            "started_at": state.get("started_at", "")
+        }
+        
+        # Parse current_index
+        try:
+            result["current_index"] = int(state.get("current_index", 0))
+        except (ValueError, TypeError):
+            result["current_index"] = 0
+        
+        # Parse winner_card_id
+        winner_card_id_str = state.get("winner_card_id", "")
+        if winner_card_id_str and winner_card_id_str.isdigit():
+            result["winner_card_id"] = int(winner_card_id_str)
+        
+        # Parse winner_user_id
+        winner_user_id_str = state.get("winner_user_id", "")
+        if winner_user_id_str and winner_user_id_str.isdigit():
+            result["winner_user_id"] = int(winner_user_id_str)
+        
+        # Parse call_interval
+        try:
+            result["call_interval"] = int(state.get("call_interval", 3))
+        except (ValueError, TypeError):
+            result["call_interval"] = 3
+        
+        return result
+    except Exception as e:
+        print(f"Error getting game live state: {e}")
+        return {}
+
+
+def set_game_winner(game_id: int, card_id: int, user_id: int = None) -> bool:
+    """
+    Set game winner atomically using Redis Lua script.
+    Returns True if winner was set (first to claim), False if already has winner.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🏆 [SET WINNER] Game {game_id}: Attempting to set winner - card_id={card_id}, user_id={user_id}")
+    print(f"🏆 [SET WINNER] Game {game_id}: Attempting to set winner - card_id={card_id}, user_id={user_id}")
+    
+    r = get_redis_client()
+    if not r:
+        logger.error(f"❌ [SET WINNER] Game {game_id}: Redis client not available")
+        print(f"❌ [SET WINNER] Game {game_id}: Redis client not available")
+        return False
+    
+    try:
+        key = get_game_live_state_key(game_id)
+        logger.info(f"🏆 [SET WINNER] Game {game_id}: Using Redis key: {key}")
+        
+        # Check current state before setting
+        current_state = r.hgetall(key)
+        logger.info(f"🏆 [SET WINNER] Game {game_id}: Current Redis state: {current_state}")
+        print(f"🏆 [SET WINNER] Game {game_id}: Current Redis state: {current_state}")
+        
+        # Lua script for atomic winner setting
+        lua_script = """
+        local key = KEYS[1]
+        local card_id = ARGV[1]
+        local user_id = ARGV[2]
+        
+        -- Check if winner already exists
+        local winner = redis.call('HGET', key, 'winner_card_id')
+        if winner and winner ~= '' then
+            return 0  -- Already has winner
+        end
+        
+        -- Set winner atomically
+        redis.call('HSET', key, 'winner_card_id', card_id)
+        if user_id and user_id ~= '' then
+            redis.call('HSET', key, 'winner_user_id', user_id)
+        end
+        redis.call('HSET', key, 'status', 'completed')
+        
+        return 1  -- Winner set successfully
+        """
+        
+        result = r.eval(lua_script, 1, key, str(card_id), str(user_id) if user_id else "")
+        success = bool(result)
+        
+        if success:
+            logger.info(f"✅ [SET WINNER] Game {game_id}: Winner set successfully! card_id={card_id}, user_id={user_id}")
+            print(f"✅ [SET WINNER] Game {game_id}: Winner set successfully! card_id={card_id}, user_id={user_id}")
+            
+            # Verify the state was set correctly
+            final_state = r.hgetall(key)
+            logger.info(f"✅ [SET WINNER] Game {game_id}: Final Redis state after setting winner: {final_state}")
+            print(f"✅ [SET WINNER] Game {game_id}: Final Redis state: {final_state}")
+        else:
+            logger.warning(f"⚠️ [SET WINNER] Game {game_id}: Winner already exists or failed to set")
+            print(f"⚠️ [SET WINNER] Game {game_id}: Winner already exists or failed to set")
+        
+        return success
+    except Exception as e:
+        logger.error(f"❌ [SET WINNER] Game {game_id}: Error setting winner: {e}")
+        print(f"❌ [SET WINNER] Game {game_id}: Error setting winner: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def add_called_number_live(game_id: int, number: int) -> int:
+    """
+    Add called number to Redis list and return new call count.
+    Returns the new count (index + 1).
+    """
+    r = get_redis_client()
+    if not r:
+        return 0
+    
+    try:
+        # Add to called numbers list
+        called_numbers_key = get_called_numbers_key(game_id)
+        r.lpush(called_numbers_key, str(number))
+        r.expire(called_numbers_key, 3600)
+        
+        # Update current_index in live state
+        state_key = get_game_live_state_key(game_id)
+        new_index = r.hincrby(state_key, "current_index", 1)
+        
+        return new_index
+    except Exception as e:
+        print(f"Error adding called number: {e}")
+        return 0
+
+
+def get_card_marked_numbers_key_live(game_id: int, card_id: int):
+    """Get Redis key for card marked numbers (live gameplay)"""
+    return f"game:{game_id}:card:{card_id}:marked"
+
+
+def mark_number_on_card_live(game_id: int, card_id: int, number: int) -> bool:
+    """
+    Mark number on card in Redis (for live gameplay).
+    Returns True if number was added (new), False if already marked.
+    """
+    r = get_redis_client()
+    if not r:
+        return False
+    
+    try:
+        key = get_card_marked_numbers_key_live(game_id, card_id)
+        added = r.sadd(key, str(number))
+        r.expire(key, 3600)
+        return bool(added)  # True if number was new, False if already in set
+    except Exception as e:
+        print(f"Error marking number on card: {e}")
+        return False
+
+
+def get_card_marked_numbers_live(game_id: int, card_id: int) -> set:
+    """Get marked numbers for a card from Redis (live gameplay)"""
+    r = get_redis_client()
+    if not r:
+        return set()
+    
+    try:
+        key = get_card_marked_numbers_key_live(game_id, card_id)
+        numbers = r.smembers(key)
+        return {int(n) for n in numbers if n.isdigit()}
+    except Exception as e:
+        print(f"Error getting card marked numbers: {e}")
+        return set()
+
+
+def cleanup_game_live_state(game_id: int):
+    """
+    Clean up ALL game-related Redis keys (called after game finalization).
+    CRITICAL: This must delete EVERYTHING to prevent stale state blocking next game.
+    """
+    r = get_redis_client()
+    if not r:
+        return
+    
+    try:
+        # Get all keys matching game patterns
+        patterns = [
+            f"game:{game_id}:live",  # Live state
+            f"game:{game_id}:called_numbers",  # Called numbers list
+            f"game:{game_id}:card:*:marked",  # Card marked numbers
+            f"game:{game_id}:state",  # Old cache state (if exists)
+            f"game:{game_id}:number_calling_lock",  # Lock (if exists)
+            f"game:{game_id}:bingo_window",  # Bingo window (if exists)
+            f"game:{game_id}:bingo_winners",  # Bingo winners (if exists)
+            f"game:{game_id}:bingo_claim_lock",  # Claim lock (if exists)
+        ]
+        
+        # Delete specific keys
+        specific_keys = [
+            f"game:{game_id}:live",
+            f"game:{game_id}:called_numbers",
+            f"game:{game_id}:state",
+            f"game:{game_id}:number_calling_lock",
+            f"game:{game_id}:bingo_window",
+            f"game:{game_id}:bingo_winners",
+            f"game:{game_id}:bingo_claim_lock",
+        ]
+        
+        # Delete specific keys
+        for key in specific_keys:
+            r.delete(key)
+        
+        # Delete pattern-matched keys (card marked numbers)
+        card_pattern = f"game:{game_id}:card:*:marked"
+        card_keys = r.keys(card_pattern)
+        if card_keys:
+            r.delete(*card_keys)
+        
+        # Also delete any card marked count keys
+        count_pattern = f"card:*:marked_count"
+        count_keys = r.keys(count_pattern)
+        if count_keys:
+            # Filter to only this game's cards (if we can identify them)
+            # For safety, we'll be more aggressive and clean up old card keys
+            pass  # Card count keys are per-card, not per-game, so we leave them
+        
+        print(f"✅ Cleaned up all Redis keys for game {game_id}")
+    except Exception as e:
+        print(f"Error cleaning up game live state: {e}")
+        import traceback
+        traceback.print_exc()
 

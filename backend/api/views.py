@@ -485,9 +485,71 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                         except Exception as e:
                             print(f"WebSocket broadcast error: {e}")
                         
-                        # Start automatic number calling
-                        from .tasks import task_auto_call_numbers
-                        task_auto_call_numbers.delay(game.id)
+                        # Start automatic number calling via NEW Redis-first task
+                        # CRITICAL: Use new task_call_next_number instead of old task_auto_call_numbers
+                        from .redis_utils import initialize_game_live_state, cleanup_game_live_state
+                        from .models import GameSettings
+                        from celery import current_app
+                        
+                        # Clean up any stale state and initialize fresh
+                        cleanup_game_live_state(game.id)
+                        settings = GameSettings.get_settings()
+                        call_interval = settings.time_between_calls or 3
+                        
+                        # CRITICAL: Verify initialization succeeded
+                        init_success = initialize_game_live_state(game.id, "active", call_interval)
+                        if not init_success:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"❌ [AUTO-START] Game {game.id}: Failed to initialize Redis state!")
+                            print(f"❌ [AUTO-START] Game {game.id}: Failed to initialize Redis state!")
+                            # Don't schedule task if Redis init failed - skip to next iteration
+                            success = False
+                        else:
+                            # Verify state was set (double-check)
+                            from .redis_utils import get_game_live_state
+                            verify_state = get_game_live_state(game.id)
+                            if not verify_state or len(verify_state) == 0:
+                                import logging
+                                logger = logging.getLogger(__name__)
+                                logger.error(f"❌ [AUTO-START] Game {game.id}: Redis state verification failed!")
+                                print(f"❌ [AUTO-START] Game {game.id}: Redis state verification failed!")
+                                # Don't schedule task if state not verified
+                                success = False
+                            else:
+                                import logging
+                                logger = logging.getLogger(__name__)
+                                logger.info(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified: {verify_state}")
+                                print(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified")
+                                
+                                # Schedule first call with 3-second delay using explicit task name
+                                try:
+                                    # Get task by explicit name
+                                    task = current_app.tasks.get('api.tasks.task_call_next_number')
+                                    if not task:
+                                        # Fallback: try importing directly
+                                        from .tasks import task_call_next_number
+                                        task = task_call_next_number
+                                        print(f"⚠️ Auto-started Game {game.id}: Task not found by name, using direct import")
+                                    
+                                    result = task.apply_async(args=[game.id], countdown=3)
+                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 3 seconds (task_id: {result.id}, task_name: {result.name})")
+                                    success = True
+                                except Exception as e:
+                                    print(f"❌ ERROR: Failed to schedule task_call_next_number for auto-started game {game.id}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    # Fallback
+                                    try:
+                                        from .tasks import task_call_next_number
+                                        task_call_next_number.delay(game.id)
+                                        print(f"⚠️ Auto-started Game {game.id}: Used fallback delay() method")
+                                        success = True
+                                    except Exception as e2:
+                                        print(f"❌ CRITICAL: Both apply_async and delay failed for auto-started game: {e2}")
+                                        import traceback
+                                        traceback.print_exc()
+                                        success = False
                 elif elapsed_time.total_seconds() >= timer_seconds and game_age < min_game_age_seconds:
                     # Timer elapsed but grace period not passed - log and skip
                     print(f"Game {game.id}: Timer elapsed ({elapsed_time.total_seconds():.1f}s) but grace period not passed ({game_age:.1f}s < {min_game_age_seconds}s). Waiting...")
@@ -823,9 +885,19 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
         
         number = serializer.validated_data['number']
         
-        # Check if number was called in the game
+        # Check if number was called in the game (REDIS-FIRST: check Redis, not DB)
         game = card.game
-        if not CalledNumber.objects.filter(game=game, number=number).exists():
+        from .redis_utils import get_called_numbers_from_redis
+        called_numbers = get_called_numbers_from_redis(game.id)
+        
+        # If Redis unavailable, fallback to DB (shouldn't happen, but safety)
+        if called_numbers is None:
+            if not CalledNumber.objects.filter(game=game, number=number).exists():
+                return Response(
+                    {'error': 'This number has not been called yet'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif number not in called_numbers:
             return Response(
                 {'error': 'This number has not been called yet'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1268,6 +1340,11 @@ def start_game(request, game_id):
             # Refresh game from database
             game.refresh_from_db()
             
+            # CRITICAL: Clean up any stale Redis state from previous games
+            # This ensures a fresh start even if previous game didn't clean up properly
+            from .redis_utils import cleanup_game_live_state
+            cleanup_game_live_state(game.id)
+            
             # Broadcast game started
             try:
                 async_to_sync(channel_layer.group_send)(
@@ -1283,9 +1360,76 @@ def start_game(request, game_id):
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
             
-            # Start automatic number calling via Celery background task
-            from .tasks import task_auto_call_numbers
-            task_auto_call_numbers.delay(game.id)
+            # Initialize Redis live state (Redis-first architecture)
+            from .redis_utils import initialize_game_live_state
+            from .models import GameSettings
+            settings = GameSettings.get_settings()
+            call_interval = settings.time_between_calls or 3
+            
+            # Initialize Redis as source of truth for this game (fresh state)
+            # CRITICAL: Verify initialization succeeded before scheduling tasks
+            init_success = initialize_game_live_state(game.id, "active", call_interval)
+            if not init_success:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"❌ [START GAME] Game {game.id}: Failed to initialize Redis state!")
+                print(f"❌ [START GAME] Game {game.id}: Failed to initialize Redis state!")
+                return Response(
+                    {'error': 'Failed to initialize game state'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            # Verify state was set (double-check)
+            from .redis_utils import get_game_live_state
+            verify_state = get_game_live_state(game.id)
+            if not verify_state or len(verify_state) == 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"❌ [START GAME] Game {game.id}: Redis state verification failed - state is empty after initialization!")
+                print(f"❌ [START GAME] Game {game.id}: Redis state verification failed!")
+                return Response(
+                    {'error': 'Game state initialization failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ [START GAME] Game {game.id}: Redis state initialized and verified: {verify_state}")
+            print(f"✅ [START GAME] Game {game.id}: Redis state initialized and verified")
+            
+            # Start automatic number calling via NEW Redis-first task
+            # This is freeze-proof: fast, no locks, no DB queries during gameplay
+            # CRITICAL: Schedule first call with 3-second delay to match frontend countdown
+            # CRITICAL: Use explicit task name to ensure Celery can find and route it
+            from celery import current_app
+            try:
+                # Get task by explicit name
+                task = current_app.tasks.get('api.tasks.task_call_next_number')
+                if not task:
+                    # Fallback: try importing directly
+                    from .tasks import task_call_next_number
+                    task = task_call_next_number
+                    print(f"⚠️ Game {game.id}: Task not found by name, using direct import")
+                
+                result = task.apply_async(args=[game.id], countdown=3)
+                print(f"✅ Game {game.id}: Scheduled first number call in 3 seconds (task_id: {result.id}, task_name: {result.name})")
+                # Also log to Django logger for better visibility
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=3, task_name={result.name}")
+            except Exception as e:
+                print(f"❌ ERROR: Failed to schedule task_call_next_number for game {game.id}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: try direct delay
+                try:
+                    from .tasks import task_call_next_number
+                    task_call_next_number.delay(game.id)
+                    print(f"⚠️ Game {game.id}: Used fallback delay() method")
+                except Exception as e2:
+                    print(f"❌ CRITICAL: Both apply_async and delay failed: {e2}")
+                    import traceback
+                    traceback.print_exc()
             
             serializer = GameSerializer(game)
             return Response(serializer.data)

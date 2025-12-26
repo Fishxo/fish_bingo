@@ -1,12 +1,8 @@
 #!/bin/bash
 set -e
 
-# Default app process (backward compatibility)
-# For new architecture, use specific process scripts:
-# - start-gameplay.sh (game APIs)
-# - start-registration.sh (registration + bot)
-# - start-admin.sh (admin dashboard)
-# - start-celery.sh (background tasks)
+# Registration process - handles registration + Telegram bot
+# This process handles all registration traffic and is isolated from gameplay
 
 # Function to handle bot process with automatic restart
 # Run in subshell with error handling to prevent failures from stopping main script
@@ -30,8 +26,8 @@ echo "[$(date)] Bot started in background (PID: $BOT_PID)"
 sleep 2 || true
 
 # Start Gunicorn with Uvicorn workers for ASGI support
-# 2 workers for 1GB RAM
-echo "[$(date)] Starting Django API server (Gunicorn + Uvicorn)..."
+# 2 workers for 1GB RAM (registration can be CPU-intensive)
+echo "[$(date)] Starting Registration API server (Gunicorn + Uvicorn)..."
 exec gunicorn bingo.asgi:application \
     -k uvicorn.workers.UvicornWorker \
     --workers 2 \

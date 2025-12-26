@@ -16,6 +16,11 @@ class User(AbstractUser):
 
     class Meta:
         db_table = 'users'
+        indexes = [
+            models.Index(fields=['telegram_id'], name='user_telegram_id_idx'),
+            models.Index(fields=['referred_by'], name='user_referred_by_idx'),
+            models.Index(fields=['created_at'], name='user_created_at_idx'),
+        ]
 
     def __str__(self):
         return f"{self.username} ({self.telegram_id})"

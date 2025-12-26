@@ -30,7 +30,7 @@ class GameCardSerializer(serializers.ModelSerializer):
 
 class GameSerializer(serializers.ModelSerializer):
     gamecards = GameCardSerializer(many=True, read_only=True)
-    called_numbers = CalledNumberSerializer(many=True, read_only=True)
+    called_numbers = serializers.SerializerMethodField()  # Changed to SerializerMethodField to use Redis
     winner = UserSerializer(read_only=True)
     total_players = serializers.IntegerField(read_only=True)
     total_derash = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
@@ -46,6 +46,63 @@ class GameSerializer(serializers.ModelSerializer):
             'gamecards', 'called_numbers', 'total_players', 'total_derash', 'total_cards', 'card_selection_timer', 'automatic_mode_enabled'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_called_numbers(self, obj):
+        """
+        REDIS-FIRST: Get called numbers from Redis during active games (fast).
+        Falls back to DB for completed games or if Redis unavailable.
+        """
+        try:
+            # For active games, use Redis (fast, no DB hit)
+            if obj.status == 'active':
+                from .redis_utils import get_called_numbers_list_from_redis
+                from .models import CalledNumber
+                
+                try:
+                    called_numbers_list = get_called_numbers_list_from_redis(obj.id)
+                    if called_numbers_list is not None and len(called_numbers_list) > 0:
+                        # Convert to serializer format
+                        result = []
+                        for num in called_numbers_list:
+                            try:
+                                letter = CalledNumber.get_letter_for_number(num)
+                                result.append({
+                                    'number': num,
+                                    'letter': letter,
+                                    'called_at': None  # Not stored in Redis, but frontend doesn't need it
+                                })
+                            except Exception as e:
+                                # Skip invalid numbers
+                                import logging
+                                logger = logging.getLogger(__name__)
+                                logger.warning(f"⚠️ [SERIALIZER] Game {obj.id}: Invalid number {num}: {e}")
+                                continue
+                        return result
+                    # If Redis returns empty list or None, fall through to DB
+                except Exception as e:
+                    # Redis error - fall back to DB
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"⚠️ [SERIALIZER] Game {obj.id}: Redis error in get_called_numbers: {e}, falling back to DB")
+            
+            # For completed games, waiting games, or if Redis unavailable, use DB (for history)
+            try:
+                return CalledNumberSerializer(obj.called_numbers.all().order_by('called_at'), many=True).data
+            except Exception as e:
+                # If DB query fails, return empty list
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"❌ [SERIALIZER] Game {obj.id}: DB error in get_called_numbers: {e}")
+                return []
+        except Exception as e:
+            # Catch-all for any unexpected errors
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"❌ [SERIALIZER] Game {obj.id}: Unexpected error in get_called_numbers: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return empty list to prevent 500 error
+            return []
     
     def get_total_cards(self, obj):
         """Get total_cards from GameSettings"""
