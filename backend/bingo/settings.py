@@ -29,19 +29,26 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-c&=^k9$3zduu5&cp#da%mt3o#q
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+
 # Get allowed hosts from environment or use default
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',') if os.getenv('ALLOWED_HOSTS') else ['*']
+ALLOWED_HOSTS = [
+    'goodbingo.shop',
+    'www.goodbingo.shop',
+    '127.0.0.1',
+    'localhost',
+]
 
 # CSRF Configuration - Required for admin panel
 CSRF_TRUSTED_ORIGINS = [
-    'https://markos-bingo.fly.dev',
-    'https://*.fly.dev',
+    'https://goodbingo.shop',
+    'https://www.goodbingo.shop',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    'http://www.localhost:8000',
+    'http://www.127.0.0.1:8000',
 ]
-# Also add from environment if provided
-if os.getenv('CSRF_TRUSTED_ORIGINS'):
-    CSRF_TRUSTED_ORIGINS.extend(os.getenv('CSRF_TRUSTED_ORIGINS').split(','))
 
 # Session and CSRF Cookie settings for HTTPS
 if not DEBUG:
@@ -229,6 +236,8 @@ REST_FRAMEWORK = {
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',') if os.getenv('CORS_ALLOWED_ORIGINS') else [
     "http://localhost:5173",  # Vue dev server
     "http://localhost:3000",
+    "https://goodbingo.shop",
+    "https://www.goodbingo.shop",
     "https://web.telegram.org",  # Telegram Web App
 ]
 
@@ -331,7 +340,7 @@ CELERY_RESULT_EXPIRES = 3600  # Expire results after 1 hour
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 # Use Fly.io URL for production, localhost for local development
-TELEGRAM_WEB_APP_URL = os.getenv('TELEGRAM_WEB_APP_URL', 'https://markos-bingo.fly.dev')
+TELEGRAM_WEB_APP_URL = os.getenv('TELEGRAM_WEB_APP_URL', 'https://goodbingo.shop')
 
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', SECRET_KEY)
