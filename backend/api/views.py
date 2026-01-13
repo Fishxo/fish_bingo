@@ -408,39 +408,39 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             # Ensure fake users are added if system accounts are enabled (for waiting games)
             settings = None
             if game.status == 'waiting':
-            try:
-                settings = GameSettings.get_settings()
-                # Use getattr to safely check allow_system_account
-                allow_system_account = getattr(settings, 'allow_system_account', False)
-                if allow_system_account:
-                    try:
-                        from .fake_user_manager import get_fake_user_count_for_game
-                        from .auto_game_manager import add_fake_users_to_game_immediately
-                        fake_count = get_fake_user_count_for_game(game)
-                        if fake_count == 0:
-                            # Add fake users immediately when game is fetched
-                            add_fake_users_to_game_immediately(game)
-                            # Refresh game and recalculate derash
-                            game.refresh_from_db()
-                            game.recalculate_derash()
-                            # Invalidate cache to get updated game data
-                            cache.delete(cache_key)
-                    except Exception as e:
-                        # If fake user addition fails (e.g., migration not run), log and continue
-                        print(f"ERROR: Failed to add fake users to game {game.id}: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        # Continue without fake users - don't crash the endpoint
-            except Exception as e:
-                # If settings retrieval fails, log and continue
-                print(f"ERROR: Failed to get settings in current() endpoint: {e}")
-                import traceback
-                traceback.print_exc()
-                # Try to get settings again for timer check
                 try:
                     settings = GameSettings.get_settings()
-                except:
-                    settings = None
+                    # Use getattr to safely check allow_system_account
+                    allow_system_account = getattr(settings, 'allow_system_account', False)
+                    if allow_system_account:
+                        try:
+                            from .fake_user_manager import get_fake_user_count_for_game
+                            from .auto_game_manager import add_fake_users_to_game_immediately
+                            fake_count = get_fake_user_count_for_game(game)
+                            if fake_count == 0:
+                                # Add fake users immediately when game is fetched
+                                add_fake_users_to_game_immediately(game)
+                                # Refresh game and recalculate derash
+                                game.refresh_from_db()
+                                game.recalculate_derash()
+                                # Invalidate cache to get updated game data
+                                cache.delete(cache_key)
+                        except Exception as e:
+                            # If fake user addition fails (e.g., migration not run), log and continue
+                            print(f"ERROR: Failed to add fake users to game {game.id}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Continue without fake users - don't crash the endpoint
+                except Exception as e:
+                    # If settings retrieval fails, log and continue
+                    print(f"ERROR: Failed to get settings in current() endpoint: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Try to get settings again for timer check
+                    try:
+                        settings = GameSettings.get_settings()
+                    except:
+                        settings = None
             
             # Check if timer has elapsed and automatically start game
             # IMPORTANT: Only check timer if fake users have finished selecting (if enabled)
