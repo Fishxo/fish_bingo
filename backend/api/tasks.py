@@ -2695,21 +2695,32 @@ def task_finalize_game(self, game_id: int):
             logger.warning(f"⚠️ [FINALIZE] Game {game_id}: Skipping winner_declared broadcast - no winner_data")
         
         # Broadcast game_ended
-        try:
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game.id}',
-                {
-                    'type': 'game_ended',
-                    'data': {
-                        'game_id': game.id,
-                        'status': 'completed',
-                        'winner_id': winner_user_id,
-                        'completed_at': game.completed_at.isoformat() if game.completed_at else None
+        # CRITICAL: For fake winners, delay game_ended broadcast along with winner_declared
+        # This prevents frontend from redirecting before the winner banner appears
+        is_fake_winner = (winner_user_id is None) if winner_data else False
+        
+        if is_fake_winner:
+            # Fake winner - delay game_ended broadcast (will be sent by task_broadcast_winner)
+            logger.info(f"📢 [FINALIZE] Game {game_id}: Fake winner - delaying game_ended broadcast")
+            print(f"📢 [FINALIZE] Game {game_id}: Fake winner - delaying game_ended broadcast")
+            # game_ended will be broadcast by task_broadcast_winner (updated to also send game_ended)
+        else:
+            # Real winner - broadcast game_ended immediately
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f'game_{game.id}',
+                    {
+                        'type': 'game_ended',
+                        'data': {
+                            'game_id': game.id,
+                            'status': 'completed',
+                            'winner_id': winner_user_id,
+                            'completed_at': game.completed_at.isoformat() if game.completed_at else None
+                        }
                     }
-                }
-            )
-        except Exception as e:
-            print(f"WebSocket broadcast error (game_ended): {e}")
+                )
+            except Exception as e:
+                print(f"WebSocket broadcast error (game_ended): {e}")
         
         # CRITICAL: Cleanup ALL Redis state AFTER broadcasting
         # This prevents any scheduled tasks from seeing stale state
@@ -2736,7 +2747,7 @@ def task_finalize_game(self, game_id: int):
 @shared_task(bind=True, queue='gameplay')
 def task_broadcast_winner(self, game_id: int, winner_data: dict):
     """
-    Broadcast winner_declared event after delay (for fake winners).
+    Broadcast winner_declared and game_ended events after delay (for fake winners).
     This gives real players 3 seconds to claim before fake winner is shown.
     """
     import logging
@@ -2750,13 +2761,14 @@ def task_broadcast_winner(self, game_id: int, winner_data: dict):
         game = Game.objects.get(id=game_id)
         channel_layer = get_channel_layer()
         
-        logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared event")
-        print(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared event")
+        logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared and game_ended events")
+        print(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared and game_ended events")
         
         # CRITICAL: Log the exact data being broadcast
         logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting winner_declared with data - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
         print(f"📢 [BROADCAST] Game {game_id}: Broadcasting - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
         
+        # Broadcast winner_declared
         async_to_sync(channel_layer.group_send)(
             f'game_{game.id}',
             {
@@ -2766,6 +2778,29 @@ def task_broadcast_winner(self, game_id: int, winner_data: dict):
         )
         logger.info(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful, prize in data: {winner_data.get('prize', 'N/A')}")
         print(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful - prize: {winner_data.get('prize', 'N/A')}")
+        
+        # CRITICAL: Also broadcast game_ended for fake winners (delayed along with winner_declared)
+        # This ensures frontend receives both events together and shows the banner before redirecting
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f'game_{game.id}',
+                {
+                    'type': 'game_ended',
+                    'data': {
+                        'game_id': game.id,
+                        'status': 'completed',
+                        'winner_id': None,  # Fake winner has no user_id
+                        'completed_at': game.completed_at.isoformat() if game.completed_at else None
+                    }
+                }
+            )
+            logger.info(f"✅ [BROADCAST] Game {game_id}: game_ended broadcast successful (fake winner)")
+            print(f"✅ [BROADCAST] Game {game_id}: game_ended broadcast successful (fake winner)")
+        except Exception as e:
+            logger.error(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (game_ended): {e}")
+            print(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (game_ended): {e}")
+        
+        return {'success': True}
     except Exception as e:
         logger.error(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
         print(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
@@ -2773,7 +2808,6 @@ def task_broadcast_winner(self, game_id: int, winner_data: dict):
         traceback.print_exc()
         
         return {'success': False, 'error': str(e)}
-        return {'error': str(e)}
 
 
 @shared_task(bind=True, max_retries=2, queue='gameplay')
