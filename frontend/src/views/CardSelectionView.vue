@@ -37,15 +37,16 @@
       <div class="select-card-text">ካርቴላ ይምረጡ</div>
     </div>
     
-    <!-- InfoBar only shown when game is active -->
+    <!-- InfoBar only shown when game is active AND not redirecting -->
+    <!-- FIX: Hide InfoBar during transition to prevent glitch -->
     <InfoBar
-      v-if="game?.status === 'active'"
+      v-if="game?.status === 'active' && !isRedirecting"
       :derash="game?.total_derash || 0"
       :players="game?.total_players || 0"
       :bet="game?.bet_amount || 0"
       :call="game?.current_call_count || 0"
     />
-    <GameStatus v-if="game?.status === 'active'" :status="game?.status || 'waiting'" />
+    <GameStatus v-if="game?.status === 'active' && !isRedirecting" :status="game?.status || 'waiting'" />
     
     <div class="timer-section" v-if="game?.status === 'active' && !selectedCard">
       <div class="timer-label">ጨዋታው ተጀምሯል - ለመቀላቀል ካርቴላ ይምረጡ:</div>

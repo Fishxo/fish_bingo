@@ -388,8 +388,9 @@ export default {
             // Only update if there are new numbers we haven't seen
             const hasNewNumbers = newCalledNumbers.some(num => !this.calledNumbers.includes(num))
             
-            // If first number is called, hide countdown immediately and restore normal polling
-            if (game.called_numbers.length > 0 && this.showStartCountdown) {
+            // FIX: Only hide countdown if it has finished (3 seconds passed)
+            // This ensures called numbers are only shown after countdown completes
+            if (game.called_numbers.length > 0 && this.showStartCountdown && this.startCountdownSeconds <= 0) {
               this.showStartCountdown = false
               if (this.countdownInterval) {
                 clearInterval(this.countdownInterval)
@@ -402,9 +403,14 @@ export default {
                 }
                 this.interval = setInterval(this.loadGame, 10000) // Normal 10 second polling (reduced from 2s)
               }
+            } else if (game.called_numbers.length > 0 && this.showStartCountdown && this.startCountdownSeconds > 0) {
+              // Countdown still running - don't process called numbers yet
+              // Numbers will be processed after countdown finishes
+              console.log('Countdown still running, ignoring called numbers until countdown finishes')
             }
             
-            if (hasNewNumbers) {
+            // FIX: Only process called numbers if countdown has finished
+            if (hasNewNumbers && (!this.showStartCountdown || this.startCountdownSeconds <= 0)) {
               this.calledNumbers = newCalledNumbers
               
               // ATOMIC FIX: Update current_call_count to match actual called numbers length
@@ -545,9 +551,18 @@ export default {
       this.ws.on('number_called', (data) => {
         console.log('Number called via WebSocket:', data)
         
-        // Hide countdown if it's showing (first number is being called)
-        if (this.showStartCountdown) {
+        // FIX: Hide countdown only if countdown has finished (3 seconds passed)
+        // This ensures numbers aren't processed until countdown is done
+        if (this.showStartCountdown && this.startCountdownSeconds <= 0) {
           this.showStartCountdown = false
+          if (this.countdownInterval) {
+            clearInterval(this.countdownInterval)
+            this.countdownInterval = null
+          }
+        } else if (this.showStartCountdown && this.startCountdownSeconds > 0) {
+          // Countdown still running, ignore this call (shouldn't happen, but safety check)
+          console.log('Ignoring number call - countdown still running')
+          return
         }
         
         // Prevent duplicate processing - use a flag to prevent race conditions
@@ -717,14 +732,6 @@ export default {
           this.interval = null
         }
         
-        // Record when winner banner is shown - enforce 8-second minimum display
-        this.winnerBannerShownAt = Date.now()
-        
-        // CRITICAL: Set banner visibility flag IMMEDIATELY - this is independent of winner data
-        // This prevents banner from disappearing due to state updates/re-renders
-        this.showWinnerBanner = true
-        this._winnerBannerActive = true
-        
         // Stop ALL automatic mode behavior immediately when winner is declared
         this.canClaimBingo = false
         this.automaticallyMarkedNumbers.clear()
@@ -739,6 +746,25 @@ export default {
         
         // Set flag to prevent loadGame from running and interfering with banner
         this._winnerBannerActive = true
+        
+        // FIX: For fake user winners, wait 3 seconds before showing banner (gives real players chance to claim)
+        const isFakeUserWinner = (data.winners && data.winners.length > 0 && data.winners[0].is_fake) ||
+                                 (data.winner && data.winner.is_fake) ||
+                                 (data.winners && data.winners.length > 0 && data.winners[0].winner && data.winners[0].winner.is_fake) ||
+                                 (data.is_fake)
+        
+        // Helper function to set winner data and show banner
+        const showWinnerBanner = () => {
+          // Record when winner banner is shown - enforce 8-second minimum display
+          this.winnerBannerShownAt = Date.now()
+          
+          // Set banner visibility flag
+          this.showWinnerBanner = true
+          this._winnerBannerActive = true
+          
+          // Force update to show banner
+          this.$forceUpdate()
+        }
         
         // Handle multiple winners (new format)
         if (data.winners && data.winners.length > 0) {
@@ -866,11 +892,20 @@ export default {
           winnerPrize: this.winnerPrize,
           totalPrize: this.totalPrize,
           winnerCard: this.winnerCard,
-          isCurrentUserWinner: this.isCurrentUserWinner
+          isCurrentUserWinner: this.isCurrentUserWinner,
+          isFakeUserWinner: isFakeUserWinner
         })
         
-        // Force Vue to update
-        this.$forceUpdate()
+        // FIX: Show banner immediately for real users, after 3-second delay for fake users
+        if (isFakeUserWinner) {
+          // Wait 3 seconds before showing banner for fake users
+          setTimeout(() => {
+            showWinnerBanner()
+          }, 3000)
+        } else {
+          // Real user winner - show immediately
+          showWinnerBanner()
+        }
         
         // Redirect to completed view after 8 seconds (handled by WinnerBanner timer)
       })

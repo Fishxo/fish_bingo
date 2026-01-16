@@ -593,8 +593,9 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                         task = task_call_next_number
                                         print(f"⚠️ Auto-started Game {game.id}: Task not found by name, using direct import")
                                     
-                                    result = task.apply_async(args=[game.id], countdown=1)
-                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 1 second (task_id: {result.id}, task_name: {result.name})")
+                                    # FIX: Schedule first number call with 3-second delay to match frontend countdown
+                                    result = task.apply_async(args=[game.id], countdown=3)
+                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 3 seconds (task_id: {result.id}, task_name: {result.name})")
                                     success = True
                                 except Exception as e:
                                     print(f"❌ ERROR: Failed to schedule task_call_next_number for auto-started game {game.id}: {e}")
@@ -1500,12 +1501,13 @@ def start_game(request, game_id):
                     task = task_call_next_number
                     print(f"⚠️ Game {game.id}: Task not found by name, using direct import")
                 
-                result = task.apply_async(args=[game.id], countdown=1)
-                print(f"✅ Game {game.id}: Scheduled first number call in 1 second (task_id: {result.id}, task_name: {result.name})")
+                # FIX: Schedule first number call with 3-second delay to match frontend countdown
+                result = task.apply_async(args=[game.id], countdown=3)
+                print(f"✅ Game {game.id}: Scheduled first number call in 3 seconds (task_id: {result.id}, task_name: {result.name})")
                 # Also log to Django logger for better visibility
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=1, task_name={result.name}")
+                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=3, task_name={result.name}")
             except Exception as e:
                 print(f"❌ ERROR: Failed to schedule task_call_next_number for game {game.id}: {e}")
                 import traceback
