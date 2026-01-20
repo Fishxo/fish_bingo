@@ -55,7 +55,6 @@
           :recent-calls="recentCalls"
           class="compact-call-display"
         />
-        <div class="card-label">የእርስዎ ካርድ</div>
         <UserCard
           v-if="userCard"
           :card-layout="userCard.card_layout"
@@ -220,7 +219,22 @@ export default {
         }
         
         const game = await getCurrentGame()
+        
+        // FIX: Always use calledNumbers.length as the source of truth for current_call_count
+        // This prevents the count from being reset to 0 when loadGame() is called with stale server data
         this.game = game
+        
+        // CRITICAL: Always sync current_call_count from calledNumbers array (source of truth)
+        // This ensures the count never shows 0 when we have called numbers
+        if (this.calledNumbers && this.calledNumbers.length > 0) {
+          this.game.current_call_count = this.calledNumbers.length
+        } else if (game.called_numbers && game.called_numbers.length > 0) {
+          // If calledNumbers is empty but server has called_numbers, use server count
+          this.game.current_call_count = game.called_numbers.length
+        } else {
+          // Fallback to server's current_call_count only if we have no called numbers
+          this.game.current_call_count = game.current_call_count || 0
+        }
         
         if (game) {
           // Only redirect if game status actually changed
@@ -415,8 +429,17 @@ export default {
               
               // ATOMIC FIX: Update current_call_count to match actual called numbers length
               // This ensures the count displayed matches the actual numbers on the bingo board
+              // CRITICAL: Always update immediately to prevent showing 0
               if (this.game) {
                 this.game.current_call_count = this.calledNumbers.length
+                console.log(`✅ [SYNC] Updated call count to ${this.calledNumbers.length} from calledNumbers array`)
+              }
+            } else if (!hasNewNumbers && game.called_numbers && game.called_numbers.length > 0) {
+              // Even if no new numbers, ensure count is synced (prevents showing 0)
+              if (this.game && this.calledNumbers.length !== game.called_numbers.length) {
+                this.calledNumbers = newCalledNumbers
+                this.game.current_call_count = this.calledNumbers.length
+                console.log(`✅ [SYNC] Synced call count to ${this.calledNumbers.length} (no new numbers but count was wrong)`)
               }
               
               if (game.called_numbers.length > 0) {

@@ -177,7 +177,7 @@ export default {
 
 .card-number {
   color: var(--primary-dark);
-  font-size: 13px;
+  font-size: 23px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
