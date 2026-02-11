@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -19,11 +20,28 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           script: |
+            echo "🚀 Starting deployment..."
+
             cd ${{ secrets.PROJECT_PATH }}
-            git reset --hard
-            git pull origin master
-            source /home/ubuntu/apps/good-bingo/venv/bin/activate
+
+            echo "📥 Updating repository..."
+            git fetch origin
+            git reset --hard origin/master
+
+            echo "🐍 Activating virtual environment..."
+            source venv/bin/activate
+
+            echo "📦 Installing dependencies..."
             pip install -r requirements.txt
+
+            echo "🗃 Running migrations..."
+            cd arif_bingo/backend
             python manage.py migrate --noinput
+            python manage.py collectstatic --noinput
+
+            echo "🔄 Restarting services..."
             sudo systemctl restart gunicorn
             sudo systemctl restart bingo-telegram-bot
+            sudo systemctl restart celery
+
+            echo "✅ Deployment completed successfully!"
