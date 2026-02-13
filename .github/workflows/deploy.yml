@@ -16,25 +16,28 @@ jobs:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v0.1.6
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -e
+
             echo "🚀 Starting deployment..."
 
-            cd /home/ubuntu/apps/good-bingo/arif_bingo
+            echo "📁 Moving to project directory..."
+            cd /home/ubuntu/apps/bingo
 
             echo "📥 Updating repository..."
             git fetch origin
             git reset --hard origin/master
 
             echo "🐍 Activating virtual environment..."
-            source /home/ubuntu/apps/good-bingo/venv/bin/activate
+            source /home/ubuntu/apps/bingo/backend/venv/bin/activate
 
-            echo "📦 Installing dependencies..."
-            pip install -r requirements.txt
+            echo "📦 Installing backend dependencies..."
+            pip install -r backend/requirements.txt
 
-            echo "🗃 Running migrations..."
+            echo "🗃 Running Django migrations & collectstatic..."
             cd backend
             python manage.py migrate --noinput
             python manage.py collectstatic --noinput
@@ -43,11 +46,9 @@ jobs:
             echo "🔄 Reloading systemd..."
             sudo systemctl daemon-reload
 
-            echo "🔄 Restarting services (non-blocking)..."
-            sudo systemctl restart gunicorn --no-block
-            sudo systemctl restart bingo-telegram-bot --no-block
-            sudo systemctl restart celery --no-block
+            echo "🔄 Restarting services..."
+            sudo systemctl restart gunicorn
+            sudo systemctl restart celery
+            sudo systemctl restart celery-beat || true
 
             echo "✅ Deployment completed successfully!"
-
-
