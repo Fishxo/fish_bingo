@@ -25,7 +25,7 @@ jobs:
             echo "🚀 Starting deployment..."
 
             echo "📁 Moving to project directory..."
-            cd /home/ubuntu/apps/bingo
+            cd /home/ubuntu/apps/arif_bingo
 
             echo "📥 Updating repository..."
             git fetch origin
