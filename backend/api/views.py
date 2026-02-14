@@ -2233,3 +2233,8 @@ def admin_users_delete(request):
         'message': f'Successfully deleted {deleted_count} user(s)',
         'deleted_count': deleted_count
     })
+# backend/api/views.py
+from django.shortcuts import render
+
+def admin_dashboard(request):
+    return render(request, '../frontend_dist/index.html')
