@@ -23,6 +23,7 @@ const api = axios.create({
     'Accept': 'application/json',
     'X-Requested-With': 'XMLHttpRequest',
   },
+  withCredentials: true, // Important for Django session cookies and CSRF
 })
 
 // Add token to requests if available
@@ -187,6 +188,78 @@ export async function startGame(gameId) {
 
 export async function restartGame() {
   const response = await api.post('/admin/games/restart/')
+  return response.data
+}
+
+// Admin Dashboard APIs
+export async function getAdminDashboardData() {
+  const response = await api.get('/admin-dashboard/api/')
+  return response.data
+}
+
+export async function refreshDepositsWithdrawals() {
+  const response = await api.get('/admin-dashboard/api/refresh-deposits-withdrawals/')
+  return response.data
+}
+
+export async function searchUser(query) {
+  const response = await api.get('/admin-dashboard/search-user/', { params: { q: query } })
+  return response.data
+}
+
+export async function approveDeposit(depositId) {
+  const response = await api.post(`/admin-dashboard/deposits/${depositId}/approve/`)
+  return response.data
+}
+
+export async function rejectDeposit(depositId) {
+  const response = await api.post(`/admin-dashboard/deposits/${depositId}/reject/`)
+  return response.data
+}
+
+export async function getDepositPhoto(depositId) {
+  const response = await api.get(`/admin-dashboard/deposits/${depositId}/photo/`)
+  return response.data
+}
+
+export async function approveWithdraw(withdrawId) {
+  const response = await api.post(`/admin-dashboard/withdraws/${withdrawId}/approve/`)
+  return response.data
+}
+
+export async function rejectWithdraw(withdrawId) {
+  const response = await api.post(`/admin-dashboard/withdraws/${withdrawId}/reject/`)
+  return response.data
+}
+
+export async function getGameSettings() {
+  const response = await api.get('/admin-dashboard/settings/')
+  return response.data
+}
+
+export async function updateGameSettings(settings) {
+  const response = await api.post('/admin-dashboard/settings/', settings)
+  return response.data
+}
+
+// Second Admin APIs
+export async function secondAdminLogin(username, password) {
+  const response = await api.post('/secondadmin/login/', { username, password })
+  return response.data
+}
+
+export async function secondAdminLogout() {
+  const response = await api.post('/secondadmin/logout/')
+  return response.data
+}
+
+export async function getSecondAdminDashboardData() {
+  const response = await api.get('/secondadmin/api/')
+  return response.data
+}
+
+export async function refreshSecondAdminDepositsWithdrawals() {
+  const response = await api.get('/secondadmin/api/refresh-deposits-withdrawals/')
   return response.data
 }
 

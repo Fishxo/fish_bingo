@@ -10,6 +10,9 @@ import WaitingView from './views/WaitingView.vue'
 import GameCompletedView from './views/GameCompletedView.vue'
 import CardSelectionView from './views/CardSelectionView.vue'
 import ActiveGameView from './views/ActiveGameView.vue'
+import AdminDashboard from './views/AdminDashboard.vue'
+import SecondAdminDashboard from './views/SecondAdminDashboard.vue'
+import SecondAdminLogin from './views/SecondAdminLogin.vue'
 
 const routes = [
   { path: '/', redirect: '/completed' }, // Start at completed view (waiting page) - will redirect based on game status
@@ -17,6 +20,9 @@ const routes = [
   { path: '/completed', name: 'completed', component: GameCompletedView },
   { path: '/select-card', name: 'select-card', component: CardSelectionView },
   { path: '/game', name: 'game', component: ActiveGameView },
+  { path: '/admin-dashboard', name: 'admin-dashboard', component: AdminDashboard },
+  { path: '/secondadmin', name: 'second-admin-dashboard', component: SecondAdminDashboard },
+  { path: '/secondadmin/login', name: 'second-admin-login', component: SecondAdminLogin },
 ]
 
 const router = createRouter({

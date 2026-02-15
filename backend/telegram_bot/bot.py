@@ -281,18 +281,14 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             telegram_user = await db_operation_with_retry(get_user)
             if telegram_user.phone_number:
                 # User already registered with phone number
-                keyboard = [
-                    [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
                 message_text = (
                     "✅ አስቀድመው ተመዝግበዋል!\n\n"
                     f"ያለዎት ሂሳብ: {telegram_user.balance} ብር\n\n"
                 )
                 if update.message:
-                    await update.message.reply_text(message_text, reply_markup=reply_markup)
+                    await update.message.reply_text(message_text)
                 elif update.callback_query:
-                    await update.callback_query.edit_message_text(message_text, reply_markup=reply_markup)
+                    await update.callback_query.edit_message_text(message_text)
                     await update.callback_query.answer()
                 return
         except User.DoesNotExist:
@@ -423,10 +419,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If HTTP (local development), show URL as text instead of web app button
         if settings.TELEGRAM_WEB_APP_URL.startswith('http://'):
             # Local development - can't use web app button with HTTP
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             await update.message.reply_text(
                 f"🍀 በጨዋታዎ ላይ መልካም ዕድል!\n\n"
                 f"መደብ: {bet_amount} ብር\n"
@@ -439,8 +432,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(
                     "🎮 ጨዋታ ይጀምሩ",
                     web_app=WebAppInfo(url=mini_app_url)
-                )],
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
+                )]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
@@ -641,10 +633,7 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if user has any balance
         if telegram_user.balance <= 0:
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             message_text = "❌ በቂ ሂሳብ የለዎትም"
             
             if update.message:
@@ -723,10 +712,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context)
         return
     
-    keyboard = [
-        [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = None
     
     balance_msg = (
         f"💰 የእርስዎ ሂሳብ\n\n"
@@ -770,10 +756,7 @@ async def instruction_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "መልካም ዕድል! 🍀"
     )
     
-    keyboard = [
-        [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = None
     
     if update.message:
         await update.message.reply_text(instructions, reply_markup=reply_markup)
@@ -784,10 +767,7 @@ async def instruction_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /support command"""
-    keyboard = [
-        [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = None
     
     # Get support phone from GameSettings
     async def get_settings():
@@ -827,8 +807,7 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(invite_link)}&text={encoded_text}"
     
     keyboard = [
-        [InlineKeyboardButton("📤 ሰዎችን ለመጋበዝ", url=share_url)],
-        [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
+        [InlineKeyboardButton("📤 ሰዎችን ለመጋበዝ", url=share_url)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -936,10 +915,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"✅ Queued registration rewards task for user {telegram_user.telegram_id} (id={telegram_user.id}), is_first_registration={is_first_registration}")
             
             # Prepare success message
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             
             if is_first_registration:
                 # Get bid_amount for message (cached, fast)
@@ -1315,10 +1291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             deposit_request = await db_operation_with_retry(create_deposit_request)
             
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             
             await update.message.reply_text(
                 f"✅ የገንዘብ ማስገቢያ ጥያቄዎ ተልኳል!\n\n"
@@ -1402,10 +1375,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await sync_to_async(deposit_request.save)()
                 await db_operation_with_retry(save_deposit_request)
             
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             
             await update.message.reply_text(
                 f"✅ ጥያቄዎ ተልኳል!\n"
@@ -1545,10 +1515,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             withdraw_request = await db_operation_with_retry(create_withdraw_request)
             
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             
             await update.message.reply_text(
                 f"✅ የገንዘብ ማውጣት ጥያቄዎ ተልኳል!\n\n"
@@ -1576,10 +1543,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('waiting_for_withdraw', None)
             
         except ValueError:
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             await update.message.reply_text(
                 "ልክ ያልሆነ መጠን። እባክዎ ቁጥር ያስገቡ (ምሳሌ: 100)",
                 reply_markup=reply_markup
@@ -1591,10 +1555,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     else:
         # Default response
-        keyboard = [
-            [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = None
         await update.message.reply_text(
             "ዋና ማውጫን ለማየት /start(ዋና ማውጫ) ይጠቀሙ።",
             reply_markup=reply_markup
@@ -1860,8 +1821,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if settings.TELEGRAM_WEB_APP_URL and not settings.TELEGRAM_WEB_APP_URL.startswith('http://'):
             # HTTPS - use web app button (opens in Telegram)
             keyboard = [
-                [InlineKeyboardButton("🎮 ጨዋታ ይጀምሩ", web_app=WebAppInfo(url=mini_app_url))],
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
+                [InlineKeyboardButton("🎮 ጨዋታ ይጀምሩ", web_app=WebAppInfo(url=mini_app_url))]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
@@ -1872,10 +1832,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # HTTP (local development) - show URL as text link
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             await query.edit_message_text(
                 f"🍀 በጨዋታዎ ላይ መልካም ዕድል!\n\n"
                 f"መደብ: {bet_amount} ብር\n"
@@ -1930,10 +1887,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Check balance again
             if from_user.balance < transfer_amount:
-                keyboard = [
-                    [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
+                reply_markup = None
                 await query.edit_message_text(
                     f"❌ በቂ ሂሳብ የሎትም!\n\nያለዎት ሂሳብ: {from_user.balance} ብር",
                     reply_markup=reply_markup
@@ -2003,10 +1957,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('transfer_phone', None)
             context.user_data.pop('transfer_to_user_id', None)
             
-            keyboard = [
-                [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = None
             
             await query.edit_message_text(
                 f"✅ ገንዘቡ በተሳካ ሁኔታ ተላልፏል!\n\n"
@@ -2053,11 +2004,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('transfer_phone', None)
         context.user_data.pop('transfer_to_user_id', None)
         
-        keyboard = [
-            [InlineKeyboardButton("🏠 ዋና ማውጫ", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("❌ ማስተላለፍ ተሰርዟል።", reply_markup=reply_markup)
+        await query.edit_message_text("❌ ማስተላለፍ ተሰርዟል።")
     elif query.data.startswith("withdraw_platform_"):
         # Handle platform selection for withdraw
         platform = query.data.replace("withdraw_platform_", "")
