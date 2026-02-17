@@ -60,6 +60,21 @@ urlpatterns = [
     path('secondadmin/api/', admin_views.second_admin_dashboard_api, name='second-admin-dashboard-api'),
     path('secondadmin/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-second'),
     # secondadmin/ page route removed so SPA serves /secondadmin
+    # Duplicate admin/secondadmin API routes under /api/ so requests to /api/admin-dashboard/api/ etc. work (e.g. if frontend uses api baseURL)
+    path('api/admin-dashboard/search-user/', admin_views.search_user, name='search-user-api'),
+    path('api/admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit-api'),
+    path('api/admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit-api'),
+    path('api/admin-dashboard/deposits/<int:deposit_id>/photo/', admin_views.get_deposit_photo, name='get-deposit-photo-api'),
+    path('api/admin-dashboard/withdraws/<int:withdraw_id>/approve/', admin_views.approve_withdraw_request_api, name='approve-withdraw-api'),
+    path('api/admin-dashboard/withdraws/<int:withdraw_id>/reject/', admin_views.reject_withdraw_request_api, name='reject-withdraw-api'),
+    path('api/admin-dashboard/settings/', admin_views.game_settings_api, name='game-settings-api'),
+    path('api/admin-dashboard/second-admin-credentials/', admin_views.second_admin_credentials_api, name='second-admin-credentials-api'),
+    path('api/admin-dashboard/api/', admin_views.admin_dashboard_api, name='admin-dashboard-api-alt'),
+    path('api/admin-dashboard/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-alt'),
+    path('api/secondadmin/login/', admin_views.second_admin_login, name='second-admin-login-api'),
+    path('api/secondadmin/logout/', admin_views.second_admin_logout, name='second-admin-logout-api'),
+    path('api/secondadmin/api/', admin_views.second_admin_dashboard_api, name='second-admin-dashboard-api-alt'),
+    path('api/secondadmin/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-second-alt'),
     path('api/', include('api.urls')),
     # Serve frontend assets (JS, CSS, etc.) as static files
     re_path(r'^assets/.*$', serve, {

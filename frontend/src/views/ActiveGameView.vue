@@ -305,12 +305,24 @@ export default {
             this.$router.push('/select-card')
             return
           } else if (game.status === 'completed') {
-            // Game is completed - redirect to completed view (router guard should have caught this, but handle it anyway)
+            // Game is completed - wait for winner_declared WebSocket so we can show banner for ALL players (real + fake winner)
+            // Only redirect after a delay if winner_declared never arrives
             if (this.interval) {
               clearInterval(this.interval)
               this.interval = null
             }
-            this.$router.push('/completed')
+            if (this._completedRedirectTimeoutId) {
+              clearTimeout(this._completedRedirectTimeoutId)
+              this._completedRedirectTimeoutId = null
+            }
+            this._completedRedirectTimeoutId = setTimeout(() => {
+              this._completedRedirectTimeoutId = null
+              const timeSinceBannerShown = this.winnerBannerShownAt ? Date.now() - this.winnerBannerShownAt : Infinity
+              if (timeSinceBannerShown < 8000) return
+              if ((!this.winner && (!this.winners || this.winners.length === 0)) || timeSinceBannerShown >= 8000) {
+                this.$router.push('/completed')
+              }
+            }, 3500)
             return
           }
           
@@ -452,12 +464,14 @@ export default {
                 const lastCall = game.called_numbers[game.called_numbers.length - 1]
                 const callKey = `${lastCall.letter}-${lastCall.number}`
                 
-                // Only update if WebSocket hasn't already processed this call
-                // or if we don't have a current call yet
-                if (!this.processedCalls || !this.processedCalls.has(callKey) || !this.currentCall) {
-                  // Only update currentCall if it's different or doesn't exist
+                // CRITICAL: During active game, drive the big display (currentCall) from WebSocket only,
+                // so numbers appear one-by-one at the right interval. Only set currentCall from polling when:
+                // we don't have one yet (initial load / catch-up) or game is not active.
+                const shouldUpdateCurrentCallFromPolling =
+                  (!this.processedCalls || !this.processedCalls.has(callKey) || !this.currentCall) &&
+                  (!this.currentCall || game.status !== 'active')
+                if (shouldUpdateCurrentCallFromPolling) {
                   if (!this.currentCall || this.currentCall.number !== lastCall.number) {
-                    // Move old currentCall to recent if it exists
                     if (this.currentCall) {
                       const existsInRecent = this.recentCalls.some(call => 
                         call.number === this.currentCall.number && call.letter === this.currentCall.letter
@@ -476,8 +490,6 @@ export default {
                       number: lastCall.number,
                       letter: lastCall.letter
                     }
-                    
-                    // Mark as processed
                     if (!this.processedCalls) {
                       this.processedCalls = new Set()
                     }
@@ -580,18 +592,14 @@ export default {
       this.ws.on('number_called', (data) => {
         console.log('Number called via WebSocket:', data)
         
-        // FIX: Hide countdown only if countdown has finished (3 seconds passed)
-        // This ensures numbers aren't processed until countdown is done
-        if (this.showStartCountdown && this.startCountdownSeconds <= 0) {
+        // CRITICAL: Always process every number - never drop. If countdown is running, hide it first then process.
+        // This fixes "only first number shows then stuck" when numbers arrive during or right after countdown.
+        if (this.showStartCountdown) {
           this.showStartCountdown = false
           if (this.countdownInterval) {
             clearInterval(this.countdownInterval)
             this.countdownInterval = null
           }
-        } else if (this.showStartCountdown && this.startCountdownSeconds > 0) {
-          // Countdown still running, ignore this call (shouldn't happen, but safety check)
-          console.log('Ignoring number call - countdown still running')
-          return
         }
         
         // Prevent duplicate processing - use a flag to prevent race conditions
@@ -743,14 +751,14 @@ export default {
         if (data && data.no_winner) {
           this.handleNoWinner()
         } else {
-          // Don't redirect immediately - let winner banner show first
-          // The winner banner will handle redirect after timer
-          if (!this.winner) {
+          // Don't redirect immediately - let winner_declared show banner first for ALL players
+          // Give winner_declared time to arrive (same or next tick); then redirect if still no winner
+          if (!this.winner && (!this.winners || this.winners.length === 0)) {
             setTimeout(() => {
-              if (!this.winner) {
+              if (!this.winner && (!this.winners || this.winners.length === 0)) {
                 this.$router.push('/completed')
               }
-            }, 1000)
+            }, 2500)
           }
         }
       })

@@ -71,6 +71,26 @@ export class WebSocketService {
 
   handleMessage(data) {
     const { type, data: messageData } = data
+
+    // Backend may send batched events (batch_events) - process each so number_called appears sequentially
+    if (type === 'batch_events' && messageData && Array.isArray(messageData.events)) {
+      messageData.events.forEach((evt) => {
+        const evType = evt.type || evt.event_type
+        const evData = evt.data || evt
+        if (evType === 'number_called') {
+          this.emit('number_called', evData)
+        } else if (evType === 'winner_declared') {
+          this.emit('winner_declared', evData)
+        } else if (evType === 'game_ended') {
+          this.emit('game_ended', evData)
+        } else if (evType === 'game_started') {
+          this.emit('game_started', evData)
+        } else if (evType === 'card_selected') {
+          this.emit('card_selected', evData)
+        }
+      })
+      return
+    }
     
     switch (type) {
       case 'number_called':
