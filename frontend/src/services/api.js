@@ -13,9 +13,17 @@ const getApiUrl = () => {
   return 'http://localhost:8000/api'
 }
 
+// Admin dashboard and secondadmin are mounted at site root in Django (not under /api/)
+const getAdminApiBaseUrl = () => {
+  if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    return window.location.origin
+  }
+  return 'http://localhost:8000'
+}
+
 const API_BASE_URL = getApiUrl()
 
-// Create axios instance
+// Create axios instance for /api/ endpoints
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -25,6 +33,41 @@ const api = axios.create({
   },
   withCredentials: true, // Important for Django session cookies and CSRF
 })
+
+// Axios instance for admin-dashboard and secondadmin (mounted at root, not under /api/)
+const adminApi = axios.create({
+  baseURL: getAdminApiBaseUrl(),
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+  },
+  withCredentials: true,
+})
+adminApi.interceptors.request.use((config) => {
+  const csrfToken = document.cookie
+    .split('; ')
+    .find(row => row.startsWith('csrftoken='))
+    ?.split('=')[1]
+  if (csrfToken) {
+    config.headers['X-CSRFToken'] = csrfToken
+  }
+  return config
+})
+adminApi.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && typeof error.response.data === 'string' && error.response.data.trim().startsWith('<')) {
+      console.error('Admin API received HTML instead of JSON:', error.response.data.substring(0, 200))
+      error.response.data = {
+        error: 'Server returned HTML instead of JSON. This may be a CSRF or authentication error.',
+        status: error.response.status,
+        message: 'Please log in to the admin dashboard and try again.'
+      }
+    }
+    return Promise.reject(error)
+  }
+)
 
 // Add token to requests if available
 api.interceptors.request.use((config) => {
@@ -191,75 +234,75 @@ export async function restartGame() {
   return response.data
 }
 
-// Admin Dashboard APIs
+// Admin Dashboard APIs (use adminApi - these routes are at site root, not under /api/)
 export async function getAdminDashboardData() {
-  const response = await api.get('/admin-dashboard/api/')
+  const response = await adminApi.get('/admin-dashboard/api/')
   return response.data
 }
 
 export async function refreshDepositsWithdrawals() {
-  const response = await api.get('/admin-dashboard/api/refresh-deposits-withdrawals/')
+  const response = await adminApi.get('/admin-dashboard/api/refresh-deposits-withdrawals/')
   return response.data
 }
 
 export async function searchUser(query) {
-  const response = await api.get('/admin-dashboard/search-user/', { params: { q: query } })
+  const response = await adminApi.get('/admin-dashboard/search-user/', { params: { q: query } })
   return response.data
 }
 
 export async function approveDeposit(depositId) {
-  const response = await api.post(`/admin-dashboard/deposits/${depositId}/approve/`)
+  const response = await adminApi.post(`/admin-dashboard/deposits/${depositId}/approve/`)
   return response.data
 }
 
 export async function rejectDeposit(depositId) {
-  const response = await api.post(`/admin-dashboard/deposits/${depositId}/reject/`)
+  const response = await adminApi.post(`/admin-dashboard/deposits/${depositId}/reject/`)
   return response.data
 }
 
 export async function getDepositPhoto(depositId) {
-  const response = await api.get(`/admin-dashboard/deposits/${depositId}/photo/`)
+  const response = await adminApi.get(`/admin-dashboard/deposits/${depositId}/photo/`)
   return response.data
 }
 
 export async function approveWithdraw(withdrawId) {
-  const response = await api.post(`/admin-dashboard/withdraws/${withdrawId}/approve/`)
+  const response = await adminApi.post(`/admin-dashboard/withdraws/${withdrawId}/approve/`)
   return response.data
 }
 
 export async function rejectWithdraw(withdrawId) {
-  const response = await api.post(`/admin-dashboard/withdraws/${withdrawId}/reject/`)
+  const response = await adminApi.post(`/admin-dashboard/withdraws/${withdrawId}/reject/`)
   return response.data
 }
 
 export async function getGameSettings() {
-  const response = await api.get('/admin-dashboard/settings/')
+  const response = await adminApi.get('/admin-dashboard/settings/')
   return response.data
 }
 
 export async function updateGameSettings(settings) {
-  const response = await api.post('/admin-dashboard/settings/', settings)
+  const response = await adminApi.post('/admin-dashboard/settings/', settings)
   return response.data
 }
 
 // Second Admin APIs
 export async function secondAdminLogin(username, password) {
-  const response = await api.post('/secondadmin/login/', { username, password })
+  const response = await adminApi.post('/secondadmin/login/', { username, password })
   return response.data
 }
 
 export async function secondAdminLogout() {
-  const response = await api.post('/secondadmin/logout/')
+  const response = await adminApi.post('/secondadmin/logout/')
   return response.data
 }
 
 export async function getSecondAdminDashboardData() {
-  const response = await api.get('/secondadmin/api/')
+  const response = await adminApi.get('/secondadmin/api/')
   return response.data
 }
 
 export async function refreshSecondAdminDepositsWithdrawals() {
-  const response = await api.get('/secondadmin/api/refresh-deposits-withdrawals/')
+  const response = await adminApi.get('/secondadmin/api/refresh-deposits-withdrawals/')
   return response.data
 }
 
