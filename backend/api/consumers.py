@@ -3,28 +3,40 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 
+from api.channels import room_players, room_watchers, room_legacy
+
 User = get_user_model()
 
 
 class GameConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.game_id = self.scope['url_route']['kwargs']['game_id']
-        self.game_group_name = f'game_{self.game_id}'
+        # Role: player = has card, watcher = no card. From query string (?role=player|watcher).
+        query = self.scope.get('query_string', b'').decode()
+        role = 'both'
+        for part in query.split('&'):
+            if part.startswith('role='):
+                role = part.split('=', 1)[1].strip().lower() or 'both'
+                break
 
-        # Join game group
-        await self.channel_layer.group_add(
-            self.game_group_name,
-            self.channel_name
-        )
+        # Join rooms: players, watchers, or both (default = both for backward compat)
+        groups_to_join = []
+        if role in ('player', 'both'):
+            groups_to_join.append(room_players(self.game_id))
+        if role in ('watcher', 'both'):
+            groups_to_join.append(room_watchers(self.game_id))
+        if not groups_to_join:
+            groups_to_join.append(room_legacy(self.game_id))
+
+        for group_name in groups_to_join:
+            await self.channel_layer.group_add(group_name, self.channel_name)
 
         await self.accept()
 
     async def disconnect(self, close_code):
-        # Leave game group
-        await self.channel_layer.group_discard(
-            self.game_group_name,
-            self.channel_name
-        )
+        # Leave all groups we may have joined (players, watchers, legacy)
+        for group_name in (room_players(self.game_id), room_watchers(self.game_id), room_legacy(self.game_id)):
+            await self.channel_layer.group_discard(group_name, self.channel_name)
 
     # Receive message from WebSocket
     async def receive(self, text_data):
@@ -87,6 +99,13 @@ class GameConsumer(AsyncWebsocketConsumer):
     async def admin_message(self, event):
         await self.send(text_data=json.dumps({
             'type': 'admin_message',
+            'data': event['data']
+        }))
+
+    # Handler for game cancelled (e.g. refund and cancel)
+    async def game_cancelled(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'game_cancelled',
             'data': event['data']
         }))
     

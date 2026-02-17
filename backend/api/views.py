@@ -8,8 +8,6 @@ from django.db.models import Q, Sum
 from django.views.decorators.csrf import csrf_exempt
 from decimal import Decimal
 from django.utils import timezone
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 
 from .models import Game, GameCard, CalledNumber, Deposit, Transaction, User, Transfer
 from .serializers import (
@@ -23,8 +21,7 @@ from .game_logic import (
 )
 from .auth_utils import get_user_from_token
 from .phone_utils import normalize_phone_number, find_user_by_phone
-
-channel_layer = get_channel_layer()
+from .channels import broadcast_to_game_rooms
 
 
 class UserViewSet(viewsets.ReadOnlyModelViewSet):
@@ -533,21 +530,12 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     success = start_game(game)
                     if success:
                         game.refresh_from_db()
-                        # Broadcast game started
+                        # Broadcast game started (players + watchers rooms)
                         try:
-                            from channels.layers import get_channel_layer
-                            from asgiref.sync import async_to_sync
-                            channel_layer = get_channel_layer()
-                            async_to_sync(channel_layer.group_send)(
-                                f'game_{game.id}',
-                                {
-                                    'type': 'game_started',
-                                    'data': {
-                                        'game_id': game.id,
-                                        'started_at': game.started_at.isoformat() if game.started_at else None
-                                    }
-                                }
-                            )
+                            broadcast_to_game_rooms(game.id, 'game_started', {
+                                'game_id': game.id,
+                                'started_at': game.started_at.isoformat() if game.started_at else None
+                            })
                         except Exception as e:
                             print(f"WebSocket broadcast error: {e}")
                         
@@ -792,21 +780,15 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     if django_cache:
                         django_cache.delete('game:current')
                     
-                    # Broadcast card unselection
+                    # Broadcast card unselection (players + watchers rooms)
                     try:
                         from .game_logic import get_available_card_numbers
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': None,  # Indicates unselection
-                                    'user_id': user.id,
-                                    'username': user.username,
-                                    'available_cards': get_available_card_numbers(game)
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': None,  # Indicates unselection
+                            'user_id': user.id,
+                            'username': user.username,
+                            'available_cards': get_available_card_numbers(game)
+                        })
                     except Exception as e:
                         print(f"WebSocket broadcast error: {e}")
                     
@@ -855,20 +837,14 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     from .game_logic import get_available_card_numbers
                     response_data['available_cards'] = get_available_card_numbers(game)
                     
-                    # Broadcast card selection via WebSocket
+                    # Broadcast card selection via WebSocket (players + watchers rooms)
                     try:
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': card_number,
-                                    'user_id': user.id,
-                                    'username': user.username,
-                                    'available_cards': response_data['available_cards']
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': card_number,
+                            'user_id': user.id,
+                            'username': user.username,
+                            'available_cards': response_data['available_cards']
+                        })
                     except Exception as e:
                         print(f"WebSocket broadcast error: {e}")
                     
@@ -1188,46 +1164,33 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
             
             # Broadcast all winners with card info (async task will rebroadcast after 1 second with final count)
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'winner_declared',
-                        'data': {
-                            'winners': winners_data,
-                            'winner': UserSerializer(card.user).data,  # Primary winner for backward compatibility
-                            'card_number': card.card_number,
-                            'card_id': card.id,
-                            'card_layout': card.card_layout,
-                            'winning_pattern': winning_pattern,
-                            'prize': prize_per_winner,
-                            'total_prize': float(total_prize),
-                            'winner_count': winner_count,
-                            'last_called_number': winning_number,  # The number that completed the bingo
-                            'called_numbers': called_numbers_list
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'winner_declared', {
+                    'winners': winners_data,
+                    'winner': UserSerializer(card.user).data,  # Primary winner for backward compatibility
+                    'card_number': card.card_number,
+                    'card_id': card.id,
+                    'card_layout': card.card_layout,
+                    'winning_pattern': winning_pattern,
+                    'prize': prize_per_winner,
+                    'total_prize': float(total_prize),
+                    'winner_count': winner_count,
+                    'last_called_number': winning_number,  # The number that completed the bingo
+                    'called_numbers': called_numbers_list
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
             
             # CRITICAL FIX: Also broadcast game_ended event to ensure all users see the game as completed
-            # This ensures the frontend properly redirects after the winner banner
             try:
-                game.refresh_from_db()  # Ensure we have the latest game status
+                game.refresh_from_db()
                 if game.status == 'completed':
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'game_ended',
-                            'data': {
-                                'game_id': game.id,
-                                'status': 'completed',
-                                'completed_at': game.completed_at.isoformat() if game.completed_at else None,
-                                'winner': UserSerializer(card.user).data,
-                                'winner_count': winner_count
-                            }
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'game_ended', {
+                        'game_id': game.id,
+                        'status': 'completed',
+                        'completed_at': game.completed_at.isoformat() if game.completed_at else None,
+                        'winner': UserSerializer(card.user).data,
+                        'winner_count': winner_count
+                    })
             except Exception as e:
                 print(f"WebSocket broadcast error (game_ended): {e}")
             
@@ -1440,18 +1403,12 @@ def start_game(request, game_id):
             from .redis_utils import cleanup_game_live_state
             cleanup_game_live_state(game.id)
             
-            # Broadcast game started
+            # Broadcast game started (players + watchers rooms)
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'game_started',
-                        'data': {
-                            'game_id': game.id,
-                            'started_at': game.started_at.isoformat() if game.started_at else None
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'game_started', {
+                    'game_id': game.id,
+                    'started_at': game.started_at.isoformat() if game.started_at else None
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
             
@@ -1660,19 +1617,13 @@ def restart_game(request):
                 expires_at=timezone.now() + timedelta(minutes=5)
             )
             
-            # Broadcast message to all players via WebSocket
+            # Broadcast message to all players and watchers via WebSocket
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game_id}',
-                    {
-                        'type': 'admin_message',
-                        'data': {
-                            'message': message,
-                            'refund': refund,
-                            'cancel': cancel
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game_id, 'admin_message', {
+                    'message': message,
+                    'refund': refund,
+                    'cancel': cancel
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
         
@@ -2058,19 +2009,13 @@ def end_game(request, game_id):
     from .redis_utils import cleanup_game_redis_keys
     cleanup_game_redis_keys(game.id)
     
-    # Broadcast game ended
+    # Broadcast game ended (players + watchers rooms)
     try:
-        async_to_sync(channel_layer.group_send)(
-            f'game_{game.id}',
-            {
-                'type': 'game_ended',
-                'data': {
-                    'game_id': game.id,
-                    'completed_at': game.completed_at.isoformat(),
-                    'no_winner': True
-                }
-            }
-        )
+        broadcast_to_game_rooms(game.id, 'game_ended', {
+            'game_id': game.id,
+            'completed_at': game.completed_at.isoformat(),
+            'no_winner': True
+        })
     except Exception as e:
         print(f"WebSocket broadcast error: {e}")
     

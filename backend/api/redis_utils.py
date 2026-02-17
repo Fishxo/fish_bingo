@@ -347,7 +347,7 @@ def release_card_lock(card_number):
 
 
 def cleanup_game_redis_keys(game_id):
-    """Clean up all Redis keys for a game after it ends"""
+    """Clean up all Redis keys for a game after it ends (see docs/REDIS_KEYS.md)."""
     r = get_redis_client()
     if not r:
         return
@@ -356,14 +356,11 @@ def cleanup_game_redis_keys(game_id):
         keys_to_delete = [
             get_bingo_window_key(game_id),
             get_bingo_winners_key(game_id),
+            get_bingo_claim_lock_key(game_id),
             get_number_calling_lock_key(game_id),
-            get_called_numbers_key(game_id),  # Also clean up called numbers cache
-            get_game_state_key(game_id),  # PHASE 4: Clean up game state cache
+            get_called_numbers_key(game_id),
+            get_game_state_key(game_id),
         ]
-        
-        # Also clean up any card locks that might still exist (optional, they expire anyway)
-        # This is more aggressive cleanup
-        
         for key in keys_to_delete:
             r.delete(key)
     except Exception as e:
@@ -693,59 +690,22 @@ def sync_game_state_to_redis(game):
 
 
 # PHASE 5 OPTIMIZATION: Batch WebSocket broadcasts (reduces overhead by 50-70%)
-def batch_broadcast_to_game(game_id: int, events: list):
+# Uses room separation: game_{id}_players + game_{id}_watchers + legacy game_{id}
+def batch_broadcast_to_game(game_id: int, events: list, rooms: str = "both"):
     """
-    Send multiple WebSocket events in a single broadcast.
-    This reduces overhead by batching events together.
-    
+    Send multiple WebSocket events to game rooms (players + watchers).
+    See docs/ARCHITECTURE.md and api/channels.py.
+
     Args:
         game_id: Game ID
         events: List of event dicts, each with 'type' and 'data' keys
-                Example: [
-                    {'type': 'number_called', 'data': {...}},
-                    {'type': 'card_selected', 'data': {...}}
-                ]
-    
+        rooms: 'both' | 'players' | 'watchers'
+
     Returns:
         bool: True if broadcast successful, False otherwise
     """
-    if not events:
-        return False
-    
-    try:
-        from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
-        
-        channel_layer = get_channel_layer()
-        
-        # If only one event, send it directly (no batching needed)
-        if len(events) == 1:
-            event = events[0]
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game_id}',
-                {
-                    'type': event['type'],
-                    'data': event['data']
-                }
-            )
-        else:
-            # Send multiple events in a single batch message
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game_id}',
-                {
-                    'type': 'batch_events',
-                    'data': {
-                        'events': events
-                    }
-                }
-            )
-        
-        return True
-    except Exception as e:
-        print(f"Error in batch_broadcast_to_game: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    from api.channels import batch_broadcast_to_game_rooms
+    return batch_broadcast_to_game_rooms(game_id, events, rooms=rooms, use_legacy=True)
 
 
 # ============================================================================
@@ -1061,15 +1021,20 @@ def get_game_live_state(game_id: int) -> dict:
         except (ValueError, TypeError):
             result["current_index"] = 0
         
-        # Parse winner_card_id
+        # Parse winner_card_id (allow negative sentinel e.g. -1 for system winner)
         winner_card_id_str = state.get("winner_card_id", "")
-        if winner_card_id_str and winner_card_id_str.isdigit():
-            result["winner_card_id"] = int(winner_card_id_str)
-        
+        if winner_card_id_str:
+            try:
+                result["winner_card_id"] = int(winner_card_id_str)
+            except ValueError:
+                pass
         # Parse winner_user_id
         winner_user_id_str = state.get("winner_user_id", "")
-        if winner_user_id_str and winner_user_id_str.isdigit():
-            result["winner_user_id"] = int(winner_user_id_str)
+        if winner_user_id_str:
+            try:
+                result["winner_user_id"] = int(winner_user_id_str)
+            except ValueError:
+                pass
         
         # Parse call_interval
         try:
@@ -1155,6 +1120,18 @@ def set_game_winner(game_id: int, card_id: int, user_id: int = None) -> bool:
         return False
 
 
+# Sentinel card_id for "Redis-only system player won" (stops number calling, no DB card)
+SYSTEM_WINNER_CARD_ID = -1
+
+
+def set_game_winner_system_sentinel(game_id: int) -> bool:
+    """
+    Set game winner to "system" sentinel so number calling stops.
+    Use when a Redis-only system player wins (no DB card, no payout).
+    """
+    return set_game_winner(game_id, SYSTEM_WINNER_CARD_ID, None)
+
+
 def add_called_number_live(game_id: int, number: int) -> int:
     """
     Add called number to Redis list and return new call count.
@@ -1219,6 +1196,131 @@ def get_card_marked_numbers_live(game_id: int, card_id: int) -> set:
         return set()
 
 
+# =============================================================================
+# SYSTEM PLAYERS (Redis-only, no DB – see docs/ARCHITECTURE.md)
+# =============================================================================
+
+def get_system_players_key(game_id: int):
+    """Redis key for system players in this game. Hash: card_number -> JSON {name, card_number, card_layout}."""
+    return f"game:{game_id}:system_players"
+
+
+def get_system_card_marked_key(game_id: int, card_number: int):
+    """Redis key for marked numbers on a system player's card."""
+    return f"game:{game_id}:system_card:{card_number}:marked"
+
+
+def system_player_add(game_id: int, card_number: int, name: str, card_layout: list) -> bool:
+    """
+    Add a system player to the game (Redis only, no DB).
+    card_layout: list of rows, each row list of cells {number, letter, ...}.
+    """
+    import json
+    r = get_redis_client()
+    if not r:
+        return False
+    try:
+        key = get_system_players_key(game_id)
+        payload = {"name": name, "card_number": card_number, "card_layout": card_layout}
+        r.hset(key, str(card_number), json.dumps(payload))
+        r.expire(key, 3600)
+        marked_key = get_system_card_marked_key(game_id, card_number)
+        r.delete(marked_key)  # start empty
+        r.expire(marked_key, 3600)
+        return True
+    except Exception as e:
+        print(f"Error adding system player: {e}")
+        return False
+
+
+def system_player_get(game_id: int, card_number: int) -> dict:
+    """Get one system player by card_number. Returns {} if not found."""
+    import json
+    r = get_redis_client()
+    if not r:
+        return {}
+    try:
+        key = get_system_players_key(game_id)
+        raw = r.hget(key, str(card_number))
+        if not raw:
+            return {}
+        return json.loads(raw)
+    except Exception as e:
+        print(f"Error getting system player: {e}")
+        return {}
+
+
+def system_player_get_all(game_id: int) -> list:
+    """Get all system players for the game. Returns list of {name, card_number, card_layout}."""
+    import json
+    r = get_redis_client()
+    if not r:
+        return []
+    try:
+        key = get_system_players_key(game_id)
+        data = r.hgetall(key)
+        if not data:
+            return []
+        out = []
+        for _cn, raw in data.items():
+            try:
+                out.append(json.loads(raw))
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception as e:
+        print(f"Error getting system players: {e}")
+        return []
+
+
+def system_player_remove(game_id: int, card_number: int) -> bool:
+    """Remove a system player and their marked set."""
+    r = get_redis_client()
+    if not r:
+        return False
+    try:
+        key = get_system_players_key(game_id)
+        r.hdel(key, str(card_number))
+        marked_key = get_system_card_marked_key(game_id, card_number)
+        r.delete(marked_key)
+        return True
+    except Exception as e:
+        print(f"Error removing system player: {e}")
+        return False
+
+
+def get_system_card_marked_numbers(game_id: int, card_number: int) -> set:
+    """Get marked numbers for a system player's card."""
+    r = get_redis_client()
+    if not r:
+        return set()
+    try:
+        key = get_system_card_marked_key(game_id, card_number)
+        numbers = r.smembers(key)
+        return {int(n) for n in numbers if n.isdigit()}
+    except Exception as e:
+        print(f"Error getting system card marked numbers: {e}")
+        return set()
+
+
+def add_system_card_marked_number(game_id: int, card_number: int, number: int) -> bool:
+    """
+    Mark a number on a system player's card. Returns True if number was new.
+    Only call if the number is on the card (caller checks layout).
+    """
+    r = get_redis_client()
+    if not r:
+        return False
+    try:
+        key = get_system_card_marked_key(game_id, card_number)
+        added = r.sadd(key, str(number))
+        r.expire(key, 3600)
+        return bool(added)
+    except Exception as e:
+        print(f"Error marking system card: {e}")
+        return False
+
+
 def cleanup_game_live_state(game_id: int):
     """
     Clean up ALL game-related Redis keys (called after game finalization).
@@ -1261,6 +1363,13 @@ def cleanup_game_live_state(game_id: int):
         card_keys = r.keys(card_pattern)
         if card_keys:
             r.delete(*card_keys)
+        
+        # System players (Redis-only)
+        r.delete(get_system_players_key(game_id))
+        system_card_pattern = f"game:{game_id}:system_card:*:marked"
+        system_card_keys = r.keys(system_card_pattern)
+        if system_card_keys:
+            r.delete(*system_card_keys)
         
         # Also delete any card marked count keys
         count_pattern = f"card:*:marked_count"

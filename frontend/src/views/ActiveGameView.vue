@@ -552,8 +552,8 @@ export default {
     },
     setupWebSocket() {
       if (!this.game) return
-      
-      this.ws = new WebSocketService(this.game.id)
+      // Room separation: game view = player room (see docs/WEBSOCKET_EVENTS.md)
+      this.ws = new WebSocketService(this.game.id, { role: 'player' })
       
       this.ws.on('connected', () => {
         console.log('WebSocket connected successfully')
@@ -712,11 +712,19 @@ export default {
           } else if (data.cancel) {
             // If cancel only, redirect to home/card selection after a delay
             setTimeout(() => {
-              // Redirect to home page to force card selection
               window.location.href = '/'
             }, 3000)
           }
         }
+      })
+      
+      this.ws.on('game_cancelled', (data) => {
+        if (data && data.message) {
+          this.showNotification(data.message, 'warning')
+        }
+        setTimeout(() => {
+          this.$router.push('/completed').catch(() => {})
+        }, 2000)
       })
       
       this.ws.on('game_ended', (data) => {

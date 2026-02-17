@@ -1,6 +1,11 @@
 export class WebSocketService {
-  constructor(gameId) {
+  /**
+   * @param {number|string} gameId
+   * @param {{ role?: 'player'|'watcher' }} [options] - role=player if user has a card, role=watcher if only watching (room separation for scaling)
+   */
+  constructor(gameId, options = {}) {
     this.gameId = gameId
+    this.role = options.role || null
     this.ws = null
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
@@ -10,20 +15,19 @@ export class WebSocketService {
   connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     
-    // Auto-detect WebSocket URL based on current host (same logic as API service)
     let host
     if (import.meta.env.VITE_WS_URL) {
-      // Use explicit WebSocket URL if set
       host = import.meta.env.VITE_WS_URL.replace('ws://', '').replace('wss://', '')
     } else if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      // Production: use same origin as the web app
       host = window.location.host
     } else {
-      // Development: use localhost:8000
       host = 'localhost:8000'
     }
     
-    const url = `${protocol}//${host}/ws/game/${this.gameId}/`
+    let url = `${protocol}//${host}/ws/game/${this.gameId}/`
+    if (this.role === 'player' || this.role === 'watcher') {
+      url += `?role=${this.role}`
+    }
     
     console.log('🔌 Connecting to WebSocket:', url)
     this.ws = new WebSocket(url)
@@ -86,6 +90,9 @@ export class WebSocketService {
         break
       case 'admin_message':
         this.emit('admin_message', messageData)
+        break
+      case 'game_cancelled':
+        this.emit('game_cancelled', messageData)
         break
       default:
         this.emit('message', data)

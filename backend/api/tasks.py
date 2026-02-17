@@ -3,17 +3,15 @@ Celery background tasks for Bingo game operations
 """
 from celery import shared_task
 from django.utils import timezone
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 from .models import Game, GameCard, CalledNumber, User, FakeUserGameCard
 from .game_logic import call_number, check_bingo, claim_bingo, generate_bingo_card, create_game_card
+from .channels import broadcast_to_game_rooms
+from .redis_utils import batch_broadcast_to_game
 from decimal import Decimal
 import random
 import time
 from django.core.cache import cache
 from typing import List
-
-channel_layer = get_channel_layer()
 
 
 @shared_task(bind=True, queue='gameplay', name='api.tasks.test_celery_connection')
@@ -64,19 +62,13 @@ def task_call_number(self, game_id: int, number: int):
         # Refresh game from database to get updated current_call_count
         game.refresh_from_db()
         
-        # Broadcast number called via WebSocket
+        # Broadcast number called via WebSocket (players + watchers rooms)
         try:
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game.id}',
-                {
-                    'type': 'number_called',
-                    'data': {
-                        'number': called_number.number,
-                        'letter': called_number.letter,
-                        'call_count': game.current_call_count
-                    }
-                }
-            )
+            broadcast_to_game_rooms(game.id, 'number_called', {
+                'number': called_number.number,
+                'letter': called_number.letter,
+                'call_count': game.current_call_count
+            })
         except Exception as e:
             print(f"WebSocket broadcast error in task_call_number: {e}")
         
@@ -230,15 +222,9 @@ def task_check_bingo_for_all_cards(self, game_id: int):
                 winner_data['total_prize'] = float(game.total_derash)
                 winner_data['prize'] = float(game.total_derash) / winner_cards.count() if winner_cards.count() > 0 else 0
                 
-                # Broadcast winner declared
+                # Broadcast winner declared (players + watchers rooms)
                 try:
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'winner_declared',
-                            'data': winner_data
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'winner_declared', winner_data)
                 except Exception as e:
                     print(f"WebSocket broadcast error for winner: {e}")
         
@@ -471,19 +457,13 @@ def task_process_bingo_winners(self, game_id: int):
             # All winners see the same split amount, but only real winners actually receive it
             display_prize = float(prize_per_winner)
             
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game.id}',
-                {
-                    'type': 'winner_declared',
-                    'data': {
-                        'winners': winners_data,
-                        'winner': primary_winner,
-                        'total_prize': float(total_prize),
-                        'prize': display_prize,  # Show total prize for fake users (for display consistency)
-                        'winner_count': all_winner_count
-                    }
-                }
-            )
+            broadcast_to_game_rooms(game.id, 'winner_declared', {
+                'winners': winners_data,
+                'winner': primary_winner,
+                'total_prize': float(total_prize),
+                'prize': display_prize,  # Show total prize for fake users (for display consistency)
+                'winner_count': all_winner_count
+            })
         except Exception as e:
             print(f"WebSocket broadcast error in task_process_bingo_winners: {e}")
         
@@ -622,16 +602,10 @@ def task_auto_call_numbers(self, game_id: int):
                     cache.delete('game:current')
                     
                     try:
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'game_ended',
-                                'data': {
-                                    'game_id': game.id,
-                                    'no_winner': True
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'game_ended', {
+                            'game_id': game.id,
+                            'no_winner': True
+                        })
                     except Exception as e:
                         print(f"WebSocket broadcast error: {e}")
                 release_number_calling_lock(game_id)
@@ -684,19 +658,13 @@ def task_auto_call_numbers(self, game_id: int):
                     game.refresh_from_db()
                     call_count = game.current_call_count
                 
-                # Broadcast number called FIRST, before checking for winners
+                # Broadcast number called FIRST (players + watchers rooms)
                 try:
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'number_called',
-                            'data': {
-                                'number': called_number.number,
-                                'letter': called_number.letter,
-                                'call_count': call_count
-                            }
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'number_called', {
+                        'number': called_number.number,
+                        'letter': called_number.letter,
+                        'call_count': call_count
+                    })
                 except Exception as e:
                     print(f"WebSocket broadcast error in auto_call_numbers (number_called): {e}")
                 
@@ -733,6 +701,22 @@ def task_auto_call_numbers(self, game_id: int):
                     # Continue with number calling even if fake user processing fails
                     winners = []
                     updated_count = 0
+                
+                # Redis-only system players: mark number and check bingo (no DB, no payout)
+                from .fake_user_manager import batch_mark_number_on_system_players_redis
+                from .redis_utils import set_game_winner_system_sentinel
+                try:
+                    redis_updated, redis_winners = batch_mark_number_on_system_players_redis(game_id, number)
+                    if redis_updated:
+                        print(f"Marked number {number} on {redis_updated} Redis system players")
+                    if redis_winners:
+                        print(f"Redis system player(s) bingo: {[w.get('name') for w in redis_winners]}")
+                        set_game_winner_system_sentinel(game_id)
+                        release_number_calling_lock(game_id)
+                        task_finalize_redis_system_winner.delay(game_id, redis_winners[0])
+                        return {'success': True, 'redis_system_winner': True, 'stopped': True}
+                except Exception as e:
+                    print(f"ERROR in batch_mark_number_on_system_players_redis: {e}")
                 
                 # CRITICAL FIX: Check again if game has a winner after processing fake cards
                 # A real user might have won while we were processing fake cards
@@ -999,24 +983,19 @@ def task_call_first_number(self, game_id: int):
                 game.refresh_from_db()
                 call_count = game.current_call_count
             
-            # Broadcast number called
+            # Broadcast number called (players + watchers rooms)
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'number_called',
-                        'data': {
-                            'number': called_number.number,
-                            'letter': called_number.letter,
-                            'call_count': call_count
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'number_called', {
+                    'number': called_number.number,
+                    'letter': called_number.letter,
+                    'call_count': call_count
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
             
             # Trigger fake card processing (non-blocking, separate task)
-            from .fake_user_manager import batch_mark_number_on_fake_cards
+            from .fake_user_manager import batch_mark_number_on_fake_cards, batch_mark_number_on_system_players_redis
+            from .redis_utils import set_game_winner_system_sentinel
             try:
                 updated_count, winners = batch_mark_number_on_fake_cards(game.id, number)
                 print(f"Batch processed {updated_count} fake cards for number {number}, found {len(winners)} winners")
@@ -1031,6 +1010,17 @@ def task_call_first_number(self, game_id: int):
                         task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=3)
             except Exception as e:
                 print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
+            
+            # Redis-only system players: mark and check bingo (no DB, no payout)
+            try:
+                redis_updated, redis_winners = batch_mark_number_on_system_players_redis(game_id, number)
+                if redis_winners:
+                    set_game_winner_system_sentinel(game_id)
+                    task_finalize_redis_system_winner.delay(game_id, redis_winners[0])
+                    release_number_calling_lock(game_id)
+                    return {'success': True, 'number': number, 'first_call': True, 'redis_system_winner': True}
+            except Exception as e:
+                print(f"ERROR in batch_mark_number_on_system_players_redis: {e}")
             
             # Trigger bingo check (non-blocking)
             task_check_bingo_for_all_cards.delay(game_id)
@@ -1071,21 +1061,15 @@ def task_generate_and_create_card(self, game_id: int, user_id: int, card_number:
         # Create the card (this handles payment and validation)
         card = create_game_card(game, user, card_number)
         
-        # Broadcast card selection
+        # Broadcast card selection (players + watchers rooms)
         try:
             from .game_logic import get_available_card_numbers
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game.id}',
-                {
-                    'type': 'card_selected',
-                    'data': {
-                        'card_number': card_number,
-                        'user_id': user.id,
-                        'username': user.username,
-                        'available_cards': get_available_card_numbers(game)
-                    }
-                }
-            )
+            broadcast_to_game_rooms(game.id, 'card_selected', {
+                'card_number': card_number,
+                'user_id': user.id,
+                'username': user.username,
+                'available_cards': get_available_card_numbers(game)
+            })
         except Exception as e:
             print(f"WebSocket broadcast error in task_generate_and_create_card: {e}")
         
@@ -1229,18 +1213,12 @@ def task_cancel_game(self, game_id: int):
             finally:
                 release_game_creation_lock()
         
-        # Broadcast game cancelled event to all players (use old_game_id for the group)
+        # Broadcast game cancelled (players + watchers rooms)
         try:
-            async_to_sync(channel_layer.group_send)(
-                f'game_{old_game_id}',
-                {
-                    'type': 'game_cancelled',
-                    'data': {
-                        'message': 'Game has been cancelled. Please select a new card.',
-                        'new_game_id': new_game.id
-                    }
-                }
-            )
+            broadcast_to_game_rooms(old_game_id, 'game_cancelled', {
+                'message': 'Game has been cancelled. Please select a new card.',
+                'new_game_id': new_game.id
+            })
         except Exception as e:
             print(f"WebSocket broadcast error: {e}")
         
@@ -1366,19 +1344,13 @@ def task_select_single_fake_card(self, game_id: int, fake_user_id: int):
             # Broadcast card selection via WebSocket
             try:
                 from .game_logic import get_available_card_numbers
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'card_selected',
-                        'data': {
-                            'card_number': card_number,
-                            'user_id': None,  # Fake user
-                            'username': fake_user.name,
-                            'is_fake': True,
-                            'available_cards': get_available_card_numbers(game)
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'card_selected', {
+                    'card_number': card_number,
+                    'user_id': None,  # Fake user
+                    'username': fake_user.name,
+                    'is_fake': True,
+                    'available_cards': get_available_card_numbers(game)
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error for fake user card: {e}")
             
@@ -1588,22 +1560,13 @@ def task_select_fake_card_with_changes(self, game_id: int, fake_user_id: int):
                 
                 # Broadcast unselection immediately
                 try:
-                    from channels.layers import get_channel_layer
-                    from asgiref.sync import async_to_sync
-                    channel_layer = get_channel_layer()
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'card_selected',
-                            'data': {
-                                'card_number': None,  # Indicates unselection
-                                'user_id': None,
-                                'username': fake_user.name,
-                                'is_fake': True,
-                                'available_cards': get_available_card_numbers(game)
-                            }
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'card_selected', {
+                        'card_number': None,  # Indicates unselection
+                        'user_id': None,
+                        'username': fake_user.name,
+                        'is_fake': True,
+                        'available_cards': get_available_card_numbers(game)
+                    })
                 except Exception as e:
                     print(f"WebSocket broadcast error for fake user unselection: {e}")
                 
@@ -1633,22 +1596,13 @@ def task_select_fake_card_with_changes(self, game_id: int, fake_user_id: int):
             
             # Broadcast card selection immediately
             try:
-                from channels.layers import get_channel_layer
-                from asgiref.sync import async_to_sync
-                channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'card_selected',
-                        'data': {
-                            'card_number': card_number,
-                            'user_id': None,  # Fake user
-                            'username': fake_user.name,
-                            'is_fake': True,
-                            'available_cards': get_available_card_numbers(game)
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'card_selected', {
+                    'card_number': card_number,
+                    'user_id': None,  # Fake user
+                    'username': fake_user.name,
+                    'is_fake': True,
+                    'available_cards': get_available_card_numbers(game)
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error for fake user card: {e}")
             
@@ -1682,21 +1636,15 @@ def task_select_fake_card_with_changes(self, game_id: int, fake_user_id: int):
                 card_number = random.choice(available_cards)
                 try:
                     card = create_fake_user_card(game, fake_user, card_number)
-                    # Broadcast selection
+                    # Broadcast selection (players + watchers rooms)
                     try:
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': card_number,
-                                    'user_id': None,
-                                    'username': fake_user.name,
-                                    'is_fake': True,
-                                    'available_cards': get_available_card_numbers(game)
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': card_number,
+                            'user_id': None,
+                            'username': fake_user.name,
+                            'is_fake': True,
+                            'available_cards': get_available_card_numbers(game)
+                        })
                     except Exception as e:
                         print(f"WebSocket broadcast error: {e}")
                     
@@ -1735,9 +1683,7 @@ def task_select_fake_card_once(self, game_id: int, fake_user_id: int):
             create_fake_user_card
         )
         from .game_logic import get_available_card_numbers
-        from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
-        
+
         game = Game.objects.get(id=game_id)
         fake_user = FakeUser.objects.get(id=fake_user_id, is_active=True)
         
@@ -1786,20 +1732,13 @@ def task_select_fake_card_once(self, game_id: int, fake_user_id: int):
             
             # Broadcast card selection immediately
             try:
-                channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'card_selected',
-                        'data': {
-                            'card_number': card_number,
-                            'user_id': None,  # Fake user
-                            'username': fake_user.name,
-                            'is_fake': True,
-                            'available_cards': get_available_card_numbers(game)
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'card_selected', {
+                    'card_number': card_number,
+                    'user_id': None,  # Fake user
+                    'username': fake_user.name,
+                    'is_fake': True,
+                    'available_cards': get_available_card_numbers(game)
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error for fake user card: {e}")
             
@@ -1828,20 +1767,13 @@ def task_select_fake_card_once(self, game_id: int, fake_user_id: int):
                     card = create_fake_user_card(game, fake_user, card_number)
                     # Broadcast selection
                     try:
-                        channel_layer = get_channel_layer()
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': card_number,
-                                    'user_id': None,
-                                    'username': fake_user.name,
-                                    'is_fake': True,
-                                    'available_cards': get_available_card_numbers(game)
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': card_number,
+                            'user_id': None,
+                            'username': fake_user.name,
+                            'is_fake': True,
+                            'available_cards': get_available_card_numbers(game)
+                        })
                     except Exception as e:
                         print(f"WebSocket broadcast error: {e}")
                     
@@ -1903,18 +1835,12 @@ def task_check_all_numbers_called(self, game_id: int):
             # Invalidate cache
             cache.delete('game:current')
             
-            # Broadcast game ended
+            # Broadcast game ended (players + watchers rooms)
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'game_ended',
-                        'data': {
-                            'game_id': game.id,
-                            'no_winner': True
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'game_ended', {
+                    'game_id': game.id,
+                    'no_winner': True
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
         
@@ -2212,19 +2138,13 @@ def task_call_next_number(self, game_id: int):
         
         print(f"✅ Game {game_id}: Called number {number} ({letter}) - call #{call_count} [Redis-only, DB write at game end]")
         
-        # Broadcast number called (non-blocking)
+        # Broadcast number called (players + watchers rooms)
         try:
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game_id}',
-                {
-                    'type': 'number_called',
-                    'data': {
-                        'number': number,
-                        'letter': letter,
-                        'call_count': call_count
-                    }
-                }
-            )
+            broadcast_to_game_rooms(game_id, 'number_called', {
+                'number': number,
+                'letter': letter,
+                'call_count': call_count
+            })
         except Exception as e:
             print(f"WebSocket broadcast error: {e}")
         
@@ -2955,13 +2875,7 @@ def task_finalize_game(self, game_id: int):
                     logger.info(f"📢 [FINALIZE] Game {game_id}: Broadcasting winner_declared with data - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
                     print(f"📢 [FINALIZE] Game {game_id}: Broadcasting - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
                     
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'winner_declared',
-                            'data': winner_data
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'winner_declared', winner_data)
                     logger.info(f"✅ [FINALIZE] Game {game_id}: winner_declared broadcast successful, winner: {winner_user_id}, prize in data: {winner_data.get('prize', 'N/A')}")
                     print(f"✅ [FINALIZE] Game {game_id}: winner_declared broadcast successful - prize: {winner_data.get('prize', 'N/A')}")
                 except Exception as e:
@@ -2983,20 +2897,14 @@ def task_finalize_game(self, game_id: int):
             print(f"📢 [FINALIZE] Game {game_id}: Fake winner - delaying game_ended broadcast")
             # game_ended will be broadcast by task_broadcast_winner (updated to also send game_ended)
         else:
-            # Real winner - broadcast game_ended immediately
+            # Real winner - broadcast game_ended immediately (players + watchers rooms)
             try:
-                async_to_sync(channel_layer.group_send)(
-                    f'game_{game.id}',
-                    {
-                        'type': 'game_ended',
-                        'data': {
-                            'game_id': game.id,
-                            'status': 'completed',
-                            'winner_id': winner_user_id,
-                            'completed_at': game.completed_at.isoformat() if game.completed_at else None
-                        }
-                    }
-                )
+                broadcast_to_game_rooms(game.id, 'game_ended', {
+                    'game_id': game.id,
+                    'status': 'completed',
+                    'winner_id': winner_user_id,
+                    'completed_at': game.completed_at.isoformat() if game.completed_at else None
+                })
             except Exception as e:
                 print(f"WebSocket broadcast error (game_ended): {e}")
         
@@ -3032,52 +2940,33 @@ def task_broadcast_winner(self, game_id: int, winner_data: dict):
     logger = logging.getLogger(__name__)
     
     try:
-        from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
         from .models import Game
-        
+
         game = Game.objects.get(id=game_id)
-        channel_layer = get_channel_layer()
-        
+
         logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared and game_ended events")
         print(f"📢 [BROADCAST] Game {game_id}: Broadcasting delayed winner_declared and game_ended events")
-        
-        # CRITICAL: Log the exact data being broadcast
+
         logger.info(f"📢 [BROADCAST] Game {game_id}: Broadcasting winner_declared with data - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
         print(f"📢 [BROADCAST] Game {game_id}: Broadcasting - prize: {winner_data.get('prize', 'N/A')}, total_prize: {winner_data.get('total_prize', 'N/A')}")
-        
-        # Broadcast winner_declared
-        async_to_sync(channel_layer.group_send)(
-            f'game_{game.id}',
-            {
-                'type': 'winner_declared',
-                'data': winner_data
-            }
-        )
+
+        broadcast_to_game_rooms(game.id, 'winner_declared', winner_data)
         logger.info(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful, prize in data: {winner_data.get('prize', 'N/A')}")
         print(f"✅ [BROADCAST] Game {game_id}: winner_declared broadcast successful - prize: {winner_data.get('prize', 'N/A')}")
-        
-        # CRITICAL: Also broadcast game_ended for fake winners (delayed along with winner_declared)
-        # This ensures frontend receives both events together and shows the banner before redirecting
+
         try:
-            async_to_sync(channel_layer.group_send)(
-                f'game_{game.id}',
-                {
-                    'type': 'game_ended',
-                    'data': {
-                        'game_id': game.id,
-                        'status': 'completed',
-                        'winner_id': None,  # Fake winner has no user_id
-                        'completed_at': game.completed_at.isoformat() if game.completed_at else None
-                    }
-                }
-            )
+            broadcast_to_game_rooms(game.id, 'game_ended', {
+                'game_id': game.id,
+                'status': 'completed',
+                'winner_id': None,  # Fake winner has no user_id
+                'completed_at': game.completed_at.isoformat() if game.completed_at else None
+            })
             logger.info(f"✅ [BROADCAST] Game {game_id}: game_ended broadcast successful (fake winner)")
             print(f"✅ [BROADCAST] Game {game_id}: game_ended broadcast successful (fake winner)")
         except Exception as e:
             logger.error(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (game_ended): {e}")
             print(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (game_ended): {e}")
-        
+
         return {'success': True}
     except Exception as e:
         logger.error(f"❌ [BROADCAST] Game {game_id}: WebSocket broadcast error (winner_declared): {e}")
@@ -3085,6 +2974,63 @@ def task_broadcast_winner(self, game_id: int, winner_data: dict):
         import traceback
         traceback.print_exc()
         
+        return {'success': False, 'error': str(e)}
+
+
+@shared_task(bind=True, queue='gameplay')
+def task_finalize_redis_system_winner(game_id: int, winner_dict: dict):
+    """
+    Finalize game when a Redis-only system player wins.
+    No DB winner record, no payout. Mark game completed, cleanup Redis, broadcast winner (delayed).
+    winner_dict: {card_number, name, card_layout, pattern, marked_numbers} from batch_mark_number_on_system_players_redis.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from .redis_utils import cleanup_game_live_state
+        game = Game.objects.get(id=game_id)
+        game.status = 'completed'
+        game.completed_at = timezone.now()
+        game.save(update_fields=['status', 'completed_at'])
+        cleanup_game_live_state(game_id)
+        name = winner_dict.get('name', 'System')
+        card_number = winner_dict.get('card_number')
+        card_layout = winner_dict.get('card_layout', [])
+        pattern = winner_dict.get('pattern')
+        marked_numbers = winner_dict.get('marked_numbers') or []
+        selected_list = sorted(marked_numbers) if isinstance(marked_numbers, (set, list)) else []
+        winner_data = {
+            'winners': [{
+                'winner': {'id': None, 'username': name, 'name': name, 'is_fake': True},
+                'username': name,
+                'is_fake': True,
+                'card_number': card_number,
+                'card_id': None,
+                'card_layout': card_layout,
+                'winning_pattern': pattern,
+                'selected_numbers': selected_list,
+                'called_numbers': [],
+                'last_called_number': None,
+                'prize': 0
+            }],
+            'winner': {'id': None, 'username': name, 'name': name, 'is_fake': True},
+            'card_number': card_number,
+            'card_id': None,
+            'card_layout': card_layout,
+            'winning_pattern': pattern,
+            'prize': 0,
+            'total_prize': 0,
+            'winner_count': 1,
+            'last_called_number': None,
+            'called_numbers': []
+        }
+        task_broadcast_winner.apply_async(args=[game_id, winner_data], countdown=3)
+        logger.info(f"Redis system winner finalized for game {game_id}: {name}, card {card_number}")
+        return {'success': True}
+    except Exception as e:
+        logger.error(f"task_finalize_redis_system_winner error: {e}")
+        import traceback
+        traceback.print_exc()
         return {'success': False, 'error': str(e)}
 
 
@@ -3313,25 +3259,16 @@ def task_adjust_fake_users_before_game_start(self, game_id: int):
                             try:
                                 create_fake_user_card(game, fake_user, card_number)
                                 
-                                # Broadcast card selection immediately via WebSocket
+                                # Broadcast card selection (players + watchers rooms)
                                 try:
-                                    from channels.layers import get_channel_layer
-                                    from asgiref.sync import async_to_sync
-                                    channel_layer = get_channel_layer()
                                     from .game_logic import get_available_card_numbers
-                                    async_to_sync(channel_layer.group_send)(
-                                        f'game_{game.id}',
-                                        {
-                                            'type': 'card_selected',
-                                            'data': {
-                                                'card_number': card_number,
-                                                'user_id': None,  # Fake user
-                                                'username': fake_user.name,
-                                                'is_fake': True,
-                                                'available_cards': get_available_card_numbers(game)
-                                            }
-                                        }
-                                    )
+                                    broadcast_to_game_rooms(game.id, 'card_selected', {
+                                        'card_number': card_number,
+                                        'user_id': None,  # Fake user
+                                        'username': fake_user.name,
+                                        'is_fake': True,
+                                        'available_cards': get_available_card_numbers(game)
+                                    })
                                 except Exception as e:
                                     print(f"WebSocket broadcast error for adjustment fake user card: {e}")
                                 
@@ -3366,31 +3303,18 @@ def task_adjust_fake_users_before_game_start(self, game_id: int):
                 for card in cards_to_remove:
                     card.delete()
                 
-                # Broadcast card unselection for removed fake users
+                # Broadcast card unselection for removed fake users (players + watchers rooms)
                 try:
-                    from channels.layers import get_channel_layer
-                    from asgiref.sync import async_to_sync
-                    channel_layer = get_channel_layer()
-                    
-                    # Get updated available cards
                     from .game_logic import get_available_card_numbers
                     available_cards = get_available_card_numbers(game)
-                    
-                    # Broadcast unselection for each removed fake user
                     for card in cards_to_remove:
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': None,  # None means unselected
-                                    'user_id': None,
-                                    'username': card.fake_user.name,
-                                    'is_fake': True,
-                                    'available_cards': available_cards
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': None,  # None means unselected
+                            'user_id': None,
+                            'username': card.fake_user.name,
+                            'is_fake': True,
+                            'available_cards': available_cards
+                        })
                 except Exception as e:
                     print(f"Error broadcasting fake user removal: {e}")
                 
@@ -3412,28 +3336,18 @@ def task_adjust_fake_users_before_game_start(self, game_id: int):
                 # Remove all fake users
                 FakeUserGameCard.objects.filter(game=game).delete()
                 
-                # Broadcast all unselections
+                # Broadcast all unselections (players + watchers rooms)
                 try:
-                    from channels.layers import get_channel_layer
-                    from asgiref.sync import async_to_sync
-                    channel_layer = get_channel_layer()
                     from .game_logic import get_available_card_numbers
                     available_cards = get_available_card_numbers(game)
-                    
                     for card in fake_cards:
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': None,
-                                    'user_id': None,
-                                    'username': card.fake_user.name,
-                                    'is_fake': True,
-                                    'available_cards': available_cards
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': None,
+                            'user_id': None,
+                            'username': card.fake_user.name,
+                            'is_fake': True,
+                            'available_cards': available_cards
+                        })
                 except Exception as e:
                     print(f"Error broadcasting fake user removal: {e}")
                 

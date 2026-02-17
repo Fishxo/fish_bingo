@@ -412,8 +412,9 @@ export default {
     },
     setupWebSocket() {
       if (!this.game) return
-      
-      this.ws = new WebSocketService(this.game.id)
+      // Room separation: player = has card, watcher = only watching (see docs/WEBSOCKET_EVENTS.md)
+      const role = (this.userCard || this.selectedCard) ? 'player' : 'watcher'
+      this.ws = new WebSocketService(this.game.id, { role })
       
       this.ws.on('connected', () => {
         console.log('WebSocket connected successfully in CardSelectionView')
@@ -567,6 +568,14 @@ export default {
             this.$router.push('/completed').catch(() => {})
           }
         }
+      })
+      
+      this.ws.on('game_cancelled', (data) => {
+        if (data && data.message) {
+          this.showNotification(data.message, 'warning')
+        }
+        this.isRedirecting = true
+        this.$router.push('/completed').catch(() => {})
       })
     },
     startPolling() {

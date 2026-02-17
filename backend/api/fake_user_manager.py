@@ -1,6 +1,7 @@
 """
 Fake User Management System
-Handles fake user accounts for simulating players in games
+Handles fake user accounts for simulating players in games.
+System players can also live in Redis only (no DB) - see redis_utils.system_player_* and docs/ARCHITECTURE.md.
 """
 import random
 import asyncio
@@ -9,6 +10,13 @@ from django.utils import timezone
 from decimal import Decimal
 from .models import FakeUser, FakeUserGameCard, Game, GameSettings, GameCard
 from .game_logic import generate_bingo_card
+from .redis_utils import (
+    system_player_get_all,
+    system_player_add,
+    system_player_remove,
+    get_system_card_marked_numbers,
+    add_system_card_marked_number,
+)
 
 
 # Predefined list of 30 fake user names
@@ -78,17 +86,24 @@ def create_fake_user_card(game: Game, fake_user: FakeUser, card_number: int) -> 
     return card
 
 
+def get_system_players_taken_card_numbers(game_id: int) -> set:
+    """Card numbers taken by Redis-only system players."""
+    players = system_player_get_all(game_id)
+    return {p.get('card_number') for p in players if p.get('card_number') is not None}
+
+
 def get_available_card_numbers_for_fake(game: Game) -> List[int]:
-    """Get available card numbers for fake users (excluding real user cards)
+    """Get available card numbers for fake users (excluding real user cards and Redis system players)
     Prefers cards from 1-100 range for more realistic selection"""
     from .models import GameSettings
     settings = GameSettings.get_settings()
     total_cards = settings.total_cards
     
-    # Get all taken card numbers (real and fake)
+    # Get all taken card numbers (real, DB fake, and Redis system players)
     real_taken = set(GameCard.objects.filter(game=game).values_list('card_number', flat=True))
     fake_taken = set(FakeUserGameCard.objects.filter(game=game).values_list('card_number', flat=True))
-    all_taken = real_taken | fake_taken
+    redis_taken = get_system_players_taken_card_numbers(game.id)
+    all_taken = real_taken | fake_taken | redis_taken
     
     # Prefer cards from 1-100 range (more realistic)
     preferred_range = list(range(1, min(101, total_cards + 1)))
@@ -181,86 +196,69 @@ def get_total_player_count(game: Game) -> int:
     return real_count + fake_count
 
 
-def check_fake_user_bingo(card: FakeUserGameCard, called_numbers: set, game=None) -> tuple:
+def _check_bingo_layout_patterns(layout: list, marked_numbers: set, game_id: int = None) -> tuple:
     """
-    Check if a fake user card has a winning BINGO pattern
-    Returns (has_bingo, pattern_type)
-    Only checks patterns enabled in game settings.
-    
-    OPTIMIZATION: Early exit if card has less than 5 marked numbers.
+    Check if a card layout has a winning BINGO pattern given marked numbers.
+    Returns (has_bingo, pattern_type). Used for both DB fake cards and Redis-only system players.
     """
-    # Early exit optimization: minimum bingo requires 5 numbers in a line
-    if len(card.selected_numbers) < 5:
+    if not layout or len(marked_numbers) < 5:
         return (False, None)
-    
-    layout = card.card_layout
-    if not layout:
-        return (False, None)
-    
-    # Get enabled winning patterns from settings
     from .models import GameSettings
-    settings = GameSettings.get_settings(game_id=game.id if game else None)
-    enabled_patterns = getattr(settings, 'winning_patterns', [])
-    
-    # If no patterns specified, default to all patterns (backward compatibility)
-    if not enabled_patterns:
-        enabled_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
-    
-    # Convert to set for faster lookup
+    settings = GameSettings.get_settings(game_id=game_id)
+    enabled_patterns = getattr(settings, 'winning_patterns', []) or [
+        'horizontal', 'vertical', 'diagonal', 'corner', 'full_card'
+    ]
     enabled_patterns_set = set(enabled_patterns)
-    
-    # Helper function to check if a cell is marked (including FREE space)
+
     def is_cell_marked(cell):
         if cell.get('letter') == 'FREE':
             return True
-        number = cell.get('number')
-        if number is None:
-            return False
-        return number in called_numbers
+        n = cell.get('number')
+        return n is not None and n in marked_numbers
     
-    # IMPORTANT: If only 'full_card' is enabled, skip all other pattern checks
-    # This ensures full_card only wins when ALL cells are marked, not when other patterns are complete
     only_full_card = enabled_patterns_set == {'full_card'}
-    
-    # Check horizontal lines - skip if only full_card is enabled
     if not only_full_card and 'horizontal' in enabled_patterns_set:
         for row_idx, row in enumerate(layout):
             if all(is_cell_marked(cell) for cell in row):
                 return (True, f'row_{row_idx}')
-    
-    # Check vertical lines - skip if only full_card is enabled
     if not only_full_card and 'vertical' in enabled_patterns_set:
         for col_idx in range(5):
             if all(is_cell_marked(layout[row_idx][col_idx]) for row_idx in range(5)):
                 return (True, f'col_{col_idx}')
-    
-    # Check diagonal (top-left to bottom-right) - skip if only full_card is enabled
     if not only_full_card and 'diagonal' in enabled_patterns_set:
         if all(is_cell_marked(layout[i][i]) for i in range(5)):
             return (True, 'diagonal_1')
-        
-        # Check diagonal (top-right to bottom-left)
-        if all(is_cell_marked(layout[i][4-i]) for i in range(5)):
+        if all(is_cell_marked(layout[i][4 - i]) for i in range(5)):
             return (True, 'diagonal_2')
-    
-    # Check corner bingo (4 corners + FREE cell) - skip if only full_card is enabled
     if not only_full_card and 'corner' in enabled_patterns_set:
-        corners = [
-            layout[0][0],  # Top-left
-            layout[0][4],  # Top-right
-            layout[4][0],  # Bottom-left
-            layout[4][4],  # Bottom-right
-            layout[2][2]   # FREE cell (center) - included for visual appeal
-        ]
+        corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
         if all(is_cell_marked(cell) for cell in corners):
             return (True, 'corner')
-    
-    # Check full card - ONLY wins if ALL cells are marked
     if 'full_card' in enabled_patterns_set:
         if all(is_cell_marked(cell) for row in layout for cell in row):
             return (True, 'full_card')
-    
     return (False, None)
+
+
+def check_fake_user_bingo(card: FakeUserGameCard, called_numbers: set, game=None) -> tuple:
+    """
+    Check if a fake user card has a winning BINGO pattern (DB fake card).
+    Returns (has_bingo, pattern_type).
+    """
+    if len(card.selected_numbers) < 5:
+        return (False, None)
+    layout = card.card_layout
+    if not layout:
+        return (False, None)
+    return _check_bingo_layout_patterns(layout, called_numbers, game.id if game else None)
+
+
+def check_system_player_bingo(layout: list, marked_numbers: set, game_id: int) -> tuple:
+    """
+    Check if a Redis-only system player card has a winning BINGO pattern.
+    Returns (has_bingo, pattern_type).
+    """
+    return _check_bingo_layout_patterns(layout, marked_numbers, game_id)
 
 
 def mark_number_on_fake_card(card: FakeUserGameCard, number: int):
@@ -416,8 +414,63 @@ def batch_mark_number_on_fake_cards(game_id: int, number: int) -> tuple:
         print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
         import traceback
         traceback.print_exc()
-        # Return empty result on error to prevent blocking number calling
         return (0, [])
+
+
+def add_system_player_to_game_redis(game_id: int, card_number: int, name: str, card_layout: list) -> bool:
+    """
+    Add a system player to the game in Redis only (no DB).
+    Use for Redis-only system players; no balance, no transaction.
+    """
+    return system_player_add(game_id, card_number, name, card_layout)
+
+
+def batch_mark_number_on_system_players_redis(game_id: int, number: int) -> Tuple[int, List[dict]]:
+    """
+    Mark a number on all Redis-only system players and check for bingo.
+    Returns (updated_count, winners) where winners is a list of
+    {card_number, name, card_layout, pattern, marked_numbers} for each winner.
+    No DB write; winners are for broadcast only (no payout).
+    """
+    from .models import Game
+    players = system_player_get_all(game_id)
+    if not players:
+        return (0, [])
+    try:
+        game = Game.objects.get(id=game_id)
+    except Game.DoesNotExist:
+        return (0, [])
+    if game.status == 'completed' or game.winner_id:
+        return (0, [])
+    updated = 0
+    winners = []
+    for p in players:
+        card_number = p.get('card_number')
+        name = p.get('name', 'System')
+        layout = p.get('card_layout')
+        if not layout or card_number is None:
+            continue
+        # Check if number is on this card
+        on_card = any(
+            cell.get('number') == number
+            for row in layout
+            for cell in row
+        )
+        if not on_card:
+            continue
+        if add_system_card_marked_number(game_id, card_number, number):
+            updated += 1
+        marked = get_system_card_marked_numbers(game_id, card_number)
+        has_bingo, pattern = check_system_player_bingo(layout, marked, game_id)
+        if has_bingo:
+            winners.append({
+                'card_number': card_number,
+                'name': name,
+                'card_layout': layout,
+                'pattern': pattern,
+                'marked_numbers': list(marked),
+            })
+    return (updated, winners)
 
 
 def get_fake_user_winning_numbers(card: FakeUserGameCard, called_numbers: set) -> List[int]:
@@ -479,9 +532,7 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
     """
     from .models import FakeUserGameCard, GameCard
     from .game_logic import get_available_card_numbers
-    from channels.layers import get_channel_layer
-    from asgiref.sync import async_to_sync
-    
+
     # Only adjust if game is waiting and system accounts are enabled
     if game.status != 'waiting':
         return {'skipped': True, 'reason': 'Game is not in waiting status'}
@@ -514,21 +565,15 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
                 
                 # Broadcast card unselection for removed fake user
                 try:
-                    channel_layer = get_channel_layer()
+                    from .channels import broadcast_to_game_rooms
                     available_cards = get_available_card_numbers(game)
-                    async_to_sync(channel_layer.group_send)(
-                        f'game_{game.id}',
-                        {
-                            'type': 'card_selected',
-                            'data': {
-                                'card_number': None,  # None means unselected
-                                'user_id': None,
-                                'username': fake_user_name,
-                                'is_fake': True,
-                                'available_cards': available_cards
-                            }
-                        }
-                    )
+                    broadcast_to_game_rooms(game.id, 'card_selected', {
+                        'card_number': None,  # None means unselected
+                        'user_id': None,
+                        'username': fake_user_name,
+                        'is_fake': True,
+                        'available_cards': available_cards
+                    })
                 except Exception as e:
                     print(f"Error broadcasting fake user removal: {e}")
                 
@@ -581,21 +626,15 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
                     
                     # Broadcast card selection for added fake user
                     try:
-                        channel_layer = get_channel_layer()
+                        from .channels import broadcast_to_game_rooms
                         available_cards_updated = get_available_card_numbers(game)
-                        async_to_sync(channel_layer.group_send)(
-                            f'game_{game.id}',
-                            {
-                                'type': 'card_selected',
-                                'data': {
-                                    'card_number': card_number,
-                                    'user_id': None,
-                                    'username': fake_user_to_add.name,
-                                    'is_fake': True,
-                                    'available_cards': available_cards_updated
-                                }
-                            }
-                        )
+                        broadcast_to_game_rooms(game.id, 'card_selected', {
+                            'card_number': card_number,
+                            'user_id': None,
+                            'username': fake_user_to_add.name,
+                            'is_fake': True,
+                            'available_cards': available_cards_updated
+                        })
                     except Exception as e:
                         print(f"Error broadcasting fake user addition: {e}")
                     
