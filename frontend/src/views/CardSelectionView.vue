@@ -68,7 +68,7 @@
     </div>
     
     <!-- Selected card display at bottom -->
-    <div class="selected-card-section" v-if="selectedCard && userCard">
+    <div class="selected-card-section" v-if="selectedCard && userCard && !showWinnerBanner">
       <UserCard
         :card-layout="userCard.card_layout"
         :card-number="userCard.card_number"
@@ -77,6 +77,19 @@
         class="selected-card-display compact"
       />
     </div>
+    
+    <!-- Winner banner when game ends while user is on card selection (so all players see who won) -->
+    <WinnerBanner
+      v-if="showWinnerBanner"
+      :winner="winner"
+      :winners="winners"
+      :prize="winnerPrize"
+      :total-prize="totalPrize"
+      :winner-card="winnerCard"
+      :is-current-user="isCurrentUserWinner"
+      :winning-pattern="winnerCard?.winning_pattern || (winners && winners.length ? winners[0].winning_pattern : null)"
+      @redirect="handleWinnerRedirect"
+    />
   </div>
 </template>
 
@@ -87,6 +100,7 @@ import CardSelector from '../components/CardSelector.vue'
 import Timer from '../components/Timer.vue'
 import UserCard from '../components/UserCard.vue'
 import NotificationBanner from '../components/NotificationBanner.vue'
+import WinnerBanner from '../components/WinnerBanner.vue'
 import { getCurrentGame, getAvailableCards, selectCard, getMyCard, getUserBalance, startGame } from '../services/api'
 import { WebSocketService } from '../services/websocket'
 
@@ -98,7 +112,8 @@ export default {
     CardSelector,
     Timer,
     UserCard,
-    NotificationBanner
+    NotificationBanner,
+    WinnerBanner
   },
   data() {
     return {
@@ -120,6 +135,16 @@ export default {
       isTelegramApp: false,
       isPaused: false,
       visibilityHandler: null,
+      // Winner banner (when game ends while user is on this page)
+      showWinnerBanner: false,
+      winner: null,
+      winners: null,
+      winnerPrize: 0,
+      totalPrize: null,
+      winnerCard: null,
+      isCurrentUserWinner: false,
+      _winnerRedirectTimeoutId: null,
+      _completedRedirectTimeoutId: null
     }
   },
   async mounted() {
@@ -189,6 +214,12 @@ export default {
     }
     if (this.timerInterval) {
       clearInterval(this.timerInterval)
+    }
+    if (this._winnerRedirectTimeoutId) {
+      clearTimeout(this._winnerRedirectTimeoutId)
+    }
+    if (this._completedRedirectTimeoutId) {
+      clearTimeout(this._completedRedirectTimeoutId)
     }
     if (this.ws) {
       this.ws.disconnect()
@@ -322,8 +353,8 @@ export default {
           }
           // If game is active but user has no card, stay on card selection page (no timer needed)
           // Timer should only run when game is waiting
-          else if (game.status === 'completed' && !this.isRedirecting) {
-            // Clear timer if game is completed
+          else if (game.status === 'completed' && !this.isRedirecting && !this.showWinnerBanner) {
+            // Give winner_declared WebSocket time to arrive so we can show winner banner
             if (this.timerInterval) {
               clearInterval(this.timerInterval)
               this.timerInterval = null
@@ -332,10 +363,16 @@ export default {
               clearInterval(this.interval)
               this.interval = null
             }
-            this.isRedirecting = true
-            this.$router.push('/completed').catch(() => {
-              // Ignore navigation errors
-            })
+            if (this._completedRedirectTimeoutId) {
+              clearTimeout(this._completedRedirectTimeoutId)
+            }
+            this._completedRedirectTimeoutId = setTimeout(() => {
+              this._completedRedirectTimeoutId = null
+              if (!this.showWinnerBanner) {
+                this.isRedirecting = true
+                this.$router.push('/completed').catch(() => {})
+              }
+            }, 3500)
             return // Stop further execution
           } else if (game.status === 'waiting') {
             // Start timer if game is waiting (user may or may not have a card - they need to see countdown)
@@ -453,6 +490,84 @@ export default {
           // Ignore navigation errors
         })
       })
+      
+      this.ws.on('winner_declared', (data) => {
+        console.log('Winner declared in CardSelectionView:', data)
+        if (this._completedRedirectTimeoutId) {
+          clearTimeout(this._completedRedirectTimeoutId)
+          this._completedRedirectTimeoutId = null
+        }
+        if (this.timerInterval) {
+          clearInterval(this.timerInterval)
+          this.timerInterval = null
+        }
+        if (this.interval) {
+          clearInterval(this.interval)
+          this.interval = null
+        }
+        const isFakeUserWinner = (data.winners && data.winners.length > 0 && data.winners[0].is_fake) ||
+          (data.winner && data.winner.is_fake) || (data.is_fake)
+        const applyWinner = () => {
+          if (data.winners && data.winners.length > 0) {
+            this.winners = data.winners
+            this.winner = data.winners[0].winner
+              ? data.winners[0].winner
+              : (data.winners[0].username ? { id: null, username: data.winners[0].username, name: data.winners[0].username, is_fake: true } : null)
+            this.winnerPrize = data.prize || data.winners[0].prize || 0
+            this.totalPrize = data.total_prize || null
+            this.winnerCard = data.winners[0].card_layout ? {
+              card_layout: data.winners[0].card_layout,
+              card_number: data.winners[0].card_number,
+              winning_pattern: data.winners[0].winning_pattern,
+              selected_numbers: data.winners[0].selected_numbers || [],
+              called_numbers: data.winners[0].called_numbers || [],
+              last_called_number: data.winners[0].last_called_number || null
+            } : null
+            this.isCurrentUserWinner = !!(this.userCard && this.userCard.user && data.winners.some(w =>
+              w.winner && (w.winner.id === this.userCard.user.id || w.winner.id === Number(this.userCard.user.id))
+            ))
+          } else {
+            this.winners = null
+            this.winner = data.winner || (data.username ? { id: null, username: data.username, name: data.username, is_fake: data.is_fake || false } : null)
+            this.winnerPrize = data.prize || this.game?.total_derash || 0
+            this.totalPrize = null
+            this.winnerCard = data.card_layout ? {
+              card_layout: data.card_layout,
+              card_number: data.card_number,
+              winning_pattern: data.winning_pattern,
+              selected_numbers: data.selected_numbers || [],
+              called_numbers: data.called_numbers || [],
+              last_called_number: data.last_called_number || null
+            } : null
+            this.isCurrentUserWinner = !!(this.userCard && data.winner && this.userCard.user &&
+              (this.userCard.user.id === data.winner.id || this.userCard.user === data.winner.id))
+          }
+          this.showWinnerBanner = true
+          if (this._winnerRedirectTimeoutId) clearTimeout(this._winnerRedirectTimeoutId)
+          this._winnerRedirectTimeoutId = setTimeout(() => {
+            this._winnerRedirectTimeoutId = null
+            this.handleWinnerRedirect()
+          }, 8000)
+        }
+        if (isFakeUserWinner) {
+          setTimeout(applyWinner, 3000)
+        } else {
+          applyWinner()
+        }
+      })
+      
+      this.ws.on('game_ended', (data) => {
+        if (data && data.no_winner) {
+          if (this._completedRedirectTimeoutId) {
+            clearTimeout(this._completedRedirectTimeoutId)
+            this._completedRedirectTimeoutId = null
+          }
+          if (!this.showWinnerBanner) {
+            this.isRedirecting = true
+            this.$router.push('/completed').catch(() => {})
+          }
+        }
+      })
     },
     startPolling() {
       // Only start polling if WebSocket is not connected and interval is not already running
@@ -468,6 +583,13 @@ export default {
         clearInterval(this.interval)
         this.interval = null
       }
+    },
+    handleWinnerRedirect() {
+      this.showWinnerBanner = false
+      this.winner = null
+      this.winners = null
+      this.isRedirecting = true
+      this.$router.push('/completed').catch(() => {})
     },
     startTimer() {
       // Only start timer if not already running
@@ -958,7 +1080,8 @@ export default {
    ============================================ */
 .selected-card-section {
   position: fixed;
-  bottom: -10px; /* Positioned at bottom */
+  top: auto; /* Ensure it never sticks to top */
+  bottom: 0; /* Keep at bottom so it does not overlay top row cards */
   left: 0;
   right: 0;
   background: var(--primary-light);

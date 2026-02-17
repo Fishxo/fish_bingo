@@ -152,7 +152,8 @@ export default {
       lastMarkedNumber: null, // Track last marked number to prevent duplicates
       lastMarkedTime: 0, // Track when number was last marked
       winnerBannerShownAt: null, // Timestamp when winner banner was shown (to enforce 8-second display)
-      _winnerBannerActive: false // Flag to prevent loadGame from interfering with winner banner
+      _winnerBannerActive: false, // Flag to prevent loadGame from interfering with winner banner
+      _completedRedirectTimeoutId: null // Clear this when winner_declared is received so we show banner instead of redirecting
     }
   },
   async mounted() {
@@ -182,6 +183,10 @@ export default {
     }
     if (this.countdownInterval) {
       clearInterval(this.countdownInterval)
+    }
+    if (this._completedRedirectTimeoutId) {
+      clearTimeout(this._completedRedirectTimeoutId)
+      this._completedRedirectTimeoutId = null
     }
     if (this.ws) {
       this.ws.disconnect()
@@ -271,24 +276,25 @@ export default {
               console.log('Game completed with winners, keeping banner visible')
               return
             }
-            // No winner set yet, wait a bit for winner banner to appear
+            // No winner set yet, wait for winner_declared WebSocket (or 8s then redirect)
             if (this.interval) {
               clearInterval(this.interval)
               this.interval = null
             }
-            console.log('Game completed without winner set, waiting...')
-            setTimeout(() => {
-              // Check again if banner was shown during the wait
+            if (this._completedRedirectTimeoutId) {
+              clearTimeout(this._completedRedirectTimeoutId)
+              this._completedRedirectTimeoutId = null
+            }
+            console.log('Game completed without winner set, waiting for winner_declared or 8s...')
+            this._completedRedirectTimeoutId = setTimeout(() => {
+              this._completedRedirectTimeoutId = null
               const timeSinceBannerShown = this.winnerBannerShownAt ? Date.now() - this.winnerBannerShownAt : Infinity
-              if (timeSinceBannerShown < 8000) {
-                // Banner was shown, wait for it to finish
-                return
-              }
+              if (timeSinceBannerShown < 8000) return
               if ((!this.winner || this.winner === null) && (!this.winners || this.winners.length === 0)) {
                 console.log('No winner after delay, redirecting')
                 this.$router.push('/completed')
               }
-            }, 8000) // Wait time to 8 seconds
+            }, 8000)
             return
           } else if (game.status === 'waiting') {
             // Game is waiting - redirect to card selection (router guard should have caught this, but handle it anyway)
@@ -744,14 +750,18 @@ export default {
       this.ws.on('winner_declared', (data) => {
         console.log('Winner declared via WebSocket:', data)
         
+        // Clear any pending "completed with no winner" redirect so we show banner instead
+        if (this._completedRedirectTimeoutId) {
+          clearTimeout(this._completedRedirectTimeoutId)
+          this._completedRedirectTimeoutId = null
+        }
+        
         // CRITICAL FIX: Update game status to 'completed' immediately when winner is declared
-        // This ensures all users see the game as completed, not just the winner
         if (this.game) {
           this.game.status = 'completed'
         }
         
         // ATOMIC FIX: Stop all polling and state updates BEFORE showing banner
-        // This prevents any race conditions that might skip the banner
         if (this.interval) {
           clearInterval(this.interval)
           this.interval = null

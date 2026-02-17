@@ -24,7 +24,7 @@ import os
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('admin-dashboard/', admin_views.admin_dashboard, name='admin-dashboard'),
+    # Admin dashboard and secondadmin PAGE routes removed so SPA (index.html) is served for /admin-dashboard and /secondadmin
     path('admin-dashboard/search-user/', admin_views.search_user, name='search-user'),
     path('admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit'),
     path('admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit'),
@@ -39,7 +39,7 @@ urlpatterns = [
     path('secondadmin/logout/', admin_views.second_admin_logout, name='second-admin-logout'),
     path('secondadmin/api/', admin_views.second_admin_dashboard_api, name='second-admin-dashboard-api'),
     path('secondadmin/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-second'),
-    path('secondadmin/', admin_views.second_admin_dashboard, name='second-admin-dashboard'),
+    # secondadmin/ page route removed so SPA serves /secondadmin
     path('api/', include('api.urls')),
     # Serve frontend assets (JS, CSS, etc.) as static files
     re_path(r'^assets/.*$', serve, {
