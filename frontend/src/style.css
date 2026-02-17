@@ -18,11 +18,11 @@ body {
 
 /* Modern Teal/Cyan theme colors */
 :root {
-  --primary-light: #e0f7fa;
+  --primary-light:rgb(171, 212, 218);
   --primary-medium: #00b4d8;
   --primary-dark: #0077b6;
-  --accent-coral: #ff6b6b;
-  --accent-coral-dark: #ff5252;
+  --accent-coral:rgb(253, 79, 79);
+  --accent-coral-dark:rgb(253, 64, 64);
   --success-green: #10b981;
   --success-green-dark: #059669;
   --white: #ffffff;

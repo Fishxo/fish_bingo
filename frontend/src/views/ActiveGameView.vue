@@ -1573,7 +1573,7 @@ export default {
   flex: 0 0 60%;
   min-width: 0;
   max-width: 60%;
-  background: rgb(207, 206, 206);
+  background: rgb(255, 255, 255);
   padding: 8px;
   border-radius: 8px;
   margin: 5px;
