@@ -68,7 +68,7 @@
     </div>
     
     <!-- Selected card display at bottom -->
-    <div class="selected-card-section" v-if="selectedCard && userCard && !showWinnerBanner">
+  <div class="selected-card-section" v-if="selectedCard && userCard && !showWinnerBanner">
       <UserCard
         :card-layout="userCard.card_layout"
         :card-number="userCard.card_number"
