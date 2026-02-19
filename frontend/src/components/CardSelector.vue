@@ -70,7 +70,7 @@ export default {
   display: grid;
   grid-template-columns: repeat(10, 1fr);
   gap: 4px;
-  margin-top: 5px;
+  margin-top:10px;
 }
 
 .card-option {
