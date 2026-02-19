@@ -243,7 +243,7 @@ export default {
 }
 
 .banner-content h1 {
-  font-size: 32px;
+  font-size: 40px;
   margin: 0 0 10px 0;
   text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
   font-weight: bold;
@@ -267,24 +267,24 @@ export default {
   color: white;
   padding: 8px 15px;
   border-radius: 8px;
-  font-size: 18px;
+  font-size: 22px;
   font-weight: bold;
 }
 
 .winner-text {
   display: inline-block;
-  font-size: 15px;
+  font-size: 20px;
 }
 
 .winner-text-you {
-  font-size: 16px;
+  font-size: 20px;
   font-weight: bold;
   color: white;
 }
 
 .winner-card-display {
   margin: 12px auto;
-  max-width: 220px;
+  max-width: 260px;
   background: white;
   border-radius: 8px;
   padding: 8px;

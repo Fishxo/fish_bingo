@@ -291,6 +291,11 @@ export async function deleteAdminUsers(userIds) {
 }
 
 // Admin Dashboard APIs (use adminApi - these routes are at site root, not under /api/)
+export async function adminDashboardLogin(username, password) {
+  const response = await adminApi.post('/admin-dashboard/login/', { username, password })
+  return response.data
+}
+
 export async function getAdminDashboardData() {
   const response = await adminApi.get('/admin-dashboard/api/')
   return response.data

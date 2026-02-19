@@ -1,6 +1,10 @@
 <template>
   <div class="timer card-selection-timer">
-    <div class="timer-display">{{ formattedTime }}</div>
+    <div class="timer-display">
+      <span class="timer-seconds">{{ formattedSeconds }}</span>
+      <span class="timer-sep">:</span>
+      <span class="timer-centiseconds">{{ formattedCentiseconds }}</span>
+    </div>
   </div>
 </template>
 
@@ -29,10 +33,11 @@ export default {
     }
   },
   computed: {
-    formattedTime() {
-      const secs = Math.max(0, Math.floor(this.remainingSeconds))
-      const cs = Math.min(99, Math.floor((this.remainingSeconds % 1) * 100))
-      return `${String(secs).padStart(2, '0')}:${String(cs).padStart(2, '0')}`
+    formattedSeconds() {
+      return String(Math.max(0, Math.floor(this.remainingSeconds))).padStart(2, '0')
+    },
+    formattedCentiseconds() {
+      return String(Math.min(99, Math.floor((this.remainingSeconds % 1) * 100))).padStart(2, '0')
     }
   },
   watch: {
@@ -79,15 +84,30 @@ export default {
 
 <style scoped>
 .card-selection-timer .timer-display {
-  font-size: 14px;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
   color: var(--primary-dark);
   background: white;
-  padding: 4px 10px;
+  padding: 6px 12px;
   border-radius: 10px;
-  display: inline-block;
   white-space: nowrap;
   box-shadow: var(--card-shadow);
   border: 2px solid var(--primary-medium);
+}
+.card-selection-timer .timer-seconds {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+}
+.card-selection-timer .timer-sep {
+  font-size: 18px;
+  font-weight: 600;
+  opacity: 0.8;
+}
+.card-selection-timer .timer-centiseconds {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.85;
 }
 </style>

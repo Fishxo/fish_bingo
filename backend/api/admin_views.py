@@ -20,6 +20,25 @@ import calendar
 channel_layer = get_channel_layer()
 
 
+@require_http_methods(["POST"])
+def admin_dashboard_login(request):
+    """Inline login for admin dashboard: authenticate with Django auth (staff only), return JSON."""
+    from django.contrib.auth import authenticate, login
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    username = data.get('username') or request.POST.get('username', '').strip()
+    password = data.get('password') or request.POST.get('password', '')
+    if not username or not password:
+        return JsonResponse({'error': 'Username and password required'}, status=400)
+    user = authenticate(request, username=username, password=password)
+    if user is not None and user.is_staff:
+        login(request, user)
+        return JsonResponse({'success': True, 'message': 'Logged in'})
+    return JsonResponse({'error': 'Invalid credentials or not a staff user'}, status=401)
+
+
 def get_calendar_periods(now):
     """
     Calculate calendar-based date periods (weeks and months).

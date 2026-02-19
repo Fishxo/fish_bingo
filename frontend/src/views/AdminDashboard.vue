@@ -3,14 +3,37 @@
     <div class="dashboard-header">
       <h1>Admin Dashboard</h1>
       <span v-if="data && lastUpdated" class="last-updated">Last updated: {{ lastUpdated }}</span>
-      <a :href="adminLoginUrl" target="_blank" class="admin-login-link" title="Log in to Django admin for full access">🔐 Admin Login</a>
+      <button type="button" class="admin-login-link" @click="showLoginForm = true" title="Log in with staff account">🔐 Admin Login</button>
       <button class="refresh-btn" @click="refreshData">🔄 Refresh</button>
+    </div>
+
+    <!-- Inline admin login form -->
+    <div v-if="showLoginForm" class="inline-login-overlay" @click.self="showLoginForm = false">
+      <div class="inline-login-box">
+        <h3>Staff login</h3>
+        <p class="inline-login-hint">Use your Django staff account.</p>
+        <form @submit.prevent="doAdminLogin" class="inline-login-form">
+          <div class="form-group">
+            <label>Username</label>
+            <input v-model="loginUsername" type="text" required autocomplete="username" />
+          </div>
+          <div class="form-group">
+            <label>Password</label>
+            <input v-model="loginPassword" type="password" required autocomplete="current-password" />
+          </div>
+          <p v-if="loginError" class="inline-login-error">{{ loginError }}</p>
+          <div class="inline-login-actions">
+            <button type="submit" class="btn btn-primary" :disabled="loginLoading">{{ loginLoading ? 'Logging in…' : 'Log in' }}</button>
+            <button type="button" class="btn btn-secondary" @click="closeLoginForm">Cancel</button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <!-- Unauthorized banner - show when user needs to log in -->
     <div v-if="unauthorized" class="unauthorized-banner">
       <strong>⚠️ Authentication required</strong>
-      <p>Please log in to access admin features. Open <a :href="adminLoginUrl" target="_blank">Django Admin</a> in a new tab, log in with your staff account, then refresh this page.</p>
+      <p>Log in with your staff account using the <strong>Admin Login</strong> button above.</p>
     </div>
 
     <div v-if="loading" class="loading">Loading...</div>
@@ -607,6 +630,7 @@ import {
   deleteBroadcast,
   getSecondAdminCredentials,
   saveSecondAdminCredentials,
+  adminDashboardLogin,
   getAdminUserDetail,
   editAdminUser,
   deleteAdminUsers
@@ -668,7 +692,12 @@ export default {
       selectedUserIds: [],
       showPhotoModal: false,
       photoModalDepositId: null,
-      photoLoadError: false
+      photoLoadError: false,
+      showLoginForm: false,
+      loginUsername: '',
+      loginPassword: '',
+      loginError: '',
+      loginLoading: false
     }
   },
   computed: {
@@ -927,6 +956,26 @@ export default {
       this.photoModalDepositId = null
       this.photoLoadError = false
     },
+    closeLoginForm() {
+      this.showLoginForm = false
+      this.loginUsername = ''
+      this.loginPassword = ''
+      this.loginError = ''
+    },
+    async doAdminLogin() {
+      this.loginError = ''
+      this.loginLoading = true
+      try {
+        await adminDashboardLogin(this.loginUsername.trim(), this.loginPassword)
+        this.unauthorized = false
+        this.closeLoginForm()
+        await this.loadData()
+      } catch (err) {
+        this.loginError = err.response?.data?.error || err.message || 'Login failed'
+      } finally {
+        this.loginLoading = false
+      }
+    },
     scrollToTodayGames() {
       this.$nextTick(() => {
         const el = document.getElementById('today-games-section')
@@ -1082,13 +1131,76 @@ export default {
   padding: 10px 16px;
   background: #3498db;
   color: white;
+  border: none;
   border-radius: 6px;
-  text-decoration: none;
   font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
 }
 
 .admin-login-link:hover {
   background: #2980b9;
+}
+
+.inline-login-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.inline-login-box {
+  background: white;
+  padding: 24px;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  width: 100%;
+  max-width: 360px;
+}
+.inline-login-box h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  color: #2c3e50;
+}
+.inline-login-hint {
+  margin: 0 0 16px 0;
+  font-size: 13px;
+  color: #666;
+}
+.inline-login-form .form-group {
+  margin-bottom: 14px;
+}
+.inline-login-form .form-group label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.inline-login-form input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.inline-login-error {
+  color: #c0392b;
+  font-size: 13px;
+  margin: 0 0 12px 0;
+}
+.inline-login-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+.inline-login-actions .btn {
+  flex: 1;
 }
 
 .unauthorized-banner {

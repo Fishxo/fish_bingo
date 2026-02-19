@@ -225,6 +225,11 @@ export default {
         
         const game = await getCurrentGame()
         
+        // If winner was declared while we were awaiting (e.g. fake user, 3s delay), don't touch state - preserve user card and UI
+        if (this._winnerBannerActive) {
+          return
+        }
+        
         // FIX: Always use calledNumbers.length as the source of truth for current_call_count
         // This prevents the count from being reset to 0 when loadGame() is called with stale server data
         this.game = game
@@ -364,9 +369,14 @@ export default {
                 this.$router.push('/select-card').catch(() => {})
                 return
               }
-              // If game is active, stay here and show "wait" message
-              // User can watch the game but can't participate
-              this.userCard = null
+              // Don't clear userCard when winner is declared but banner not yet shown (e.g. 3s delay for fake user).
+              // A race can occur: loadGame passed initial check, then winner_declared set _winnerBannerActive;
+              // getMyCard may then return 404 for completed game. Preserve UI so user's card stays visible.
+              const winnerDeclared = this._winnerBannerActive || this.winner || (this.winners && this.winners.length)
+              if (!winnerDeclared) {
+                // If game is active, stay here and show "wait" message (spectator)
+                this.userCard = null
+              }
             }
           }
           

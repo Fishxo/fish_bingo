@@ -1031,7 +1031,7 @@ export default {
 
 .select-card-section {
   position: fixed;
-  top: 45px; /* Adjust this value to change position below top section */
+  top: 60px; /* Adjust this value to change position below top section */
   left: 0;
   right: 0;
   padding: 10px;
