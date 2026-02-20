@@ -1179,19 +1179,25 @@ export default {
       claimBingo(this.userCard.id)
         .then(result => {
           if (result.success) {
-            // Update with server response
-            const serverPrize = result.prize || prize
+            const serverPrize = result.prize ?? prize
             this.winnerPrize = serverPrize
+            if (result.total_prize != null) this.totalPrize = result.total_prize
+            if (result.winners && result.winners.length > 0) {
+              this.winners = result.winners
+              const myId = this.userCard?.user?.id
+              this.isCurrentUserWinner = result.winners.some(w => w.winner && (w.winner.id === myId || w.winner.id === Number(myId)))
+              if (!this.winner && result.winner) this.winner = result.winner
+            }
+            this.winnerBannerShownAt = this.winnerBannerShownAt || Date.now()
             console.log('BINGO claim confirmed by server:', result)
           }
         })
         .catch(error => {
           const errorMsg = error.response?.data?.error || 'Invalid BINGO claim'
           
-          // If error is "already won" or "ተቀድመዋል", check if we're actually a winner
-          // This can happen in automatic mode when the claim succeeds but response is delayed
+          // If error is "already won", "Game is already completed", or "another claimed first", check if we're actually a winner
           if (errorMsg.includes('already won') || errorMsg.includes('ተቀድመዋል') || 
-              errorMsg.includes('not active')) {
+              errorMsg.includes('not active') || errorMsg.includes('Game is already completed')) {
             // Check if the card actually won (might be a race condition)
             if (this.userCard && this.userCard.is_winner) {
               // Card actually won, keep the winner banner - don't revert
@@ -1207,7 +1213,7 @@ export default {
               this.isCurrentUserWinner = false
               this.winnerCard = null
               this.winnerBannerShownAt = null
-              const translatedMsg = errorMsg.includes('ተቀድመዋል') ? errorMsg : 'በሌላ ተጫዋች ተቀድመዋል!'
+              const translatedMsg = (errorMsg.includes('ተቀድመዋል') || errorMsg.includes('Game is already completed')) ? 'በሌላ ተጫዋች ተቀድመዋል!' : errorMsg
               this.showNotification(translatedMsg, 'error')
             }
           } else {
@@ -1227,7 +1233,7 @@ export default {
               translatedMsg = 'ቢንጎ አልሰሩም'
             } else if (errorMsg.includes('not called')) {
               translatedMsg = 'ይህ ቁጥር አልተጠራም'
-            } else if (errorMsg.includes('claimed bingo first') || errorMsg.includes('Another player')) {
+            } else if (errorMsg.includes('claimed bingo first') || errorMsg.includes('Another player') || errorMsg.includes('Game is already completed')) {
               translatedMsg = 'በሌላ ተጫዋች ተቀድመዋል!'
             }
             this.showNotification(translatedMsg, 'error')

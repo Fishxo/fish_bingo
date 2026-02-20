@@ -414,28 +414,20 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         return (False, None, "Another bingo claim is being processed. Please try again.")
     
     try:
-        # PHASE 4 OPTIMIZATION: Check game state from Redis cache first (faster than DB)
-        from .redis_utils import get_game_state_from_redis
-        cached_state = get_game_state_from_redis(game.id)
-        
-        # If cache has status, use it (faster check)
-        if cached_state and 'status' in cached_state:
-            if cached_state['status'] != 'active':
-                if cached_state['status'] == 'completed':
-                    return (False, None, "Game is already completed")
-                return (False, None, f"Game is not active (status: {cached_state['status']})")
-        
-        # CRITICAL: Always get fresh game object from database for critical operations
+        # CRITICAL: Always get fresh game from DB first (needed for tie-window check when completed)
         game = Game.objects.get(id=game.id)
+        game.refresh_from_db()
         
-        # Only refresh if cache didn't have status (fallback)
-        if not cached_state or 'status' not in cached_state:
-            game.refresh_from_db()
-        
-        # Double-check game is still active (using DB as source of truth)
-        if game.status != 'active':
-            if game.status == 'completed':
-                return (False, None, "Game is already completed")
+        # Allow claims when game is completed ONLY if within tie window (3 sec max)
+        allow_completed_tie = False
+        if game.status == 'completed':
+            if not game.completed_at:
+                return (False, None, "Another player claimed bingo first")
+            elapsed = timezone.now() - game.completed_at
+            if elapsed > timedelta(seconds=3):
+                return (False, None, "Another player claimed bingo first")
+            allow_completed_tie = True
+        elif game.status != 'active':
             return (False, None, f"Game is not active (status: {game.status})")
         
         # Refresh card to get latest state (including marked cells in layout)
@@ -501,15 +493,8 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                     print(f"CRITICAL: Real user {real_card.user.id} has bingo! Rejecting fake user claim (free_play is OFF).")
                     return (False, None, "Real user has priority (free_play is OFF)")
         
-        # PHASE 4 OPTIMIZATION: Check game state from Redis cache (faster than DB refresh)
-        cached_state = get_game_state_from_redis(game.id)
-        if cached_state and 'status' in cached_state and cached_state['status'] != 'active':
-            # Cache says game is not active, but verify with DB
-            game.refresh_from_db()
-            if game.status != 'active':
-                return (False, None, "Game was completed by another player")
-        else:
-            # Cache miss or status not in cache, refresh from DB
+        # Re-check game status only when NOT in tie-window path (co-winner path already knows game is completed)
+        if not allow_completed_tie:
             game.refresh_from_db()
             if game.status != 'active':
                 return (False, None, "Game was completed by another player")
