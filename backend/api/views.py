@@ -1065,18 +1065,17 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # If game is completed, check if it was very recent (within 1 second)
+        # If game is completed, allow claim only within tie window (3 sec when first was fake, 1 sec when real)
         if game.status == 'completed':
             from datetime import timedelta
             if game.completed_at:
                 time_since_completion = timezone.now() - game.completed_at
-                if time_since_completion > timedelta(seconds=1):
+                if time_since_completion > timedelta(seconds=3):
                     return Response(
                         {'error': 'በሌላ ተጫዋች ተቀድመዋል!'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
             else:
-                # Game completed but no timestamp, reject
                 return Response(
                     {'error': 'በሌላ ተጫዋች ተቀድመዋል!'},
                     status=status.HTTP_400_BAD_REQUEST

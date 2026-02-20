@@ -756,9 +756,10 @@ export default {
       this.ws.on('game_ended', (data) => {
         console.log('Game ended via WebSocket:', data)
         
-        // CRITICAL FIX: Update game status immediately when game_ended event is received
-        // This ensures all users see the game as completed, not just the winner
-        if (this.game && data && data.status === 'completed') {
+        // Only set game completed here when there is NO winner (no_winner path).
+        // When there IS a winner, winner_declared will set status (immediately for real winner,
+        // after 3s for fake winner) so real users can still tick numbers during the 3s window.
+        if (data && data.no_winner && this.game && data.status === 'completed') {
           this.game.status = 'completed'
           if (data.completed_at) {
             this.game.completed_at = data.completed_at
@@ -1226,6 +1227,8 @@ export default {
               translatedMsg = 'ቢንጎ አልሰሩም'
             } else if (errorMsg.includes('not called')) {
               translatedMsg = 'ይህ ቁጥር አልተጠራም'
+            } else if (errorMsg.includes('claimed bingo first') || errorMsg.includes('Another player')) {
+              translatedMsg = 'በሌላ ተጫዋች ተቀድመዋል!'
             }
             this.showNotification(translatedMsg, 'error')
           }

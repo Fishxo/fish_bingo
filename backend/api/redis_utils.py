@@ -199,10 +199,12 @@ def release_number_calling_lock(game_id):
         print(f"Error releasing number calling lock: {e}")
 
 
-def try_acquire_bingo_window(game_id):
+def try_acquire_bingo_window(game_id, first_claim_is_fake=False):
     """
-    Try to acquire bingo window lock using SETNX
-    Returns (success, is_first_winner)
+    Try to acquire bingo window for multiple-winner tie.
+    - First winner (real): 1 second window for co-winners.
+    - First winner (fake): 3 second window so real players can claim and share.
+    Returns (success, is_first_winner).
     """
     r = get_redis_client()
     if not r:
@@ -215,16 +217,16 @@ def try_acquire_bingo_window(game_id):
         is_first = r.setnx(window_key, "1")
         
         if is_first:
-            # First winner - set 1 second expiry
-            r.expire(window_key, 1)
+            # First winner - set window: 3 sec if first is fake, else 1 sec
+            window_seconds = 3 if first_claim_is_fake else 1
+            r.expire(window_key, window_seconds)
             return (True, True)
         else:
-            # Not first, but check if window is still valid (within 1 second)
+            # Not first: allow only if still within window (TTL > 0)
             ttl = r.ttl(window_key)
             if ttl > 0:
                 return (True, False)
             else:
-                # Window expired, reject
                 return (False, False)
     except Exception as e:
         print(f"Error acquiring bingo window: {e}")
@@ -245,8 +247,8 @@ def add_bingo_winner(game_id, card_id, user_id):
         # For fake users (user_id is None), store as "fake" instead of "None"
         user_id_str = "fake" if user_id is None else str(user_id)
         r.sadd(winners_key, f"{card_id}:{user_id_str}")
-        # Set expiry on the set (2 seconds to be safe)
-        r.expire(winners_key, 2)
+        # Expiry must cover window (1 or 3 sec) + task delay; use 10s so task always sees all winners
+        r.expire(winners_key, 10)
         return True
     except Exception as e:
         print(f"Error adding bingo winner: {e}")
