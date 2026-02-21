@@ -477,6 +477,7 @@ class DepositRequest(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     processed_at = models.DateTimeField(null=True, blank=True)
     processed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='processed_deposits')
+    transaction_reference = models.CharField(max_length=128, null=True, blank=True, help_text="CBE/Telebirr transaction id when manually approved (prevents reuse)")
 
     class Meta:
         db_table = 'deposit_requests'
@@ -484,10 +485,30 @@ class DepositRequest(models.Model):
         indexes = [
             models.Index(fields=['status', 'created_at']),
             models.Index(fields=['user', 'status']),
+            models.Index(fields=['transaction_reference']),
         ]
 
     def __str__(self):
         return f"Deposit {self.id} - {self.user.username} - {self.amount} {self.platform} - {self.status}"
+
+
+class FailedDepositRequest(models.Model):
+    """Store failed deposit attempts (user mistake or system) for support reference."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='failed_deposit_requests')
+    amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    platform = models.CharField(max_length=20)
+    deposit_text = models.TextField(blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+    reference = models.CharField(max_length=64, blank=True, db_index=True)
+    account_suffix = models.CharField(max_length=16, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'failed_deposit_requests'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Failed deposit {self.id} - {self.user.username} - {self.platform} - {self.failure_reason}"
 
 
 class TelebirrReceipt(models.Model):

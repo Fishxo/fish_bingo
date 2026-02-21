@@ -445,16 +445,19 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         if not card.card_layout:
             return (False, None, "Card layout is missing")
         
-        # Get called numbers from Redis
-        called_numbers = get_called_numbers_from_redis(game.id)
-        if not called_numbers:
+        # Get called numbers: union Redis + DB so co-winner can claim after fake winner
+        # (finalize may have cleared Redis and persisted to DB only).
+        from .models import CalledNumber
+        called_set = get_called_numbers_from_redis(game.id) or set()
+        db_called = set(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
+        called_set = called_set | db_called
+        if not called_set:
             return (False, None, "No numbers have been called yet")
         
         # Validate that all marked numbers on card were actually called
         if is_fake_user:
             # For fake users, check selected_numbers against called_numbers
             marked_numbers = set(card.selected_numbers or [])
-            called_set = set(called_numbers)
             if not marked_numbers.issubset(called_set):
                 return (False, None, "Some marked numbers were not called")
             
@@ -468,7 +471,7 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                 for row in layout:
                     for cell in row:
                         if cell.get('marked', False) and cell.get('number') is not None:
-                            if cell['number'] not in called_numbers:
+                            if cell['number'] not in called_set:
                                 return (False, None, f"Number {cell['number']} is marked but was not called")
             
             # Check bingo using real user bingo checker

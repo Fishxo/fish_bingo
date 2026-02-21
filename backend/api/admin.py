@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.utils.html import format_html
 from django.urls import reverse
 from django.shortcuts import redirect
-from .models import User, Game, GameCard, CalledNumber, Deposit, Transaction, GameSettings, DepositRequest, TelebirrReceipt, CbeReceipt, WithdrawRequest
+from .models import User, Game, GameCard, CalledNumber, Deposit, Transaction, GameSettings, DepositRequest, TelebirrReceipt, CbeReceipt, WithdrawRequest, FailedDepositRequest
 from decimal import Decimal
 
 
@@ -202,6 +202,14 @@ class CbeReceiptAdmin(admin.ModelAdmin):
     list_display = ['reference', 'account_suffix', 'user', 'amount', 'created_at']
     list_filter = ['created_at']
     search_fields = ['reference', 'account_suffix', 'user__username']
+    readonly_fields = ['created_at']
+
+
+@admin.register(FailedDepositRequest)
+class FailedDepositRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'platform', 'amount', 'failure_reason', 'reference', 'account_suffix', 'created_at']
+    list_filter = ['platform', 'failure_reason', 'created_at']
+    search_fields = ['user__username', 'reference', 'account_suffix', 'deposit_text', 'failure_reason']
     readonly_fields = ['created_at']
 
 

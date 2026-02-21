@@ -116,6 +116,19 @@
         </div>
       </section>
 
+      <!-- Search Transaction Number (CBE) -->
+      <section class="section">
+        <h2>🔎 Search Transaction Number</h2>
+        <p class="section-hint">Check if a CBE transaction (e.g. FT...) is already approved or in a request.</p>
+        <div class="search-row">
+          <input v-model="searchTxQuery" type="text" placeholder="e.g. FT26048WBS7024627387" class="search-input" @keyup.enter="doSearchTransaction" />
+          <button class="btn btn-primary" @click="doSearchTransaction">Search</button>
+        </div>
+        <div v-if="searchTxResult !== null" class="user-detail">
+          <pre>{{ searchTxResult }}</pre>
+        </div>
+      </section>
+
       <!-- Deposits & Withdrawals -->
       <section class="section">
         <div class="section-header">
@@ -157,12 +170,38 @@
                 </td>
                 <td>{{ d.created_at }}</td>
                 <td>
-                  <button class="btn btn-approve" @click="approveDeposit(d.id)">Approve</button>
-                  <button class="btn btn-reject" @click="rejectDeposit(d.id)">Decline</button>
+                  <button class="btn btn-approve" @click="approveDeposit(d.id, d.platform)">Approve</button>
+                  <button class="btn btn-reject" @click="rejectDeposit(d.id)">Delete</button>
                 </td>
               </tr>
               <tr v-if="!(data.pending_deposits && data.pending_deposits.length)">
                 <td colspan="8">No pending deposits</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>❌ Failed Deposit Requests</h3>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th><th>User</th><th>Amount</th><th>Platform</th><th>Reason</th><th>Ref</th><th>Suffix</th><th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="fd in (data.failed_deposits || [])" :key="'fd-' + fd.id">
+                <td>{{ fd.id }}</td>
+                <td>{{ fd.username }}</td>
+                <td>{{ fd.amount != null ? formatCurrency(fd.amount) : '—' }}</td>
+                <td>{{ fd.platform }}</td>
+                <td class="text-cell">{{ (fd.failure_reason || '').slice(0, 30) }}{{ (fd.failure_reason && fd.failure_reason.length > 30) ? '…' : '' }}</td>
+                <td>{{ fd.reference || '—' }}</td>
+                <td>{{ fd.account_suffix || '—' }}</td>
+                <td>{{ fd.created_at }}</td>
+              </tr>
+              <tr v-if="!(data.failed_deposits && data.failed_deposits.length)">
+                <td colspan="8">No failed deposit requests</td>
               </tr>
             </tbody>
           </table>
@@ -634,6 +673,7 @@ import {
   getAdminDashboardData,
   refreshDepositsWithdrawals,
   searchUser as apiSearchUser,
+  searchTransaction as apiSearchTransaction,
   approveDeposit as apiApproveDeposit,
   rejectDeposit as apiRejectDeposit,
   approveWithdraw as apiApproveWithdraw,
@@ -666,6 +706,8 @@ export default {
       unauthorized: false,
       searchQuery: '',
       searchResult: null,
+      searchTxQuery: '',
+      searchTxResult: null,
       settings: {
         bid_amount: 10,
         card_selection_timer: 60,
@@ -796,9 +838,25 @@ export default {
         this.searchResult = 'Error: ' + (err.response?.data?.error || err.message || 'Search failed')
       }
     },
-    async approveDeposit(id) {
+    async doSearchTransaction() {
+      if (!this.searchTxQuery.trim()) return
+      this.searchTxResult = null
       try {
-        await apiApproveDeposit(id)
+        const res = await apiSearchTransaction(this.searchTxQuery.trim())
+        this.searchTxResult = typeof res === 'object' ? JSON.stringify(res, null, 2) : res
+      } catch (err) {
+        this.searchTxResult = 'Error: ' + (err.response?.data?.error || err.message || 'Search failed')
+      }
+    },
+    async approveDeposit(id, platform) {
+      let transactionNumber = null
+      if (platform === 'CBE') {
+        const tx = prompt('Enter CBE transaction number from receipt link (e.g. FT26048WBS7024627387). Required for approval.')
+        if (tx == null || !String(tx).trim()) return
+        transactionNumber = String(tx).trim()
+      }
+      try {
+        await apiApproveDeposit(id, transactionNumber)
         await this.loadData()
       } catch (err) {
         console.error('Approve deposit failed:', err)
@@ -806,7 +864,7 @@ export default {
       }
     },
     async rejectDeposit(id) {
-      if (!confirm('Reject this deposit?')) return
+      if (!confirm('Delete this deposit request? (No notification will be sent.)')) return
       try {
         await apiRejectDeposit(id)
         await this.loadData()

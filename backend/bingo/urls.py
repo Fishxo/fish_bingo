@@ -48,6 +48,7 @@ urlpatterns = [
     path('admin', RedirectView.as_view(url='/admin/', permanent=True)),
     # Admin dashboard and secondadmin PAGE routes removed so SPA (index.html) is served for /admin-dashboard and /secondadmin
     path('admin-dashboard/search-user/', admin_views.search_user, name='search-user'),
+    path('admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction'),
     path('admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit'),
     path('admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit'),
     path('admin-dashboard/deposits/<int:deposit_id>/photo/', admin_views.get_deposit_photo, name='get-deposit-photo'),
@@ -65,6 +66,7 @@ urlpatterns = [
     # secondadmin/ page route removed so SPA serves /secondadmin
     # Duplicate admin/secondadmin API routes under /api/ so requests to /api/admin-dashboard/api/ etc. work (e.g. if frontend uses api baseURL)
     path('api/admin-dashboard/search-user/', admin_views.search_user, name='search-user-api'),
+    path('api/admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/photo/', admin_views.get_deposit_photo, name='get-deposit-photo-api'),

@@ -43,10 +43,13 @@ def parse_cbe_receipt_text(text: str) -> Optional[dict]:
     if not match:
         return None
     full_id = match.group(1).strip().upper()
+    # Need at least 8 chars for suffix (last 8), and at least 1 for reference
     if len(full_id) < 9:
         return None
     reference = full_id[:-8]
     account_suffix = full_id[-8:]
+    if not reference or not account_suffix or len(account_suffix) != 8:
+        return None
 
     amount_match = _CBE_AMOUNT_RE.search(text)
     if not amount_match:

@@ -1020,10 +1020,15 @@ export default {
         return // Ignore duplicate clicks within 500ms
       }
       
-      // Check if number was called
-      if (!this.calledNumbers.includes(number)) {
+      // When game is still active (e.g. tie window after fake winner), let backend decide
+      // so the user can tick the last number and claim co-winner even if number_called was delayed.
+      const gameActive = this.game && this.game.status === 'active'
+      if (!gameActive && !this.calledNumbers.includes(number)) {
         this.showNotification('ይህ ቁጥር እስካሁን አልተጠራም!', 'error')
         return
+      }
+      if (gameActive && !this.calledNumbers.includes(number)) {
+        // Still send to backend; it will allow if number is in Redis or DB
       }
       
       // Set flag to prevent duplicate clicks

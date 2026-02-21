@@ -311,8 +311,14 @@ export async function searchUser(query) {
   return response.data
 }
 
-export async function approveDeposit(depositId) {
-  const response = await adminApi.post(`/admin-dashboard/deposits/${depositId}/approve/`)
+export async function searchTransaction(tx) {
+  const response = await adminApi.get('/admin-dashboard/search-transaction/', { params: { tx: tx || undefined, transaction_number: tx || undefined } })
+  return response.data
+}
+
+export async function approveDeposit(depositId, transactionNumber = null) {
+  const body = transactionNumber ? { transaction_number: transactionNumber } : {}
+  const response = await adminApi.post(`/admin-dashboard/deposits/${depositId}/approve/`, body)
   return response.data
 }
 

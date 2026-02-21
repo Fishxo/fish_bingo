@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.db.models import Sum, Count, Q, Prefetch
 from datetime import datetime, timedelta
-from .models import Deposit, Game, CalledNumber, Transaction, User, DepositRequest, WithdrawRequest, GameSettings, Transfer, AdminMessage, SecondAdmin, BroadcastMessage
+from .models import Deposit, Game, CalledNumber, Transaction, User, DepositRequest, WithdrawRequest, GameSettings, Transfer, AdminMessage, SecondAdmin, BroadcastMessage, FailedDepositRequest
 from django.contrib.auth.hashers import make_password, check_password
 from .game_logic import call_number, start_game
 from .phone_utils import normalize_phone_number, find_user_by_phone
@@ -549,6 +549,49 @@ def search_user(request):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+def _parse_cbe_tx(tx_str):
+    if not tx_str or len(tx_str.strip()) < 9:
+        return None, None
+    s = tx_str.strip().upper()
+    if not s.startswith('FT') or len(s) < 9:
+        return None, None
+    return s[:-8], s[-8:]
+
+
+@require_http_methods(["GET"])
+def search_transaction(request):
+    """Search by CBE transaction number to see if already approved or in a request."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    tx = (request.GET.get('tx') or request.GET.get('transaction_number') or '').strip()
+    if not tx:
+        return JsonResponse({'error': 'Transaction number required'}, status=400)
+    from .models import CbeReceipt
+    ref, suffix = _parse_cbe_tx(tx)
+    result = {'transaction_number': tx, 'found': False}
+    if ref and suffix:
+        cbe = CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).select_related('user').first()
+        if cbe:
+            result['found'] = True
+            result['status'] = 'approved'
+            result['platform'] = 'CBE'
+            result['user_id'] = cbe.user_id
+            result['username'] = cbe.user.username
+            result['amount'] = float(cbe.amount)
+            result['created_at'] = cbe.created_at.isoformat()
+    dr = DepositRequest.objects.filter(transaction_reference__iexact=tx).select_related('user').first()
+    if dr:
+        result['found'] = True
+        result['status'] = dr.status
+        result['platform'] = dr.platform
+        result['user_id'] = dr.user_id
+        result['username'] = dr.user.username
+        result['amount'] = float(dr.amount)
+        result['request_id'] = dr.id
+        result['created_at'] = dr.created_at.isoformat()
+    return JsonResponse(result)
+
+
 @staff_member_required
 @require_http_methods(["POST"])
 def verify_deposit_api(request, deposit_id):
@@ -669,33 +712,41 @@ def call_number_api(request, game_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 def approve_deposit_request_api(request, deposit_id):
-    """API endpoint to approve a deposit request"""
-    # Check authentication (works for both admin and second admin)
+    """Approve a deposit request. Optional body: { \"transaction_number\": \"FT...\" } for CBE to prevent reuse."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
-    
     try:
         deposit_request = DepositRequest.objects.get(id=deposit_id, status='pending')
-        
+        body = json.loads(request.body) if request.body else {}
+        transaction_number = (body.get('transaction_number') or '').strip()
+        if deposit_request.platform == 'CBE':
+            if not transaction_number:
+                return JsonResponse({'error': 'For CBE deposits, transaction number is required (e.g. FT... from receipt link)'}, status=400)
+        if deposit_request.platform == 'CBE' and transaction_number:
+            ref, suffix = _parse_cbe_tx(transaction_number)
+            if ref and suffix:
+                from .models import CbeReceipt
+                if CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).exists():
+                    return JsonResponse({'error': 'This transaction number was already used'}, status=400)
+                CbeReceipt.objects.create(
+                    user=deposit_request.user,
+                    reference=ref,
+                    account_suffix=suffix,
+                    amount=deposit_request.amount
+                )
+                deposit_request.transaction_reference = transaction_number
         deposit_request.status = 'approved'
         deposit_request.processed_at = timezone.now()
-        # Only set processed_by if user is staff (second admin doesn't have a User object)
         deposit_request.processed_by = request.user if request.user.is_staff else None
         deposit_request.save()
-        
-        # Credit user balance
         deposit_request.user.balance = Decimal(str(deposit_request.user.balance)) + Decimal(str(deposit_request.amount))
         deposit_request.user.save()
-        
-        # Create transaction
         Transaction.objects.create(
             user=deposit_request.user,
             transaction_type='deposit',
             amount=deposit_request.amount,
             description=f'Deposit approved - {deposit_request.platform} - Request ID: {deposit_request.id}'
         )
-        
-        # Send notification
         try:
             from telegram_bot.notifications import send_notification_sync
             send_notification_sync(
@@ -705,9 +756,8 @@ def approve_deposit_request_api(request, deposit_id):
                 f"🏦 ወደ: {deposit_request.platform}\n\n"
                 f"በሂሳብዎ ላይ ያለውን ለመመልከት /balance ይጫኑ።"
             )
-        except:
+        except Exception:
             pass
-        
         return JsonResponse({'success': True, 'message': 'Deposit approved and credited'})
     except DepositRequest.DoesNotExist:
         return JsonResponse({'error': 'Deposit request not found'}, status=404)
@@ -718,31 +768,13 @@ def approve_deposit_request_api(request, deposit_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 def reject_deposit_request_api(request, deposit_id):
-    """API endpoint to reject a deposit request"""
-    # Check authentication (works for both admin and second admin)
+    """Delete a pending deposit request (no notification)."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
-    
     try:
         deposit_request = DepositRequest.objects.get(id=deposit_id, status='pending')
-        deposit_request.status = 'rejected'
-        deposit_request.processed_at = timezone.now()
-        # Only set processed_by if user is staff (second admin doesn't have a User object)
-        deposit_request.processed_by = request.user if request.user.is_staff else None
-        deposit_request.save()
-        
-        # Send notification
-        try:
-            from telegram_bot.notifications import send_notification_sync
-            send_notification_sync(
-                deposit_request.user.telegram_id,
-                f"❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\n"
-                f"እባክዎ እንደገና ይሞክሩ።"
-            )
-        except:
-            pass
-        
-        return JsonResponse({'success': True, 'message': 'Deposit request rejected'})
+        deposit_request.delete()
+        return JsonResponse({'success': True, 'message': 'Deposit request deleted'})
     except DepositRequest.DoesNotExist:
         return JsonResponse({'error': 'Deposit request not found'}, status=404)
     except Exception as e:
@@ -1470,6 +1502,7 @@ def admin_dashboard_api(request):
     # Approved requests (limit to 5 for initial display)
     approved_deposits = DepositRequest.objects.filter(status='approved').order_by('-created_at')[:5]
     approved_withdraws = WithdrawRequest.objects.filter(status='approved').order_by('-created_at')[:5]
+    failed_deposits = FailedDepositRequest.objects.select_related('user').order_by('-created_at')[:20]
     
     # Count totals for show more functionality
     pending_deposits_count = DepositRequest.objects.filter(status='pending').count()
@@ -1656,6 +1689,20 @@ def admin_dashboard_api(request):
             'created_at': withdraw.created_at.strftime('%Y-%m-%d %H:%M'),
         })
     
+    failed_deposits_data = []
+    for fd in failed_deposits:
+        failed_deposits_data.append({
+            'id': fd.id,
+            'username': fd.user.username,
+            'amount': float(fd.amount) if fd.amount else None,
+            'platform': fd.platform,
+            'deposit_text': (fd.deposit_text or '')[:500],
+            'failure_reason': fd.failure_reason,
+            'reference': fd.reference,
+            'account_suffix': fd.account_suffix,
+            'created_at': fd.created_at.strftime('%Y-%m-%d %H:%M'),
+        })
+    
     return JsonResponse({
         'games_today': games_today,
         'games_yesterday': games_yesterday,
@@ -1701,6 +1748,7 @@ def admin_dashboard_api(request):
         'pending_withdraws_count': pending_withdraws_count,
         'approved_deposits_count': approved_deposits_count,
         'approved_withdraws_count': approved_withdraws_count,
+        'failed_deposits': failed_deposits_data,
         'recent_transfers': [
             {
                 'id': t.id,

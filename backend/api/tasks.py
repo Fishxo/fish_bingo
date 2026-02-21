@@ -3105,11 +3105,23 @@ def task_finalize_redis_system_winner(game_id: int, winner_dict: dict):
     import logging
     logger = logging.getLogger(__name__)
     try:
-        from .redis_utils import cleanup_game_live_state
+        from .redis_utils import cleanup_game_live_state, get_called_numbers_list_from_redis
+        from .models import CalledNumber
         game = Game.objects.get(id=game_id)
+        # CRITICAL: Persist called numbers from Redis to DB BEFORE clearing Redis,
+        # so real users can still tick the last number (co-winner) and mark_number finds it in DB.
+        called_numbers = get_called_numbers_list_from_redis(game_id)
+        if called_numbers:
+            for num in called_numbers:
+                CalledNumber.objects.get_or_create(
+                    game=game,
+                    number=num,
+                    defaults={'letter': CalledNumber.get_letter_for_number(num)}
+                )
+            game.current_call_count = len(called_numbers)
         game.status = 'completed'
         game.completed_at = timezone.now()
-        game.save(update_fields=['status', 'completed_at'])
+        game.save(update_fields=['status', 'completed_at', 'current_call_count'])
         cleanup_game_live_state(game_id)
         name = winner_dict.get('name', 'System')
         card_number = winner_dict.get('card_number')
