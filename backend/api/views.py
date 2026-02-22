@@ -434,23 +434,10 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     Q(status='active') | Q(status='waiting')
                 ).select_related('winner').prefetch_related('winners').order_by('-created_at').first()
             
-            # If no active/waiting game: return most recent completed game (so frontend can redirect to card selection)
-            # or create a new one. This fixes co-winner flow where /current/ otherwise never returns a completed game.
+            # If no active/waiting game, create a new one. Never return a completed game as "current"
+            # (returning completed caused card selection to load with old game + stale card state + banner blink).
             if not game:
-                from django.utils import timezone
-                from datetime import timedelta
-                now = timezone.now()
-                recently_completed = Game.objects.filter(
-                    status='completed',
-                    completed_at__isnull=False,
-                    completed_at__gte=now - timedelta(seconds=90)
-                ).select_related('winner').prefetch_related('winners').order_by('-completed_at').first()
-                if recently_completed:
-                    game = recently_completed
-                
-                if not game:
-                    game = check_and_create_new_game()
-                
+                game = check_and_create_new_game()
                 if not game:
                     return Response({'message': 'No active game'}, status=status.HTTP_404_NOT_FOUND)
             
