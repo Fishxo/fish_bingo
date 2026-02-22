@@ -1443,13 +1443,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ ይህ ግብይት ከዚህ በፊት ተጠቅሷል።\n\nእባክዎ እንደገና ይሞክሩ።"
             )
             return
+        use_fallback = getattr(settings, 'cbe_use_fallback_proxy', False) or (os.environ.get('CBE_USE_FALLBACK_PROXY', '').strip().lower() in ('1', 'true', 'yes'))
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
-            None, lambda: verify_cbe_receipt(reference, account_suffix, api_key)
+            None, lambda: verify_cbe_receipt(reference, account_suffix, api_key, use_fallback_proxy=use_fallback)
         )
         if not result.get('success') or not result.get('data'):
             err_raw = result.get('error') or 'verification_failed'
-            failure_reason = (err_raw[:252] + '...') if len(err_raw) > 255 else err_raw
+            # Admin dashboard: exact API error so you can see "Verification failed" vs regional/block messages
+            failure_reason = f"CBE API: {(err_raw[:244] + '...') if len(err_raw) > 247 else err_raw}"
             async def save_failed():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
@@ -1458,15 +1460,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     account_suffix=account_suffix, amount=amount_from_text
                 )
             await db_operation_with_retry(save_failed)
-            # Distinguish API/network (service down) vs verification failed (invalid receipt)
             if result.get('error_type') == 'api_error':
                 await update.message.reply_text(
                     "⚠️ የCBE ማረጋገጫ አገልግሎት በአሁኑ ጊዜ አይገኝም። እባክዎ በጥቂት ደቂቃዎች በኋላ እንደገና ይሞክሩ።\n\n"
-                    
+                    "(CBE verification service temporarily unavailable. Please try again in a few minutes.)"
                 )
             else:
                 await update.message.reply_text(
                     "⚠️ ሲስተም አይሰራም። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።\n\n"
+                    "If this receipt works on the verifier website, the server may be outside Ethiopia (regional restriction). Enable CBE fallback proxy in admin."
                 )
             return
         data = result['data']

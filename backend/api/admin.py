@@ -119,6 +119,10 @@ class GameSettingsAdmin(admin.ModelAdmin):
             'fields': ('telebirr_verify_api_key',),
             'description': 'API key for verifyapi.leulzenebe.pro. When set, Telebirr deposits are verified automatically from receipt text.'
         }),
+        ('CBE Auto-Verify (same API)', {
+            'fields': ('cbe_use_fallback_proxy',),
+            'description': 'If your server is outside Ethiopia (e.g. AWS): enable to ask the verify API to use fallback proxy for CBE (skipPrimaryVerification). Leave off if hosting in Ethiopia.'
+        }),
         ('Support Settings', {
             'fields': ('support_phone',),
             'description': 'Support phone number for customer support'

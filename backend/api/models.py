@@ -354,7 +354,11 @@ class GameSettings(models.Model):
         default='',
         help_text="API key for verifyapi.leulzenebe.pro to verify Telebirr receipts"
     )
-    
+    # CBE verification from foreign servers (e.g. AWS): enable to ask API to use fallback proxy
+    cbe_use_fallback_proxy = models.BooleanField(
+        default=False,
+        help_text="If server is outside Ethiopia: ask verify API to use fallback proxy for CBE (skipPrimaryVerification)"
+    )
     # Support phone number
     support_phone = models.CharField(
         max_length=20,

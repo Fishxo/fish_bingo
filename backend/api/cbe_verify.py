@@ -69,11 +69,17 @@ def parse_cbe_receipt_text(text: str) -> Optional[dict]:
     }
 
 
-def verify_cbe_receipt(reference: str, account_suffix: str, api_key: str) -> dict:
+def verify_cbe_receipt(
+    reference: str,
+    account_suffix: str,
+    api_key: str,
+    use_fallback_proxy: bool = False,
+) -> dict:
     """
     Call verifyapi.leulzenebe.pro to verify a CBE receipt.
+    use_fallback_proxy: when True, ask API to use fallback proxy (for servers outside Ethiopia;
+        set CBE_USE_FALLBACK_PROXY=1 or enable in GameSettings).
     Returns dict: success, data, error, error_type.
-    error_type: 'api_error' = connection/timeout/5xx (try again later), 'verification_failed' = API said no or invalid receipt.
     """
     if not api_key or not reference or not account_suffix:
         return {
@@ -87,6 +93,8 @@ def verify_cbe_receipt(reference: str, account_suffix: str, api_key: str) -> dic
         'x-api-key': api_key,
     }
     payload = {'reference': reference, 'accountSuffix': account_suffix}
+    if use_fallback_proxy:
+        payload['skipPrimaryVerification'] = True
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -118,7 +126,10 @@ def verify_cbe_receipt(reference: str, account_suffix: str, api_key: str) -> dic
 
     if not (isinstance(body, dict) and body.get('success')):
         err_msg = body.get('error') or body.get('message', 'Verification failed') if isinstance(body, dict) else 'Verification failed'
-        logger.info("CBE verify API returned success=false: %s", err_msg)
+        logger.warning(
+            "CBE verify API returned success=false (possible regional block from foreign server). error=%s body=%s",
+            err_msg, body,
+        )
         return {
             'success': False,
             'data': body.get('data') if isinstance(body, dict) else None,
