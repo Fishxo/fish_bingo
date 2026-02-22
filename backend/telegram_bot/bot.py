@@ -1448,17 +1448,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             None, lambda: verify_cbe_receipt(reference, account_suffix, api_key)
         )
         if not result.get('success') or not result.get('data'):
+            err_raw = result.get('error') or 'verification_failed'
+            failure_reason = (err_raw[:252] + '...') if len(err_raw) > 255 else err_raw
             async def save_failed():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='CBE', deposit_text=text[:2000],
-                    failure_reason=result.get('error') or 'verification_failed', reference=reference,
+                    failure_reason=failure_reason, reference=reference,
                     account_suffix=account_suffix, amount=amount_from_text
                 )
             await db_operation_with_retry(save_failed)
-            await update.message.reply_text(
-                "⚠️ ሲስተም አይሰራም። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።\n\n"
-            )
+            # Distinguish API/network (service down) vs verification failed (invalid receipt)
+            if result.get('error_type') == 'api_error':
+                await update.message.reply_text(
+                    "⚠️ የCBE ማረጋገጫ አገልግሎት በአሁኑ ጊዜ አይገኝም። እባክዎ በጥቂት ደቂቃዎች በኋላ እንደገና ይሞክሩ።\n\n"
+                    
+                )
+            else:
+                await update.message.reply_text(
+                    "⚠️ ሲስተም አይሰራም። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።\n\n"
+                )
             return
         data = result['data']
         # Use ONLY amount from API response (user can edit text; never trust user amount for balance)

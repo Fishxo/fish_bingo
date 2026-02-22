@@ -72,10 +72,14 @@ def parse_cbe_receipt_text(text: str) -> Optional[dict]:
 def verify_cbe_receipt(reference: str, account_suffix: str, api_key: str) -> dict:
     """
     Call verifyapi.leulzenebe.pro to verify a CBE receipt.
-    Returns dict: success, data (payer, receiver, receiverAccount, amount, date, reference), error.
+    Returns dict: success, data, error, error_type.
+    error_type: 'api_error' = connection/timeout/5xx (try again later), 'verification_failed' = API said no or invalid receipt.
     """
     if not api_key or not reference or not account_suffix:
-        return {'success': False, 'data': None, 'error': 'Missing API key, reference or accountSuffix'}
+        return {
+            'success': False, 'data': None, 'error': 'Missing API key, reference or accountSuffix',
+            'error_type': 'config_error',
+        }
 
     url = 'https://verifyapi.leulzenebe.pro/verify-cbe'
     headers = {
@@ -88,30 +92,45 @@ def verify_cbe_receipt(reference: str, account_suffix: str, api_key: str) -> dic
         resp = requests.post(url, json=payload, headers=headers, timeout=15)
         body = resp.json() if resp.headers.get('content-type', '').startswith('application/json') else {}
     except requests.RequestException as e:
+        err_msg = str(e)
         logger.exception("CBE verify API request failed: %s", e)
-        return {'success': False, 'data': None, 'error': str(e)}
+        return {
+            'success': False, 'data': None, 'error': err_msg,
+            'error_type': 'api_error',
+        }
     except ValueError as e:
         logger.exception("CBE verify API invalid JSON: %s", e)
-        return {'success': False, 'data': None, 'error': 'Invalid response'}
+        return {
+            'success': False, 'data': None, 'error': 'Invalid response from API',
+            'error_type': 'api_error',
+        }
 
     if not resp.ok:
+        err_msg = body.get('error', body.get('message', resp.reason)) if isinstance(body, dict) else resp.reason
+        # 5xx or connection issues = api_error; 4xx can be validation
+        is_server_error = 500 <= resp.status_code < 600
         return {
             'success': False,
             'data': body.get('data') if isinstance(body, dict) else None,
-            'error': body.get('error', body.get('message', resp.reason)) if isinstance(body, dict) else resp.reason,
+            'error': f"HTTP {resp.status_code}: {err_msg}" if err_msg else f"HTTP {resp.status_code}",
+            'error_type': 'api_error' if is_server_error else 'verification_failed',
         }
 
     if not (isinstance(body, dict) and body.get('success')):
+        err_msg = body.get('error') or body.get('message', 'Verification failed') if isinstance(body, dict) else 'Verification failed'
+        logger.info("CBE verify API returned success=false: %s", err_msg)
         return {
             'success': False,
             'data': body.get('data') if isinstance(body, dict) else None,
-            'error': body.get('error') or body.get('message', 'Verification failed') if isinstance(body, dict) else 'Verification failed',
+            'error': err_msg,
+            'error_type': 'verification_failed',
         }
 
     return {
         'success': True,
         'data': body.get('data'),
         'error': None,
+        'error_type': None,
     }
 
 
