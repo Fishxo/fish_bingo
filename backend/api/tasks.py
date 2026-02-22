@@ -239,8 +239,11 @@ def task_check_bingo_for_all_cards(self, game_id: int):
 @shared_task(bind=True, queue='gameplay')
 def task_process_bingo_winners(self, game_id: int):
     """
-    Process all bingo winners after 1-second window expires.
-    This task is called 1 second after the first winner claims bingo.
+    Single decider for bingo winners: runs after the 2s tie window.
+    Reads the single source (Redis bingo_winners set), then:
+    - 1 winner: announce and add full prize.
+    - N winners: announce all and split prize; credit each real winner.
+    Only this task broadcasts winner_declared and game_ended (API does not).
     """
     try:
         from django.utils import timezone

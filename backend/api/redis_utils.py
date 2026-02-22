@@ -202,7 +202,7 @@ def release_number_calling_lock(game_id):
 def try_acquire_bingo_window(game_id, first_claim_is_fake=False):
     """
     Try to acquire bingo window for multiple-winner tie.
-    - First winner (real): 1 second window for co-winners.
+    - First winner (real): 2 second window so co-winners have time to register (lock serialization).
     - First winner (fake): 2 second window so real players can claim and share.
     Returns (success, is_first_winner).
     """
@@ -217,8 +217,8 @@ def try_acquire_bingo_window(game_id, first_claim_is_fake=False):
         is_first = r.setnx(window_key, "1")
         
         if is_first:
-            # First winner - set window: 2 sec if first is fake, else 1 sec
-            window_seconds = 2 if first_claim_is_fake else 1
+            # First winner - 2s window for both real and fake so co-winners can register
+            window_seconds = 2
             r.expire(window_key, window_seconds)
             return (True, True)
         else:

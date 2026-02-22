@@ -1185,35 +1185,9 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
             
             primary_winner = winners_data[0]['winner'] if winners_data else UserSerializer(card.user).data
             
-            try:
-                broadcast_to_game_rooms(game.id, 'winner_declared', {
-                    'winners': winners_data,
-                    'winner': primary_winner,
-                    'card_number': card.card_number,
-                    'card_id': card.id,
-                    'card_layout': card.card_layout,
-                    'winning_pattern': winning_pattern,
-                    'prize': prize_per_winner,
-                    'total_prize': total_prize,
-                    'winner_count': winner_count,
-                    'last_called_number': winning_number,
-                    'called_numbers': called_numbers_list
-                })
-            except Exception as e:
-                print(f"WebSocket broadcast error: {e}")
-            
-            try:
-                game.refresh_from_db()
-                if game.status == 'completed':
-                    broadcast_to_game_rooms(game.id, 'game_ended', {
-                        'game_id': game.id,
-                        'status': 'completed',
-                        'completed_at': game.completed_at.isoformat() if game.completed_at else None,
-                        'winner': primary_winner,
-                        'winner_count': winner_count
-                    })
-            except Exception as e:
-                print(f"WebSocket broadcast error (game_ended): {e}")
+            # Single source of truth: only the delayed task (task_process_bingo_winners) announces
+            # winners and game_ended after the tie window. Do NOT broadcast here so co-winners
+            # are always announced together with correct split; client gets final result via WebSocket.
             
             return Response({
                 'success': True,
