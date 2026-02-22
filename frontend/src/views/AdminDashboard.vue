@@ -497,6 +497,13 @@
               <input v-model="settings.telebirr_verify_api_key" type="password" placeholder="API key for auto-verify (optional)" autocomplete="off" />
               <small class="form-hint">When set, Telebirr deposits are verified automatically from receipt text (verifyapi.leulzenebe.pro).</small>
             </div>
+            <div class="form-group full-width checkbox">
+              <label>
+                <input v-model="settings.cbe_use_fallback_proxy" type="checkbox" />
+                CBE use fallback proxy (server outside Ethiopia)
+              </label>
+              <small class="form-hint">Enable if your server is outside Ethiopia (e.g. AWS). Asks the verify API to use fallback proxy for CBE so receipts can be verified.</small>
+            </div>
           </div>
           <button class="btn btn-primary" :disabled="settingsSaving" @click="saveSettings">{{ settingsSaving ? 'Saving…' : 'Save Settings' }}</button>
           <span v-if="settingsMessage" class="settings-msg" :class="settingsError ? 'error' : ''">{{ settingsMessage }}</span>
@@ -726,7 +733,8 @@ export default {
         free_play: false,
         system_accounts_min: 15,
         system_accounts_max: 100,
-        telebirr_verify_api_key: ''
+        telebirr_verify_api_key: '',
+        cbe_use_fallback_proxy: false
       },
       settingsLoading: false,
       settingsSaving: false,

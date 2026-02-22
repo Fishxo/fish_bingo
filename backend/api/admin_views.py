@@ -979,6 +979,7 @@ def game_settings_api(request):
             'system_accounts_max': getattr(settings, 'system_accounts_max', 30),
             'winning_patterns': getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']),
             'telebirr_verify_api_key': getattr(settings, 'telebirr_verify_api_key', '') or '',
+            'cbe_use_fallback_proxy': getattr(settings, 'cbe_use_fallback_proxy', False),
         }
         return JsonResponse(response_data)
     
@@ -1041,6 +1042,8 @@ def game_settings_api(request):
                         settings_obj.winning_patterns = ['horizontal']  # Default to horizontal if none selected
             if 'telebirr_verify_api_key' in data:
                 settings_obj.telebirr_verify_api_key = (data['telebirr_verify_api_key'] or '').strip()
+            if 'cbe_use_fallback_proxy' in data:
+                settings_obj.cbe_use_fallback_proxy = bool(data['cbe_use_fallback_proxy'])
             
             settings_obj.save()
             
