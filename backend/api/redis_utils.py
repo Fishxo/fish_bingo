@@ -217,9 +217,13 @@ def try_acquire_bingo_window(game_id, first_claim_is_fake=False):
             window_seconds = 2 if first_claim_is_fake else 1
             r.expire(window_key, window_seconds)
             return (True, True)
+        # Co-winner: allow while window key exists and TTL >= 0.
+        # Redis TTL returns integer seconds; in the last fraction of a second it returns 0.
+        # Rejecting only ttl > 0 was causing the second claim to fail when it ran in that boundary.
         ttl = r.ttl(window_key)
-        if ttl > 0:
+        if ttl >= 0:
             return (True, False)
+        # Key expired or missing (-2)
         return (False, False)
     except Exception as e:
         print(f"Error acquiring bingo window: {e}")
