@@ -430,26 +430,27 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             # Cache miss or waiting game - fetch from database with optimized query
             if not game:
-                # OPTIMIZATION #5: Use select_related and prefetch_related for efficient queries
                 game = Game.objects.filter(
                     Q(status='active') | Q(status='waiting')
                 ).select_related('winner').prefetch_related('winners').order_by('-created_at').first()
             
-            # If no game exists, create a new one
-            # CRITICAL: Only create new game if the last completed game finished at least 8 seconds ago
-            # This ensures users have time to see the winner banner before a new game is created
+            # If no active/waiting game: return most recent completed game (so frontend can redirect to card selection)
+            # or create a new one. This fixes co-winner flow where /current/ otherwise never returns a completed game.
             if not game:
                 from django.utils import timezone
                 from datetime import timedelta
+                now = timezone.now()
+                recently_completed = Game.objects.filter(
+                    status='completed',
+                    completed_at__isnull=False,
+                    completed_at__gte=now - timedelta(seconds=90)
+                ).select_related('winner').prefetch_related('winners').order_by('-completed_at').first()
+                if recently_completed:
+                    game = recently_completed
                 
-                # Check when the last game completed
-                last_completed = Game.objects.filter(status='completed').order_by('-completed_at').first()
+                if not game:
+                    game = check_and_create_new_game()
                 
-                # No delay needed - create game immediately after completion
-                # State transitions are handled atomically with locks
-                
-                # Safe to create new game now
-                game = check_and_create_new_game()
                 if not game:
                     return Response({'message': 'No active game'}, status=status.HTTP_404_NOT_FOUND)
             
@@ -510,9 +511,8 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     except:
                         settings = None
             
-            # Check if timer has elapsed and automatically start game
-            # IMPORTANT: Only check timer if fake users have finished selecting (if enabled)
-            if game.created_at and settings:
+            # Check if timer has elapsed and automatically start game (only for waiting games)
+            if game.status == 'waiting' and game.created_at and settings:
                 from django.utils import timezone
                 from datetime import timedelta
                 elapsed_time = timezone.now() - game.created_at

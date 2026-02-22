@@ -308,6 +308,11 @@ def task_process_bingo_winners(self, game_id: int):
                     except User.DoesNotExist:
                         pass
             print(f"Game {game_id} marked completed in task_process_bingo_winners (split prize)")
+            try:
+                from django.core.cache import cache
+                cache.delete('game:current')
+            except Exception:
+                pass
         
         # Refresh game to get latest derash
         game.refresh_from_db()
@@ -558,6 +563,11 @@ def task_broadcast_winner_declared_delayed(game_id: int):
             Game.objects.filter(id=game_id, status='active').update(status='completed', completed_at=now)
             game.refresh_from_db()
             sync_game_state_to_redis(game)
+            try:
+                from django.core.cache import cache
+                cache.delete('game:current')
+            except Exception:
+                pass
             print(f"Game {game_id} marked completed in delayed task (tie window ended)")
             from .models import User
             from .user_utils import update_user_withdrawal_approval
