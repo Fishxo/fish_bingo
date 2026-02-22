@@ -528,10 +528,10 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                 game.winners.add(card.user)
             print(f"SUCCESS: Game {game.id} first claim by {'fake user' if is_fake_user else f'real user {card.user.id}'} (window open)")
             
-            # Fixed one-time window: 3s if first is fake, 1s if first is real. We do NOT wait extra seconds
+            # Fixed one-time window: 2s if first is fake, 1s if first is real. We do NOT wait extra seconds
             # when more co-winners join; the same single countdown runs once, then we set completed and announce all.
             from .tasks import task_broadcast_winner_declared_delayed, task_process_bingo_winners
-            window_sec = 3 if is_fake_user else 1
+            window_sec = 2 if is_fake_user else 1
             task_broadcast_winner_declared_delayed.apply_async(args=[game.id], countdown=window_sec)
             print(f"Scheduled winner broadcast + game complete for game {game.id} in {window_sec}s (fixed window, no extra wait per co-winner)")
             task_process_bingo_winners.apply_async(args=[game.id], countdown=window_sec)

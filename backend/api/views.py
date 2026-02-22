@@ -967,7 +967,7 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
         called_set = called_set | db_numbers
         if number not in called_set:
             return Response(
-                {'error': 'This number has not been called yet'},
+                {'error': 'ይህ ቁጥር እስካሁን አልተጠራም'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -979,7 +979,7 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.data)
         else:
             return Response(
-                {'error': 'Number not found on your card'},
+                {'error': 'ይህ ቁጥር በካርድዎ ላይ አልተገኘም'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

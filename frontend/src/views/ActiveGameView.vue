@@ -977,12 +977,12 @@ export default {
           isFakeUserWinner: isFakeUserWinner
         })
         
-        // FIX: Show banner immediately for real users, after 3-second delay for fake users
+        // FIX: Show banner immediately for real users, after 2-second delay for fake users
         // (gives real players chance to claim bingo with same number)
         if (isFakeUserWinner) {
           setTimeout(() => {
             showWinnerBanner()
-          }, 3000)
+          }, 2000)
         } else {
           showWinnerBanner()
         }
@@ -1271,13 +1271,16 @@ export default {
       }
       
       const layout = this.userCard.card_layout
-      
-      // Helper function to check if a cell is marked (including FREE space)
+      const calledSet = new Set(this.calledNumbers || [])
+
+      // Only count a cell as marked for BINGO if it's FREE or (has been called AND marked).
+      // This prevents the button becoming clickable from optimistic tick before backend confirms.
       const isCellMarked = (cell) => {
         if (cell.letter === 'FREE') {
-          return true  // FREE is always considered marked
+          return true
         }
-        return cell.marked || false
+        if (cell.number == null) return false
+        return (cell.marked || false) && calledSet.has(cell.number)
       }
       
       // Check horizontal lines (any row)

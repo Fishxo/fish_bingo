@@ -601,17 +601,19 @@ export default {
       this.isRedirecting = true
       this.$router.push('/completed').catch(() => {})
     },
-    startTimer() {
+    startTimer(forceFullRestart = false) {
       // Only start timer if not already running
       if (this.timerInterval) {
         console.log('⏱️ Timer already running, skipping start. Current:', this.timerSeconds)
-        return // Timer already running - don't reset it!
+        return
       }
       
-      // CRITICAL: Calculate remaining time based on game.created_at, not full timer
-      // This ensures timer matches backend calculation
       let timerValue = this.game?.card_selection_timer || 30
-      if (this.game && this.game.created_at) {
+      // When min players not reached, timer hit 0 and we restart: use full duration, not created_at
+      if (forceFullRestart) {
+        this.timerSeconds = timerValue
+        console.log('⏱️ Timer restarted from full:', this.timerSeconds, 's (min players not reached)')
+      } else if (this.game && this.game.created_at) {
         const gameCreatedAt = new Date(this.game.created_at)
         const now = new Date()
         const elapsedSeconds = Math.floor((now - gameCreatedAt) / 1000)
@@ -619,7 +621,6 @@ export default {
         this.timerSeconds = remainingSeconds
         console.log(`⏱️ Starting timer: ${remainingSeconds}s remaining (${elapsedSeconds}s elapsed of ${timerValue}s total)`)
       } else {
-        // Fallback if created_at is not available
         this.timerSeconds = timerValue
         console.log('⏱️ Starting timer from', this.timerSeconds, 'seconds (from settings, no created_at)')
       }
@@ -696,11 +697,10 @@ export default {
             this.isRedirecting = true
             this.$router.push('/game').catch(() => {})
           } else if (game.status === 'waiting') {
-            // Timer hit 0 but game still waiting (e.g. 1 player) - restart timer from full so it counts down again
+            // Timer hit 0 but game still waiting (e.g. 1 player) - restart timer from full
             if (!this.interval) this.startPolling()
-            this.timerSeconds = game.card_selection_timer || 30
             if (!this.timerInterval) {
-              this.startTimer()
+              this.startTimer(true) // forceFullRestart = true so countdown restarts from full
             }
           }
         } catch (e) {
@@ -711,8 +711,7 @@ export default {
           } else {
             if (!this.interval) this.startPolling()
             if (this.game && this.game.status === 'waiting' && !this.timerInterval) {
-              this.timerSeconds = this.game.card_selection_timer || 30
-              this.startTimer()
+              this.startTimer(true)
             }
           }
         }

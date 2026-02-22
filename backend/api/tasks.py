@@ -485,7 +485,14 @@ def task_process_bingo_winners(self, game_id: int):
                 'winners': winners_data,
                 'winner': primary_winner,
                 'total_prize': float(total_prize),
-                'prize': display_prize,  # Show total prize for fake users (for display consistency)
+                'prize': display_prize,
+                'winner_count': all_winner_count
+            })
+            broadcast_to_game_rooms(game.id, 'game_ended', {
+                'game_id': game.id,
+                'status': 'completed',
+                'completed_at': game.completed_at.isoformat() if game.completed_at else None,
+                'winner': primary_winner,
                 'winner_count': all_winner_count
             })
         except Exception as e:
@@ -940,12 +947,12 @@ def task_auto_call_numbers(self, game_id: int):
                     # Fake users are treated as passive event responders, not game controllers
                     from .game_logic import claim_bingo_unified
                     
-                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) has bingo - scheduling claim after 3 seconds")
+                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) has bingo - scheduling claim after 2 seconds")
                     
                     # CRITICAL FIX: Use Celery countdown instead of time.sleep() to avoid blocking worker
-                    # Schedule fake user claim after 3-second delay (gives real users time to claim first)
+                    # Schedule fake user claim after 2-second delay (gives real users time to claim first)
                     release_number_calling_lock(game_id)
-                    task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=3)
+                    task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=2)
                     # Schedule next number call
                     task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
                     return {'success': True, 'fake_winner_scheduled': True, 'fake_card_id': fake_card.id}
@@ -978,7 +985,7 @@ def task_auto_call_numbers(self, game_id: int):
                         task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
                         return {'success': True, 'card_already_won_during_delay': True}
                     
-                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) claiming bingo after 3-second delay")
+                    print(f"Fake user {fake_card.fake_user.name} (card {fake_card.card_number}) claiming bingo after 2-second delay")
                     
                     # Call unified function for fake user
                     success, winning_pattern, error_message = claim_bingo_unified(fake_card, game, is_fake_user=True)
@@ -1188,8 +1195,8 @@ def task_call_first_number(self, game_id: int):
                     from .models import FakeUserGameCard
                     fake_card = FakeUserGameCard.objects.get(id=fake_card.id)
                     if not fake_card.is_winner:
-                        # Schedule fake user claim after 3-second delay
-                        task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=3)
+                        # Schedule fake user claim after 2-second delay
+                        task_process_fake_user_claim.apply_async(args=[game_id, fake_card.id], countdown=2)
             except Exception as e:
                 print(f"ERROR in batch_mark_number_on_fake_cards: {e}")
             
