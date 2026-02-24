@@ -377,35 +377,23 @@ export default {
   transform: scale(0.97);
 }
 
-.bingo-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--accent-coral-dark) 0%, var(--accent-coral) 70%);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(255, 107, 107, 0.4);
-}
-
 .bingo-btn:disabled {
   background: linear-gradient(135deg, var(--gray-medium) 0%, var(--gray-dark) 100%);
   cursor: not-allowed;
   opacity: 0.6;
 }
 
+/* Static, darker coral when clickable - no motion to avoid distracting from card */
 .bingo-btn.enabled:not(:disabled) {
-  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-coral-dark) 100%);
+  background: linear-gradient(135deg, #c94a4a 0%, #a63d3d 100%);
   cursor: pointer;
   opacity: 1;
-  box-shadow: 0 4px 12px rgba(255, 107, 107, 0.5);
-  animation: pulse-coral 2s infinite;
+  box-shadow: 0 2px 8px rgba(160, 60, 60, 0.4);
 }
 
-@keyframes pulse-coral {
-  0%, 100% {
-    box-shadow: 0 4px 12px rgba(255, 107, 107, 0.5);
-    transform: scale(1);
-  }
-  50% {
-    box-shadow: 0 6px 20px rgba(255, 107, 107, 0.8);
-    transform: scale(1.02);
-  }
+.bingo-btn.enabled:hover:not(:disabled) {
+  background: linear-gradient(135deg, #d65a5a 0%, #b54a4a 100%);
+  box-shadow: 0 3px 10px rgba(160, 60, 60, 0.5);
 }
 </style>
 

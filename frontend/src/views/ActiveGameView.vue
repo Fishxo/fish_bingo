@@ -178,6 +178,8 @@ export default {
   },
   computed: {
     // Bingo button is clickable when game is active, we have a card, and not blocked. Pattern is checked only on click.
+    // For OTHER players: winner/winners are only set when winner_declared is received (after backend's 1s co-winner
+    // window for real first claim, or 3s for fake). So their button stays clickable for the full window.
     canClaimBingo() {
       if (this.blockedFromThisGame || this.claimBingoChecking) return false
       if (!this.userCard || !this.game || this.game.status !== 'active') return false
@@ -863,152 +865,155 @@ export default {
         // Set flag to prevent loadGame from running and interfering with banner
         this._winnerBannerActive = true
         
-        // Helper function to set winner data and show banner (and set game completed when called for fake user)
-        const showWinnerBanner = () => {
-          // For fake user: set game completed only when we show the banner (after 3s delay)
-          if (this.game && isFakeUserWinner) {
-            this.game.status = 'completed'
-          }
-          // Record when winner banner is shown - enforce 8-second minimum display
-          this.winnerBannerShownAt = Date.now()
-          
-          // Set banner visibility flag
-          this.showWinnerBanner = true
-          this._winnerBannerActive = true
-          
-          // Force update to show banner
-          this.$forceUpdate()
-        }
-        
-        // Handle multiple winners (new format). Prefer events with more winners so a delayed
-        // single-winner broadcast does not overwrite a co-winner update.
-        if (data.winners && data.winners.length > 0) {
-          const currentCount = this.winners ? this.winners.length : 0
-          if (data.winners.length >= currentCount) {
-            this.winners = data.winners
-            if (data.winners[0].winner) {
-              this.winner = data.winners[0].winner
-            } else if (data.winners[0].username) {
-              this.winner = {
-                id: null,
-                username: data.winners[0].username,
-                name: data.winners[0].username,
-                is_fake: true
-              }
-            } else {
-              this.winner = data.winners[0].winner || null
-            }
-            this.winnerPrize = data.prize ?? data.winners[0].prize ?? 0
-            this.totalPrize = data.total_prize ?? null
-          }
-          
-          if (this.winners) {
-            if (this.userCard && this.userCard.user) {
-              const currentUserId = this.userCard.user.id
-              const currentUserWinner = this.winners.find(w =>
-                w.winner && (w.winner.id === currentUserId || w.winner.id === Number(currentUserId))
-              )
-              if (currentUserWinner) {
-                this.isCurrentUserWinner = true
-                this.winnerCard = {
-                  card_layout: currentUserWinner.card_layout,
-                  card_number: currentUserWinner.card_number,
-                  winning_pattern: currentUserWinner.winning_pattern,
-                  selected_numbers: currentUserWinner.selected_numbers || [],
-                  called_numbers: currentUserWinner.called_numbers || [],
-                  last_called_number: currentUserWinner.last_called_number || null
+        // Helper: apply winner data to component state. When we set this.winner/this.winners,
+        // canClaimBingo becomes false (button grays out). For fake winner we call this only AFTER
+        // the co-winner window so the Bingo button stays clickable for the full window.
+        const applyWinnerData = (payload) => {
+          if (payload.winners && payload.winners.length > 0) {
+            const currentCount = this.winners ? this.winners.length : 0
+            if (payload.winners.length >= currentCount) {
+              this.winners = payload.winners
+              if (payload.winners[0].winner) {
+                this.winner = payload.winners[0].winner
+              } else if (payload.winners[0].username) {
+                this.winner = {
+                  id: null,
+                  username: payload.winners[0].username,
+                  name: payload.winners[0].username,
+                  is_fake: true
                 }
               } else {
-                this.isCurrentUserWinner = false
-                if (this.winners[0].card_layout) {
+                this.winner = payload.winners[0].winner || null
+              }
+              this.winnerPrize = payload.prize ?? payload.winners[0].prize ?? 0
+              this.totalPrize = payload.total_prize ?? null
+            }
+            if (this.winners) {
+              if (this.userCard && this.userCard.user) {
+                const currentUserId = this.userCard.user.id
+                const currentUserWinner = this.winners.find(w =>
+                  w.winner && (w.winner.id === currentUserId || w.winner.id === Number(currentUserId))
+                )
+                if (currentUserWinner) {
+                  this.isCurrentUserWinner = true
                   this.winnerCard = {
-                    card_layout: this.winners[0].card_layout,
-                    card_number: this.winners[0].card_number,
-                    winning_pattern: this.winners[0].winning_pattern,
-                    selected_numbers: this.winners[0].selected_numbers || [],
-                    called_numbers: this.winners[0].called_numbers || [],
-                    last_called_number: this.winners[0].last_called_number || null
+                    card_layout: currentUserWinner.card_layout,
+                    card_number: currentUserWinner.card_number,
+                    winning_pattern: currentUserWinner.winning_pattern,
+                    selected_numbers: currentUserWinner.selected_numbers || [],
+                    called_numbers: currentUserWinner.called_numbers || [],
+                    last_called_number: currentUserWinner.last_called_number || null
+                  }
+                } else {
+                  this.isCurrentUserWinner = false
+                  if (this.winners[0].card_layout) {
+                    this.winnerCard = {
+                      card_layout: this.winners[0].card_layout,
+                      card_number: this.winners[0].card_number,
+                      winning_pattern: this.winners[0].winning_pattern,
+                      selected_numbers: this.winners[0].selected_numbers || [],
+                      called_numbers: this.winners[0].called_numbers || [],
+                      last_called_number: this.winners[0].last_called_number || null
+                    }
                   }
                 }
               }
             }
-          }
-        } else {
-          // Single winner (backward compatible format) - only apply if we don't already have multiple winners
-          if (!this.winners || this.winners.length <= 1) {
-            this.winners = null
-            if (data.winner) {
-              this.winner = data.winner
-            } else if (data.username) {
-              this.winner = {
-                id: null,
-                username: data.username,
-                name: data.username,
-                is_fake: data.is_fake || false
+          } else {
+            if (!this.winners || this.winners.length <= 1) {
+              this.winners = null
+              if (payload.winner) {
+                this.winner = payload.winner
+              } else if (payload.username) {
+                this.winner = {
+                  id: null,
+                  username: payload.username,
+                  name: payload.username,
+                  is_fake: payload.is_fake || false
+                }
+              } else {
+                this.winner = payload.winner || null
               }
-            } else {
-              this.winner = data.winner || null
-            }
-            this.winnerPrize = data.prize ?? this.game?.total_derash ?? 0
-            this.totalPrize = null
-            if (data.card_layout) {
-              this.winnerCard = {
-                card_layout: data.card_layout,
-                card_number: data.card_number,
-                winning_pattern: data.winning_pattern,
-                selected_numbers: data.selected_numbers || [],
-                called_numbers: data.called_numbers || [],
-                last_called_number: data.last_called_number || null
-              }
-            }
-            if (this.userCard && data.winner && this.userCard.user &&
-                (this.userCard.user.id === data.winner.id || this.userCard.user === data.winner.id)) {
-              this.isCurrentUserWinner = true
-              this.winnerCard = {
-                ...this.userCard,
-                winning_pattern: data.winning_pattern,
-                selected_numbers: data.selected_numbers || this.userCard.selected_numbers || [],
-                called_numbers: data.called_numbers || [],
-                last_called_number: data.last_called_number || null
-              }
-            } else {
-              this.isCurrentUserWinner = false
-              if (data.card_id || data.card_number) {
-                this.loadWinnerCard(data)
-              } else if (data.card_layout) {
+              this.winnerPrize = payload.prize ?? this.game?.total_derash ?? 0
+              this.totalPrize = null
+              if (payload.card_layout) {
                 this.winnerCard = {
-                  card_layout: data.card_layout,
-                  card_number: data.card_number,
-                  winning_pattern: data.winning_pattern,
-                  selected_numbers: data.selected_numbers || [],
-                  called_numbers: data.called_numbers || [],
-                  last_called_number: data.last_called_number || null
+                  card_layout: payload.card_layout,
+                  card_number: payload.card_number,
+                  winning_pattern: payload.winning_pattern,
+                  selected_numbers: payload.selected_numbers || [],
+                  called_numbers: payload.called_numbers || [],
+                  last_called_number: payload.last_called_number || null
+                }
+              }
+              if (this.userCard && payload.winner && this.userCard.user &&
+                  (this.userCard.user.id === payload.winner.id || this.userCard.user === payload.winner.id)) {
+                this.isCurrentUserWinner = true
+                this.winnerCard = {
+                  ...this.userCard,
+                  winning_pattern: payload.winning_pattern,
+                  selected_numbers: payload.selected_numbers || this.userCard.selected_numbers || [],
+                  called_numbers: payload.called_numbers || [],
+                  last_called_number: payload.last_called_number || null
+                }
+              } else {
+                this.isCurrentUserWinner = false
+                if (payload.card_id || payload.card_number) {
+                  this.loadWinnerCard(payload)
+                } else if (payload.card_layout) {
+                  this.winnerCard = {
+                    card_layout: payload.card_layout,
+                    card_number: payload.card_number,
+                    winning_pattern: payload.winning_pattern,
+                    selected_numbers: payload.selected_numbers || [],
+                    called_numbers: payload.called_numbers || [],
+                    last_called_number: payload.last_called_number || null
+                  }
                 }
               }
             }
-          }
-          if (!this.winnerBannerShownAt) {
-            this.winnerBannerShownAt = Date.now()
+            if (!this.winnerBannerShownAt) {
+              this.winnerBannerShownAt = Date.now()
+            }
           }
         }
-        
-        console.log('Winner banner state:', {
-          winner: this.winner,
-          winners: this.winners,
-          winnerPrize: this.winnerPrize,
-          totalPrize: this.totalPrize,
-          winnerCard: this.winnerCard,
-          isCurrentUserWinner: this.isCurrentUserWinner,
-          isFakeUserWinner: isFakeUserWinner
-        })
-        
-        // FIX: Show banner immediately for real users, after 2-second delay for fake users
-        // (gives real players chance to claim bingo with same number)
+
+        // Helper function to set winner data and show banner (and set game completed when called for fake user)
+        const showWinnerBanner = () => {
+          if (this.game && isFakeUserWinner) {
+            this.game.status = 'completed'
+          }
+          this.winnerBannerShownAt = Date.now()
+          this.showWinnerBanner = true
+          this._winnerBannerActive = true
+          this.$forceUpdate()
+        }
+
+        // CRITICAL: For fake user, do NOT set winner/winners yet so canClaimBingo stays true
+        // for the full co-winner window (3s). Real users can still click Bingo and become co-winner.
+        // Only after the window do we apply winner data and show the banner.
+        const CO_WINNER_WINDOW_MS = 3000
         if (isFakeUserWinner) {
           setTimeout(() => {
+            applyWinnerData(data)
+            console.log('Winner banner state (after co-winner window):', {
+              winner: this.winner,
+              winners: this.winners,
+              isFakeUserWinner: true
+            })
             showWinnerBanner()
-          }, 2000)
+          }, CO_WINNER_WINDOW_MS)
         } else {
+          applyWinnerData(data)
+          console.log('Winner banner state:', {
+            winner: this.winner,
+            winners: this.winners,
+            winnerPrize: this.winnerPrize,
+            totalPrize: this.totalPrize,
+            winnerCard: this.winnerCard,
+            isCurrentUserWinner: this.isCurrentUserWinner,
+            isFakeUserWinner: false
+          })
           showWinnerBanner()
         }
         
@@ -1542,8 +1547,8 @@ export default {
 
 .bingo-rule-hint {
   text-align: center;
-  font-size: 14px;
-  color: #856404;
+  font-size: 20px;
+  color: #00f7ff;
   margin: 12px 0 0;
   padding: 0 8px;
 }
