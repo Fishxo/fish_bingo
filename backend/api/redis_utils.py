@@ -366,16 +366,45 @@ def cleanup_game_redis_keys(game_id):
         print(f"Error cleaning up Redis keys for game {game_id}: {e}")
 
 
-# --- Bot daily /start (new registration) limit ---
-BOT_DAILY_START_KEY_PREFIX = "bot:new_starts:"
-BOT_DAILY_START_TTL_SECONDS = 24 * 3600  # 24h (1 day) so key expires after day is done
+# --- Bot new registration limit (24h rolling window) ---
+# Counter increments when a new user completes registration (contact). When count >= limit,
+# /start and /register do not respond at all (no server load). Window resets 24h after it started.
+BOT_NEW_STARTS_WINDOW_END_KEY = "bot:new_starts:window_end"  # Unix timestamp when current window ends
+BOT_NEW_STARTS_COUNT_KEY = "bot:new_starts:count"
+WINDOW_SECONDS = 24 * 3600  # 24h rolling window
 DEFAULT_DAILY_NEW_START_LIMIT = 100
 
+# Lua: check if new starts are blocked (count >= limit in current window). Returns 1=blocked, 0=allow.
+# KEYS: none. ARGV[1]=limit, ARGV[2]=now (Unix)
+LUA_IS_NEW_START_BLOCKED = """
+local limit = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+if limit == nil or limit <= 0 then return 0 end
+local we = redis.call("GET", "bot:new_starts:window_end")
+local count = tonumber(redis.call("GET", "bot:new_starts:count") or "0")
+if we == nil or now > tonumber(we) then return 0 end
+if count >= limit then return 1 end
+return 0
+"""
 
-def get_bot_daily_new_start_key():
-    """Redis key for today's new /start count (server timezone, typically UTC). Resets each calendar day."""
-    today = timezone.now().date()
-    return f"{BOT_DAILY_START_KEY_PREFIX}{today.isoformat()}"
+# Lua: acquire a slot (increment count). Reset window if expired. Returns 1=acquired, 0=over limit.
+# KEYS: none. ARGV[1]=limit, ARGV[2]=now (Unix), ARGV[3]=window_sec
+LUA_ACQUIRE_NEW_START_SLOT = """
+local limit = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local window_sec = tonumber(ARGV[3])
+if limit == nil or limit <= 0 then return 1 end
+local we = redis.call("GET", "bot:new_starts:window_end")
+local count = tonumber(redis.call("GET", "bot:new_starts:count") or "0")
+if we == nil or now > tonumber(we) then
+  redis.call("SET", "bot:new_starts:window_end", now + window_sec)
+  redis.call("SET", "bot:new_starts:count", "0")
+  count = 0
+end
+if count >= limit then return 0 end
+redis.call("INCR", "bot:new_starts:count")
+return 1
+"""
 
 
 def _get_daily_new_start_limit():
@@ -392,10 +421,34 @@ def _get_daily_new_start_limit():
         return DEFAULT_DAILY_NEW_START_LIMIT
 
 
+def is_new_start_blocked():
+    """
+    Returns True if new /start and new registration should be disabled (no response at all).
+    Uses 24h rolling window; when count >= limit in current window, returns True.
+    Call at the very start of /start (new user) and handle_contact to avoid any server load when over limit.
+    """
+    limit = _get_daily_new_start_limit()
+    if limit is None:
+        return False  # 0 = no limit
+    r = get_redis_client()
+    if not r:
+        return False  # No Redis: allow (fail open)
+    try:
+        import time
+        now = int(time.time())
+        result = r.eval(LUA_IS_NEW_START_BLOCKED, 0, limit, now)
+        return result == 1
+    except Exception as e:
+        print(f"Error in is_new_start_blocked: {e}")
+        return False  # Fail open
+
+
 def try_acquire_daily_start_slot():
     """
-    Atomically increment today's new /start count. Returns True if under limit (slot acquired), False if limit reached.
-    Limit is read from GameSettings.daily_new_start_limit (0 = no limit). Existing users are not affected.
+    Call only when a new user completes registration (sends contact for the first time).
+    Atomically: if window expired, reset window and count; if count >= limit return False;
+    else increment count and return True. Uses 24h rolling window so increasing the limit
+    in admin takes effect immediately for the current window.
     """
     limit = _get_daily_new_start_limit()
     if limit is None:
@@ -404,14 +457,10 @@ def try_acquire_daily_start_slot():
     if not r:
         return True  # No Redis: allow (fail open)
     try:
-        key = get_bot_daily_new_start_key()
-        n = r.incr(key)
-        if n == 1:
-            r.expire(key, BOT_DAILY_START_TTL_SECONDS)
-        if n <= limit:
-            return True
-        r.decr(key)
-        return False
+        import time
+        now = int(time.time())
+        result = r.eval(LUA_ACQUIRE_NEW_START_SLOT, 0, limit, now, WINDOW_SECONDS)
+        return result == 1
     except Exception as e:
         print(f"Error in try_acquire_daily_start_slot: {e}")
         return True  # Fail open

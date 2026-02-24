@@ -203,15 +203,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.callback_query.edit_message_text(welcome_msg, reply_markup=reply_markup)
                     await update.callback_query.answer()
         except User.DoesNotExist:
-            # Daily cap: max 100 new /starts per day (new users only)
-            from api.redis_utils import try_acquire_daily_start_slot
-            if not try_acquire_daily_start_slot():
-                msg = "የመመዝገቢያ ቦታዎች ለዛሬ ተሞልተዋል። እባክዎ ነገ ይሞክሩ።"
-                if update.message:
-                    await update.message.reply_text(msg)
-                elif update.callback_query:
-                    await update.callback_query.answer(msg, show_alert=True)
-                return
+            # When registration limit is reached (24h window), do not respond at all to reduce server load
+            from api.redis_utils import is_new_start_blocked
+            if is_new_start_blocked():
+                return  # No message, no DB, no reply
             # New user - create user record but don't register yet
             # Check if referrer exists before creating user
             referrer_user = None
@@ -870,7 +865,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     from api.redis_utils import (
         acquire_registration_lock, release_registration_lock,
-        check_rate_limit
+        check_rate_limit, is_new_start_blocked, try_acquire_daily_start_slot
     )
     from api.tasks import task_process_registration_rewards
     
@@ -880,6 +875,10 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not user or not contact:
             return
+        
+        # When registration limit is reached (24h window), do not respond at all to reduce server load
+        if is_new_start_blocked():
+            return  # No message, no DB, no reply
         
         # Verify the contact belongs to the user who sent it
         if contact.user_id != user.id:
@@ -931,6 +930,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # IMPORTANT: Check BEFORE updating phone number
             had_phone_before = bool(telegram_user.phone_number and telegram_user.phone_number.strip())
             is_first_registration = not had_phone_before
+            
+            # Consume one slot from the 24h registration window only on first-time registration
+            if is_first_registration and not try_acquire_daily_start_slot():
+                release_registration_lock(user.id)
+                return  # Over limit: no response to reduce server load
             
             # Update phone number (MINIMAL - only if changed)
             if not telegram_user.phone_number or telegram_user.phone_number != normalized_phone:
