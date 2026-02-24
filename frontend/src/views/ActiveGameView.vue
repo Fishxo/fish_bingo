@@ -85,7 +85,7 @@
       </div>
       <!-- Bingo rule hint: full width below both bingo grid and user card -->
       <div v-if="userCard && game?.status === 'active' && !blockedFromThisGame" class="bingo-rule-hint-row">
-        <p class="bingo-rule-hint bingo-rule-hint-full">መስመር ሳይሰሩ ቢንጎ! 2ጊዜ ከነኩ ከጨዋታው ይታገዳሉ!</p>
+        <p class="bingo-rule-hint bingo-rule-hint-full">⚠️ መስመር ሳይሰሩ ሁለት ጊዜ ቢንጎ ከነኩ ከጨዋታው ይታገዳሉ!</p>
       </div>
     </div>
     
@@ -1548,7 +1548,7 @@ export default {
 .bingo-rule-hint {
   text-align: center;
   font-size: 20px;
-  color: #00f7ff;
+  color: #db0000;
   margin: 12px 0 0;
   padding: 0 8px;
 }
