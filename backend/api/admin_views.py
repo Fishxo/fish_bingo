@@ -980,6 +980,7 @@ def game_settings_api(request):
             'winning_patterns': getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']),
             'telebirr_verify_api_key': getattr(settings, 'telebirr_verify_api_key', '') or '',
             'cbe_use_fallback_proxy': getattr(settings, 'cbe_use_fallback_proxy', False),
+            'daily_new_start_limit': getattr(settings, 'daily_new_start_limit', 100),
         }
         return JsonResponse(response_data)
     
@@ -1044,6 +1045,9 @@ def game_settings_api(request):
                 settings_obj.telebirr_verify_api_key = (data['telebirr_verify_api_key'] or '').strip()
             if 'cbe_use_fallback_proxy' in data:
                 settings_obj.cbe_use_fallback_proxy = bool(data['cbe_use_fallback_proxy'])
+            if 'daily_new_start_limit' in data:
+                val = int(data['daily_new_start_limit'])
+                settings_obj.daily_new_start_limit = max(0, val)
             
             settings_obj.save()
             

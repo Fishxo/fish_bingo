@@ -166,6 +166,9 @@
                 padding: 10px;
             }
         }
+        .free-play-dimmed {
+            opacity: 0.5;
+        }
     </style>
 </head>
 <body>
@@ -403,8 +406,8 @@
                         <td>{{ withdraw.account_number }}</td>
                         <td>{{ withdraw.created_at|date:"Y-m-d H:i" }}</td>
                         <td>
-                            <button onclick="approveWithdraw('{{ withdraw.id }}')" style="background: #2ecc71;">Approve</button>
-                            <button onclick="rejectWithdraw('{{ withdraw.id }}')" style="background: #e74c3c; margin-left: 5px;">Decline</button>
+                            <button type="button" data-withdraw-id="{{ withdraw.id }}" onclick="approveWithdraw(this.getAttribute('data-withdraw-id'))" style="background: #2ecc71;">Approve</button>
+                            <button type="button" data-withdraw-id="{{ withdraw.id }}" onclick="rejectWithdraw(this.getAttribute('data-withdraw-id'))" style="background: #e74c3c; margin-left: 5px;">Decline</button>
                         </td>
                     </tr>
                     {% empty %}
@@ -513,7 +516,7 @@
                         <div style="margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; border-left: 4px solid #4caf50;">
                             <label style="display: flex; align-items: center; cursor: pointer;">
                                 <input type="checkbox" id="free_play" {% if game_settings.free_play %}checked{% endif %} style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;" {% if not game_settings.allow_system_account %}disabled{% endif %}>
-                                <span style="font-weight: bold; {% if not game_settings.allow_system_account %}opacity: 0.5;{% endif %}">Free Play</span>
+                                <span class="free-play-label {% if not game_settings.allow_system_account %}free-play-dimmed{% endif %}" style="font-weight: bold;">Free Play</span>
                             </label>
                             <p style="margin: 5px 0 0 28px; font-size: 12px; color: #666;">Allow real users to win even when system accounts are active (only available if system accounts are enabled)</p>
                         </div>
@@ -605,6 +608,13 @@
                         <label><strong>Support Phone Number:</strong></label>
                         <input type="text" id="support_phone" value="{{ game_settings.support_phone|default:'0952838412' }}" style="width: 100%; max-width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
                         <p style="font-size: 12px; color: #666; margin-top: 5px;">This phone number will be displayed in the bot's /support command</p>
+                    </div>
+                    
+                    <h3 style="margin-top: 30px; margin-bottom: 15px;">🤖 Bot /start limit</h3>
+                    <div style="margin-bottom: 20px;">
+                        <label><strong>Daily new /start limit (new users per day):</strong></label>
+                        <input type="number" id="daily_new_start_limit" min="0" value="{{ game_settings.daily_new_start_limit|default:100 }}" style="width: 120px; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
+                        <p style="font-size: 12px; color: #666; margin-top: 5px;">Max new users who can /start the bot per calendar day. 0 = no limit. Set to 1 to test.</p>
                     </div>
                     
                     <button type="submit" style="background: #3498db; padding: 10px 20px; font-size: 16px;">💾 Save Settings</button>
@@ -829,7 +839,7 @@
                                     {{ broadcast.created_at|date:"Y-m-d H:i" }}
                                 </td>
                                 <td style="padding: 10px; border: 1px solid #ddd;">
-                                    <button onclick="deleteBroadcast({{ broadcast.id }})" style="background: #e74c3c; color: white; padding: 6px 12px; font-size: 14px; border: none; border-radius: 4px; cursor: pointer;">
+                                    <button type="button" data-broadcast-id="{{ broadcast.id }}" onclick="deleteBroadcast(parseInt(this.getAttribute('data-broadcast-id'), 10))" style="background: #e74c3c; color: white; padding: 6px 12px; font-size: 14px; border: none; border-radius: 4px; cursor: pointer;">
                                         🗑️ Delete
                                     </button>
                                 </td>
@@ -1841,7 +1851,8 @@
                         number: document.getElementById('telebirr_number').value
                     }
                 },
-                support_phone: document.getElementById('support_phone').value
+                support_phone: document.getElementById('support_phone').value,
+                daily_new_start_limit: parseInt(document.getElementById('daily_new_start_limit').value) || 0
             };
             
             try {

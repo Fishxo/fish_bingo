@@ -203,7 +203,7 @@ def try_acquire_bingo_window(game_id, first_claim_is_fake=False):
     """
     Try to acquire bingo window for multiple-winner tie.
     - First winner (real): 1 second window for co-winners.
-    - First winner (fake): 2 second window so real players can claim and share.
+    - First winner (fake): 3 second window so real players can claim and share.
     Returns (success, is_first_winner).
     """
     r = get_redis_client()
