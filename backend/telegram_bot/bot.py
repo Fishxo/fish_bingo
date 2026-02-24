@@ -885,21 +885,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("እባክዎ የእርስዎን ስልክ ቁጥር ያጋሩ።")
             return
         
-        # RATE LIMIT CHECK (Redis-based)
-        is_allowed, remaining = check_rate_limit(
-            action='register_telegram',
-            identifier=str(user.id),
-            limit=1,  # 1 registration per hour per Telegram ID
-            window_seconds=3600
-        )
-        
-        if not is_allowed:
-            logger.warning(f"Rate limit exceeded for Telegram ID {user.id}")
-            await update.message.reply_text(
-                "እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ። ብዙ ጊዜ መመዝገብ አይቻልም።"
-            )
-            return
-        
         # ACQUIRE REGISTRATION LOCK (prevent concurrent registrations)
         if not acquire_registration_lock(user.id, timeout=60):
             logger.warning(f"Registration lock already held for Telegram ID {user.id}")
@@ -930,6 +915,24 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # IMPORTANT: Check BEFORE updating phone number
             had_phone_before = bool(telegram_user.phone_number and telegram_user.phone_number.strip())
             is_first_registration = not had_phone_before
+            
+            # Rate limit (1 per hour) only when user already had a phone - prevents spam "change phone".
+            # First-time registration (or re-register after admin deleted user) is not rate-limited here;
+            # only the daily new-start window limit applies.
+            if had_phone_before:
+                is_allowed, _ = check_rate_limit(
+                    action='register_telegram',
+                    identifier=str(user.id),
+                    limit=1,
+                    window_seconds=3600
+                )
+                if not is_allowed:
+                    release_registration_lock(user.id)
+                    logger.warning(f"Rate limit exceeded for Telegram ID {user.id} (change phone)")
+                    await update.message.reply_text(
+                        "እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ። ብዙ ጊዜ መመዝገብ አይቻልም።"
+                    )
+                    return
             
             # Consume one slot from the 24h registration window only on first-time registration
             if is_first_registration and not try_acquire_daily_start_slot():
