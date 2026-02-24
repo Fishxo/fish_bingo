@@ -171,6 +171,7 @@ export default {
       winnerBannerShownAt: null, // Timestamp when winner banner was shown (to enforce 8-second display)
       _winnerBannerActive: false, // Flag to prevent loadGame from interfering with winner banner
       _completedRedirectTimeoutId: null, // Clear this when winner_declared is received so we show banner instead of redirecting
+      _gameEndedRedirectTimeoutId: null, // Timeout from game_ended; clear when winner_declared is received (fake-winner flow)
       blockedFromThisGame: false, // True after false bingo claim: show overlay, user cannot play this game
       claimBingoChecking: false, // True while checking claim (spinner)
       falseBingoClickCount: 0 // Count of Bingo clicks without a line this game; 2nd = block
@@ -220,6 +221,10 @@ export default {
     if (this._completedRedirectTimeoutId) {
       clearTimeout(this._completedRedirectTimeoutId)
       this._completedRedirectTimeoutId = null
+    }
+    if (this._gameEndedRedirectTimeoutId) {
+      clearTimeout(this._gameEndedRedirectTimeoutId)
+      this._gameEndedRedirectTimeoutId = null
     }
     if (this.ws) {
       this.ws.disconnect()
@@ -784,6 +789,17 @@ export default {
       this.ws.on('game_ended', (data) => {
         console.log('Game ended via WebSocket:', data)
         
+        // When winner_declared was already received (e.g. fake user) we set _winnerBannerActive and
+        // defer setting winner/winners for 3s. Do NOT schedule redirect here or we'll redirect before
+        // the banner shows and cause redirect-to-select-card + blink. Let winner_declared flow show the banner.
+        if (this._winnerBannerActive) {
+          if (this._gameEndedRedirectTimeoutId) {
+            clearTimeout(this._gameEndedRedirectTimeoutId)
+            this._gameEndedRedirectTimeoutId = null
+          }
+          return
+        }
+        
         // Only set game completed here when there is NO winner (no_winner path).
         // When there IS a winner, winner_declared will set status (immediately for real winner,
         // after 3s for fake winner) so real users can still tick numbers during the 3s window.
@@ -801,8 +817,10 @@ export default {
           // Don't redirect immediately - let winner_declared show banner first for ALL players
           // Give winner_declared time to arrive (same or next tick); then redirect if still no winner
           if (!this.winner && (!this.winners || this.winners.length === 0)) {
-            setTimeout(() => {
-              if (!this.winner && (!this.winners || this.winners.length === 0)) {
+            if (this._gameEndedRedirectTimeoutId) clearTimeout(this._gameEndedRedirectTimeoutId)
+            this._gameEndedRedirectTimeoutId = setTimeout(() => {
+              this._gameEndedRedirectTimeoutId = null
+              if (!this._winnerBannerActive && !this.winner && (!this.winners || this.winners.length === 0)) {
                 this.$router.push('/completed')
               }
             }, 2500)
@@ -817,6 +835,10 @@ export default {
         if (this._completedRedirectTimeoutId) {
           clearTimeout(this._completedRedirectTimeoutId)
           this._completedRedirectTimeoutId = null
+        }
+        if (this._gameEndedRedirectTimeoutId) {
+          clearTimeout(this._gameEndedRedirectTimeoutId)
+          this._gameEndedRedirectTimeoutId = null
         }
         
         const isFakeUserWinner = (data.winners && data.winners.length > 0 && data.winners[0].is_fake) ||
