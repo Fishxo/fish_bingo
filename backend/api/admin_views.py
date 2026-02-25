@@ -595,36 +595,143 @@ def _parse_cbe_tx(tx_str):
 
 @require_http_methods(["GET"])
 def search_transaction(request):
-    """Search by CBE transaction number to see if already approved or in a request."""
+    """Search by CBE (FT...) or Telebirr reference to see if already in CbeReceipt/TelebirrReceipt or in a request."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
     tx = (request.GET.get('tx') or request.GET.get('transaction_number') or '').strip()
     if not tx:
         return JsonResponse({'error': 'Transaction number required'}, status=400)
-    from .models import CbeReceipt
+    from .models import CbeReceipt, TelebirrReceipt
     ref, suffix = _parse_cbe_tx(tx)
-    result = {'transaction_number': tx, 'found': False}
+    result = {'transaction_number': tx, 'found': False, 'valid_format': False, 'platform': None}
     if ref and suffix:
+        result['platform'] = 'CBE'
+        result['valid_format'] = True
         cbe = CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).select_related('user').first()
         if cbe:
             result['found'] = True
-            result['status'] = 'approved'
-            result['platform'] = 'CBE'
-            result['user_id'] = cbe.user_id
-            result['username'] = cbe.user.username
-            result['amount'] = float(cbe.amount)
+            result['status'] = 'approved' if cbe.user_id else 'blocked'
             result['created_at'] = cbe.created_at.isoformat()
-    dr = DepositRequest.objects.filter(transaction_reference__iexact=tx).select_related('user').first()
-    if dr:
-        result['found'] = True
-        result['status'] = dr.status
-        result['platform'] = dr.platform
-        result['user_id'] = dr.user_id
-        result['username'] = dr.user.username
-        result['amount'] = float(dr.amount)
-        result['request_id'] = dr.id
-        result['created_at'] = dr.created_at.isoformat()
+            if cbe.user_id:
+                result['user_id'] = cbe.user_id
+                result['username'] = cbe.user.username
+                result['amount'] = float(cbe.amount)
+            else:
+                result['note'] = 'Manually added (block only)'
+    else:
+        # Telebirr: reference is the full string (e.g. DBK10S886V)
+        if len(tx) >= 3:
+            result['platform'] = 'Telebirr'
+            result['valid_format'] = True
+            tr = TelebirrReceipt.objects.filter(reference=tx).select_related('user').first()
+            if tr:
+                result['found'] = True
+                result['status'] = 'approved' if tr.user_id else 'blocked'
+                result['created_at'] = tr.created_at.isoformat()
+                if tr.user_id:
+                    result['user_id'] = tr.user_id
+                    result['username'] = tr.user.username
+                    result['amount'] = float(tr.amount)
+                else:
+                    result['note'] = 'Manually added (block only)'
+    if not result['found']:
+        dr = DepositRequest.objects.filter(transaction_reference__iexact=tx).select_related('user').first()
+        if dr:
+            result['found'] = True
+            result['status'] = dr.status
+            result['platform'] = result['platform'] or dr.platform
+            result['user_id'] = dr.user_id
+            result['username'] = dr.user.username
+            result['amount'] = float(dr.amount)
+            result['request_id'] = dr.id
+            result['created_at'] = dr.created_at.isoformat()
     return JsonResponse(result)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_cbe_receipt_ref_api(request):
+    """Add a CBE transaction number to CbeReceipt (block-only: user=null, amount=0) so it cannot be reused. Use when a deposit was approved manually but the ref was not saved."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        tx = (body.get('transaction_number') or body.get('tx') or '').strip()
+        if not tx:
+            return JsonResponse({'error': 'transaction_number required'}, status=400)
+        ref, suffix = _parse_cbe_tx(tx)
+        if not ref or not suffix:
+            return JsonResponse({'error': 'Invalid CBE transaction format (e.g. FT26048WBS7024627387)'}, status=400)
+        from .models import CbeReceipt
+        if CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).exists():
+            return JsonResponse({'error': 'This transaction number is already saved'}, status=400)
+        CbeReceipt.objects.create(reference=ref, account_suffix=suffix, user=None, amount=0)
+        return JsonResponse({'success': True, 'message': 'Transaction number saved; it cannot be used again.'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def delete_cbe_receipt_ref_api(request):
+    """Remove a CBE transaction number from CbeReceipt so a deposit with that ref can be accepted again."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        tx = (body.get('transaction_number') or body.get('tx') or '').strip()
+        if not tx:
+            return JsonResponse({'error': 'transaction_number required'}, status=400)
+        ref, suffix = _parse_cbe_tx(tx)
+        if not ref or not suffix:
+            return JsonResponse({'error': 'Invalid CBE transaction format'}, status=400)
+        from .models import CbeReceipt
+        deleted, _ = CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).delete()
+        if not deleted:
+            return JsonResponse({'error': 'Transaction number not found'}, status=404)
+        return JsonResponse({'success': True, 'message': 'Transaction number removed; it can be used again.'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_telebirr_receipt_ref_api(request):
+    """Add a Telebirr reference to TelebirrReceipt (block-only: user=null, amount=0) so it cannot be reused."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        ref = (body.get('reference') or body.get('transaction_number') or body.get('tx') or '').strip()
+        if not ref or len(ref) < 3:
+            return JsonResponse({'error': 'reference required (e.g. Telebirr receipt number)'}, status=400)
+        from .models import TelebirrReceipt
+        if TelebirrReceipt.objects.filter(reference=ref).exists():
+            return JsonResponse({'error': 'This reference is already saved'}, status=400)
+        TelebirrReceipt.objects.create(reference=ref, user=None, amount=0)
+        return JsonResponse({'success': True, 'message': 'Telebirr reference saved; it cannot be used again.'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def delete_telebirr_receipt_ref_api(request):
+    """Remove a Telebirr reference from TelebirrReceipt so a deposit with that ref can be accepted again."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        ref = (body.get('reference') or body.get('transaction_number') or body.get('tx') or '').strip()
+        if not ref:
+            return JsonResponse({'error': 'reference required'}, status=400)
+        from .models import TelebirrReceipt
+        deleted, _ = TelebirrReceipt.objects.filter(reference=ref).delete()
+        if not deleted:
+            return JsonResponse({'error': 'Reference not found'}, status=404)
+        return JsonResponse({'success': True, 'message': 'Telebirr reference removed; it can be used again.'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
 
 @staff_member_required
@@ -840,7 +947,7 @@ def delete_failed_deposit_api(request, failed_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 def approve_failed_deposit_api(request, failed_id):
-    """Manually approve a failed deposit: credit user, create transaction/CbeReceipt, then delete the failed record."""
+    """Manually approve a failed deposit: credit user, save ref to CbeReceipt (CBE) or TelebirrReceipt (Telebirr), then delete the failed record. Optional body: transaction_number/reference so the ref is saved and cannot be reused."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
     try:
@@ -849,11 +956,26 @@ def approve_failed_deposit_api(request, failed_id):
         if amount is None or amount <= 0:
             return JsonResponse({'error': 'Cannot approve: no valid amount on this failed record'}, status=400)
         user = fd.user
-        from .models import CbeReceipt
-        if fd.platform == 'CBE' and fd.reference and fd.account_suffix:
-            if CbeReceipt.objects.filter(reference=fd.reference, account_suffix=fd.account_suffix).exists():
-                return JsonResponse({'error': 'This transaction was already used'}, status=400)
-            CbeReceipt.objects.create(user=user, reference=fd.reference, account_suffix=fd.account_suffix, amount=amount)
+        body = json.loads(request.body) if request.body else {}
+        transaction_number = (body.get('transaction_number') or body.get('reference') or '').strip()
+        from .models import CbeReceipt, TelebirrReceipt
+        ref, suffix = None, None
+        if fd.platform == 'CBE':
+            if transaction_number:
+                ref, suffix = _parse_cbe_tx(transaction_number)
+            if not ref or not suffix:
+                ref, suffix = fd.reference, fd.account_suffix
+            if ref and suffix:
+                if CbeReceipt.objects.filter(reference=ref, account_suffix=suffix).exists():
+                    return JsonResponse({'error': 'This transaction was already used'}, status=400)
+                CbeReceipt.objects.create(user=user, reference=ref, account_suffix=suffix, amount=amount)
+        elif fd.platform == 'Telebirr':
+            tref = transaction_number or fd.reference or ''
+            tref = tref.strip()
+            if tref:
+                if TelebirrReceipt.objects.filter(reference=tref).exists():
+                    return JsonResponse({'error': 'This Telebirr reference was already used'}, status=400)
+                TelebirrReceipt.objects.create(user=user, reference=tref, amount=amount)
         user.balance = Decimal(str(user.balance)) + amount
         user.save()
         Transaction.objects.create(

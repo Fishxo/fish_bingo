@@ -532,10 +532,10 @@ class FailedDepositRequest(models.Model):
 
 
 class TelebirrReceipt(models.Model):
-    """Stores used Telebirr transaction references to prevent reuse (double-credit)."""
+    """Stores used Telebirr transaction references to prevent reuse (double-credit). Same model for auto-verified and manual. user=null, amount=0 = block-only."""
     reference = models.CharField(max_length=64, unique=True, db_index=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='telebirr_receipts')
-    amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0.01)])
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='telebirr_receipts', null=True, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -543,15 +543,17 @@ class TelebirrReceipt(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Telebirr {self.reference} - {self.user.username} - {self.amount}"
+        if self.user_id:
+            return f"Telebirr {self.reference} - {self.user.username} - {self.amount}"
+        return f"Telebirr {self.reference} (block only)"
 
 
 class CbeReceipt(models.Model):
-    """Stores used CBE transaction reference+suffix to prevent reuse (double-credit)."""
+    """Stores used CBE transaction reference+suffix to prevent reuse (double-credit). Same model for auto-verified and manual approvals. user=null, amount=0 means manually added block-only (e.g. past approval where ref was not saved)."""
     reference = models.CharField(max_length=64, db_index=True)
     account_suffix = models.CharField(max_length=16, db_index=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cbe_receipts')
-    amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0.01)])
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cbe_receipts', null=True, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -560,7 +562,9 @@ class CbeReceipt(models.Model):
         unique_together = [['reference', 'account_suffix']]
 
     def __str__(self):
-        return f"CBE {self.reference}/{self.account_suffix} - {self.user.username} - {self.amount}"
+        if self.user_id:
+            return f"CBE {self.reference}/{self.account_suffix} - {self.user.username} - {self.amount}"
+        return f"CBE {self.reference}/{self.account_suffix} (block only)"
 
 
 class WithdrawRequest(models.Model):

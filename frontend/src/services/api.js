@@ -332,8 +332,29 @@ export async function deleteFailedDeposit(failedId) {
   return response.data
 }
 
-export async function approveFailedDeposit(failedId) {
-  const response = await adminApi.post(`/admin-dashboard/failed-deposits/${failedId}/approve/`)
+export async function approveFailedDeposit(failedId, transactionNumber = null) {
+  const body = transactionNumber ? { transaction_number: transactionNumber, reference: transactionNumber } : {}
+  const response = await adminApi.post(`/admin-dashboard/failed-deposits/${failedId}/approve/`, body)
+  return response.data
+}
+
+export async function addCbeReceiptRef(transactionNumber) {
+  const response = await adminApi.post('/admin-dashboard/cbe-receipt-ref/add/', { transaction_number: transactionNumber })
+  return response.data
+}
+
+export async function deleteCbeReceiptRef(transactionNumber) {
+  const response = await adminApi.post('/admin-dashboard/cbe-receipt-ref/delete/', { transaction_number: transactionNumber })
+  return response.data
+}
+
+export async function addTelebirrReceiptRef(reference) {
+  const response = await adminApi.post('/admin-dashboard/telebirr-receipt-ref/add/', { reference })
+  return response.data
+}
+
+export async function deleteTelebirrReceiptRef(reference) {
+  const response = await adminApi.post('/admin-dashboard/telebirr-receipt-ref/delete/', { reference })
   return response.data
 }
 

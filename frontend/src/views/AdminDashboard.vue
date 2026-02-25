@@ -119,13 +119,19 @@
       <!-- Search Transaction Number (CBE) -->
       <section class="section">
         <h2>🔎 Search Transaction Number</h2>
-        <p class="section-hint">Check if a CBE transaction (e.g. FT...) is already approved or in a request.</p>
+        <p class="section-hint">CBE: enter FT... (e.g. FT26048WBS7024627387). Telebirr: enter receipt reference (e.g. DBK10S886V). Same list as auto-verified and manual approvals.</p>
         <div class="search-row">
-          <input v-model="searchTxQuery" type="text" placeholder="e.g. FT26048WBS7024627387" class="search-input" @keyup.enter="doSearchTransaction" />
+          <input v-model="searchTxQuery" type="text" placeholder="CBE: FT... or Telebirr ref" class="search-input" @keyup.enter="doSearchTransaction" />
           <button class="btn btn-primary" @click="doSearchTransaction">Search</button>
         </div>
         <div v-if="searchTxResult !== null" class="user-detail">
           <pre>{{ searchTxResult }}</pre>
+          <div v-if="searchTxResultObj" class="search-tx-actions" style="margin-top: 10px;">
+            <button v-if="searchTxResultObj.valid_format && !searchTxResultObj.found && searchTxResultObj.platform === 'CBE'" type="button" class="btn btn-primary" @click="addCbeReceiptRef">Add (save CBE ref to prevent reuse)</button>
+            <button v-else-if="searchTxResultObj.valid_format && !searchTxResultObj.found && searchTxResultObj.platform === 'Telebirr'" type="button" class="btn btn-primary" @click="addTelebirrReceiptRef">Add (save Telebirr ref to prevent reuse)</button>
+            <button v-else-if="searchTxResultObj.found && searchTxResultObj.platform === 'CBE'" type="button" class="btn btn-secondary" @click="deleteCbeReceiptRef">Delete (allow this CBE ref again)</button>
+            <button v-else-if="searchTxResultObj.found && searchTxResultObj.platform === 'Telebirr'" type="button" class="btn btn-secondary" @click="deleteTelebirrReceiptRef">Delete (allow this Telebirr ref again)</button>
+          </div>
         </div>
       </section>
 
@@ -200,7 +206,7 @@
                 <td>{{ fd.account_suffix || '—' }}</td>
                 <td>{{ fd.created_at }}</td>
                 <td>
-                  <button class="btn btn-approve" @click="approveFailedDeposit(fd.id)">Approve</button>
+                  <button class="btn btn-approve" @click="approveFailedDeposit(fd.id, fd.platform)">Approve</button>
                   <button class="btn btn-reject" @click="deleteFailedDeposit(fd.id)">Delete</button>
                 </td>
               </tr>
@@ -701,6 +707,10 @@ import {
   rejectDeposit as apiRejectDeposit,
   deleteFailedDeposit as apiDeleteFailedDeposit,
   approveFailedDeposit as apiApproveFailedDeposit,
+  addCbeReceiptRef as apiAddCbeReceiptRef,
+  deleteCbeReceiptRef as apiDeleteCbeReceiptRef,
+  addTelebirrReceiptRef as apiAddTelebirrReceiptRef,
+  deleteTelebirrReceiptRef as apiDeleteTelebirrReceiptRef,
   approveWithdraw as apiApproveWithdraw,
   rejectWithdraw as apiRejectWithdraw,
   getGameSettings,
@@ -733,6 +743,7 @@ export default {
       searchResult: null,
       searchTxQuery: '',
       searchTxResult: null,
+      searchTxResultObj: null,
       settings: {
         bid_amount: 10,
         card_selection_timer: 60,
@@ -872,11 +883,57 @@ export default {
     async doSearchTransaction() {
       if (!this.searchTxQuery.trim()) return
       this.searchTxResult = null
+      this.searchTxResultObj = null
       try {
         const res = await apiSearchTransaction(this.searchTxQuery.trim())
+        this.searchTxResultObj = typeof res === 'object' ? res : null
         this.searchTxResult = typeof res === 'object' ? JSON.stringify(res, null, 2) : res
       } catch (err) {
         this.searchTxResult = 'Error: ' + (err.response?.data?.error || err.message || 'Search failed')
+      }
+    },
+    async addCbeReceiptRef() {
+      const tx = this.searchTxQuery.trim()
+      if (!tx) return
+      try {
+        await apiAddCbeReceiptRef(tx)
+        alert('CBE transaction number saved. It cannot be used again for a deposit.')
+        await this.doSearchTransaction()
+      } catch (err) {
+        alert(err.response?.data?.error || err.message || 'Failed to add')
+      }
+    },
+    async deleteCbeReceiptRef() {
+      const tx = this.searchTxQuery.trim()
+      if (!tx || !confirm('Remove this CBE ref so a deposit with it can be accepted again?')) return
+      try {
+        await apiDeleteCbeReceiptRef(tx)
+        alert('Transaction number removed.')
+        await this.doSearchTransaction()
+      } catch (err) {
+        alert(err.response?.data?.error || err.message || 'Failed to delete')
+      }
+    },
+    async addTelebirrReceiptRef() {
+      const ref = this.searchTxQuery.trim()
+      if (!ref) return
+      try {
+        await apiAddTelebirrReceiptRef(ref)
+        alert('Telebirr reference saved. It cannot be used again for a deposit.')
+        await this.doSearchTransaction()
+      } catch (err) {
+        alert(err.response?.data?.error || err.message || 'Failed to add')
+      }
+    },
+    async deleteTelebirrReceiptRef() {
+      const ref = this.searchTxQuery.trim()
+      if (!ref || !confirm('Remove this Telebirr ref so a deposit with it can be accepted again?')) return
+      try {
+        await apiDeleteTelebirrReceiptRef(ref)
+        alert('Telebirr reference removed.')
+        await this.doSearchTransaction()
+      } catch (err) {
+        alert(err.response?.data?.error || err.message || 'Failed to delete')
       }
     },
     async approveDeposit(id, platform) {
@@ -914,10 +971,18 @@ export default {
         alert(err.response?.data?.error || 'Failed to delete')
       }
     },
-    async approveFailedDeposit(id) {
+    async approveFailedDeposit(id, platform) {
+      let transactionNumber = null
+      if (platform === 'CBE') {
+        const tx = prompt('Enter CBE transaction number (e.g. FT...) so it is saved and cannot be reused.')
+        if (tx != null && String(tx).trim()) transactionNumber = String(tx).trim()
+      } else if (platform === 'Telebirr') {
+        const ref = prompt('Enter Telebirr reference (receipt number) so it is saved and cannot be reused.')
+        if (ref != null && String(ref).trim()) transactionNumber = String(ref).trim()
+      }
       if (!confirm('Credit the user and remove this failed record?')) return
       try {
-        await apiApproveFailedDeposit(id)
+        await apiApproveFailedDeposit(id, transactionNumber)
         await this.loadData()
       } catch (err) {
         console.error('Approve failed deposit failed:', err)

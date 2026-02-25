@@ -49,6 +49,10 @@ urlpatterns = [
     # Admin dashboard and secondadmin PAGE routes removed so SPA (index.html) is served for /admin-dashboard and /secondadmin
     path('admin-dashboard/search-user/', admin_views.search_user, name='search-user'),
     path('admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction'),
+    path('admin-dashboard/cbe-receipt-ref/add/', admin_views.add_cbe_receipt_ref_api, name='add-cbe-receipt-ref'),
+    path('admin-dashboard/cbe-receipt-ref/delete/', admin_views.delete_cbe_receipt_ref_api, name='delete-cbe-receipt-ref'),
+    path('admin-dashboard/telebirr-receipt-ref/add/', admin_views.add_telebirr_receipt_ref_api, name='add-telebirr-receipt-ref'),
+    path('admin-dashboard/telebirr-receipt-ref/delete/', admin_views.delete_telebirr_receipt_ref_api, name='delete-telebirr-receipt-ref'),
     path('admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit'),
     path('admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit'),
     path('admin-dashboard/deposits/<int:deposit_id>/photo/', admin_views.get_deposit_photo, name='get-deposit-photo'),
@@ -69,6 +73,10 @@ urlpatterns = [
     # Duplicate admin/secondadmin API routes under /api/ so requests to /api/admin-dashboard/api/ etc. work (e.g. if frontend uses api baseURL)
     path('api/admin-dashboard/search-user/', admin_views.search_user, name='search-user-api'),
     path('api/admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction-api'),
+    path('api/admin-dashboard/cbe-receipt-ref/add/', admin_views.add_cbe_receipt_ref_api, name='add-cbe-receipt-ref-api'),
+    path('api/admin-dashboard/cbe-receipt-ref/delete/', admin_views.delete_cbe_receipt_ref_api, name='delete-cbe-receipt-ref-api'),
+    path('api/admin-dashboard/telebirr-receipt-ref/add/', admin_views.add_telebirr_receipt_ref_api, name='add-telebirr-receipt-ref-api'),
+    path('api/admin-dashboard/telebirr-receipt-ref/delete/', admin_views.delete_telebirr_receipt_ref_api, name='delete-telebirr-receipt-ref-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/approve/', admin_views.approve_deposit_request_api, name='approve-deposit-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/reject/', admin_views.reject_deposit_request_api, name='reject-deposit-api'),
     path('api/admin-dashboard/deposits/<int:deposit_id>/photo/', admin_views.get_deposit_photo, name='get-deposit-photo-api'),
