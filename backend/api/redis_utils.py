@@ -408,11 +408,16 @@ return 1
 
 
 def _get_daily_new_start_limit():
-    """Read limit from GameSettings; 0 or None means no limit (allow all)."""
+    """
+    Read limit from GameSettings directly from DB (no Django cache).
+    This ensures the bot process always sees the current limit when admin changes it,
+    since cache is per-process and bot runs in a separate process from the web server.
+    0 or None means no limit (allow all).
+    """
     try:
         from .models import GameSettings
-        settings = GameSettings.get_settings()
-        limit = getattr(settings, 'daily_new_start_limit', None)
+        row = GameSettings.objects.only('daily_new_start_limit').get(pk=1)
+        limit = getattr(row, 'daily_new_start_limit', None)
         if limit is None:
             return DEFAULT_DAILY_NEW_START_LIMIT
         limit = int(limit)
