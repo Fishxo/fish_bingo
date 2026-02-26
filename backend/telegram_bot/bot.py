@@ -1002,7 +1002,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = None
             try:
                 if is_first_registration:
-                    from api.models import GameSettings
                     async def get_settings():
                         return await sync_to_async(GameSettings.get_settings)()
                     game_settings = await db_operation_with_retry(get_settings)
