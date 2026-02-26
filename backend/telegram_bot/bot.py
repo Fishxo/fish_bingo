@@ -646,6 +646,18 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /transfer command - transfer money to another user"""
+    # When "Disable /transfer" is enabled in game settings, do not process (works even with cached menu)
+    def _get_settings():
+        return GameSettings.get_settings()
+    gs = await sync_to_async(_get_settings)()
+    if getattr(gs, 'disable_bot_transfer', False):
+        msg = "⛔ ገንዘብ ማስተላለፍ በአሁኑ ጊዜ ተሰርዟል።"
+        if update.message:
+            await update.message.reply_text(msg)
+        elif update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(msg)
+        return
     # Clear any existing financial command states
     clear_financial_command_states(context)
     
@@ -2109,6 +2121,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "transfer_confirm_yes":
         # User confirmed transfer
         try:
+            # If transfer was disabled by admin mid-flow, do not process
+            def _get_gs():
+                return GameSettings.get_settings()
+            gs = await sync_to_async(_get_gs)()
+            if getattr(gs, 'disable_bot_transfer', False):
+                await query.edit_message_text("⛔ ገንዘብ ማስተላለፍ በአሁኑ ጊዜ ተሰርዟል።")
+                context.user_data.pop('waiting_for_transfer_confirm', None)
+                context.user_data.pop('transfer_amount', None)
+                context.user_data.pop('transfer_phone', None)
+                context.user_data.pop('transfer_to_user_id', None)
+                await query.answer()
+                return
             user = query.from_user
             async def get_from_user():
                 return await sync_to_async(User.objects.get)(telegram_id=user.id)

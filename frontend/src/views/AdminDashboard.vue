@@ -443,6 +443,10 @@
               <label><input v-model="settings.disable_bot_register" type="checkbox" /> Disable /register</label>
               <small class="form-hint">When ticked, the bot will not respond to /register or contact share (no new registrations) until you untick and save.</small>
             </div>
+            <div class="form-group checkbox">
+              <label><input v-model="settings.disable_bot_transfer" type="checkbox" /> Disable /transfer</label>
+              <small class="form-hint">When ticked, transfer is disabled (button, /transfer, or cached menu). Users with old keyboard will see a disabled message until you untick and save.</small>
+            </div>
           </div>
           <div class="form-grid">
             <div class="form-group">
@@ -786,6 +790,7 @@ export default {
         users_created_today: 0,
         disable_bot_start: false,
         disable_bot_register: false,
+        disable_bot_transfer: false,
         support_phone: '',
         instruction_text: '',
         telebirr_verify_api_key: '',

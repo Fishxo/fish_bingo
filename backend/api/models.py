@@ -421,6 +421,10 @@ class GameSettings(models.Model):
         default=False,
         help_text="When enabled, the bot will not respond to /register or contact share (no new registrations)."
     )
+    disable_bot_transfer = models.BooleanField(
+        default=False,
+        help_text="When enabled, the bot will not process transfer (button, /transfer, or cached menu)."
+    )
     
     updated_at = models.DateTimeField(auto_now=True)
     

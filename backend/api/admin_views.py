@@ -1147,6 +1147,7 @@ def game_settings_api(request):
             'daily_new_start_limit': getattr(settings, 'daily_new_start_limit', 100),
             'disable_bot_start': getattr(settings, 'disable_bot_start', False),
             'disable_bot_register': getattr(settings, 'disable_bot_register', False),
+            'disable_bot_transfer': getattr(settings, 'disable_bot_transfer', False),
         }
         try:
             response_data['users_created_today'] = _get_users_created_today_count()
@@ -1235,6 +1236,8 @@ def game_settings_api(request):
                 settings_obj.disable_bot_start = bool(data['disable_bot_start'])
             if 'disable_bot_register' in data:
                 settings_obj.disable_bot_register = bool(data['disable_bot_register'])
+            if 'disable_bot_transfer' in data:
+                settings_obj.disable_bot_transfer = bool(data['disable_bot_transfer'])
             
             settings_obj.save()
             
