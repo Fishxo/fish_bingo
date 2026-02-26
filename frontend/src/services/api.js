@@ -373,6 +373,11 @@ export async function rejectWithdraw(withdrawId) {
   return response.data
 }
 
+export async function deleteWithdraw(withdrawId) {
+  const response = await adminApi.post(`/admin-dashboard/withdraws/${withdrawId}/delete/`)
+  return response.data
+}
+
 export async function getGameSettings() {
   const response = await adminApi.get('/admin-dashboard/settings/')
   return response.data

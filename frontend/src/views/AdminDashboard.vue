@@ -108,7 +108,7 @@
       <section class="section">
         <h2>🔍 Search User</h2>
         <div class="search-row">
-          <input v-model="searchQuery" type="text" placeholder="Enter phone number" class="search-input" @keyup.enter="doSearchUser" />
+          <input v-model="searchQuery" type="text" placeholder="Phone number or Telegram @username" class="search-input" @keyup.enter="doSearchUser" />
           <button class="btn btn-primary" @click="doSearchUser">Search</button>
         </div>
         <div v-if="searchResult" class="user-detail">
@@ -269,10 +269,11 @@
                 <td>
                   <button class="btn btn-approve" @click="approveWithdraw(w.id)">Approve</button>
                   <button class="btn btn-reject" @click="rejectWithdraw(w.id)">Decline</button>
+                  <button class="btn btn-secondary" @click="deleteWithdraw(w.id)">Delete</button>
                 </td>
               </tr>
               <tr v-if="!(data.pending_withdraws && data.pending_withdraws.length)">
-                <td colspan="8">No pending withdraws</td>
+                <td colspan="9">No pending withdraws</td>
               </tr>
             </tbody>
           </table>
@@ -364,6 +365,16 @@
       <section class="section" id="registered-users-section">
         <h2>👥 Registered Users</h2>
         <div class="user-actions-row">
+          <label class="sort-label">Sort by:</label>
+          <select v-model="registeredSort" class="sort-select" @change="loadData">
+            <option value="created_at">Joined (newest)</option>
+            <option value="balance">Balance (high first)</option>
+            <option value="wins">Wins (high first)</option>
+            <option value="games_played">Games played (high first)</option>
+            <option value="total_deposits">Deposits (high first)</option>
+            <option value="total_withdrawals">Withdrawals (high first)</option>
+            <option value="transfer_in">Transfers in (high first)</option>
+          </select>
           <button type="button" class="btn btn-reject" @click="toggleDeleteMode">{{ deleteMode ? 'Cancel' : 'Delete Users' }}</button>
           <button v-if="deleteMode" type="button" class="btn btn-reject" @click="deleteSelectedUsers">Delete Selected ({{ selectedUserIds.length }})</button>
           <template v-else>
@@ -376,7 +387,7 @@
             <thead>
               <tr>
                 <th v-if="deleteMode" class="col-check"><input type="checkbox" :checked="allUsersSelected" @change="toggleSelectAll" title="Select all" /></th>
-                <th>ID</th><th>Username</th><th>Telegram ID</th><th>Phone</th><th>Name</th><th>Balance</th><th>Games</th><th>Wins</th><th>Deposits</th><th>Withdrawals</th><th>Approved</th><th>Joined</th>
+                <th>ID</th><th>Username</th><th>Telegram ID</th><th>Phone</th><th>Name</th><th>Balance</th><th>Games</th><th>Wins</th><th>Deposits</th><th>Withdrawals</th><th>Transfers in</th><th>Approved</th><th>Joined</th>
                 <th v-if="!deleteMode">Actions</th>
               </tr>
             </thead>
@@ -393,6 +404,7 @@
                 <td>{{ u.wins }}</td>
                 <td>{{ formatCurrency(u.total_deposits) }}</td>
                 <td>{{ formatCurrency(u.total_withdrawals) }}</td>
+                <td>{{ formatCurrency(u.transfer_in != null ? u.transfer_in : 0) }}</td>
                 <td>{{ u.withdrawal_approved ? '✓' : '–' }}</td>
                 <td>{{ u.created_at }}</td>
                 <td v-if="!deleteMode" class="col-actions">
@@ -401,7 +413,7 @@
                 </td>
               </tr>
               <tr v-if="!(data.registered_users && data.registered_users.length)">
-                <td :colspan="deleteMode ? 14 : 13">No registered users yet</td>
+                <td :colspan="deleteMode ? 15 : 14">No registered users yet</td>
               </tr>
             </tbody>
           </table>
@@ -713,6 +725,7 @@ import {
   deleteTelebirrReceiptRef as apiDeleteTelebirrReceiptRef,
   approveWithdraw as apiApproveWithdraw,
   rejectWithdraw as apiRejectWithdraw,
+  deleteWithdraw as apiDeleteWithdraw,
   getGameSettings,
   updateGameSettings,
   startGame,
@@ -803,7 +816,8 @@ export default {
       loginPassword: '',
       loginError: '',
       loginLoading: false,
-      registeredLimit: 10
+      registeredLimit: 10,
+      registeredSort: 'created_at'
     }
   },
   computed: {
@@ -827,7 +841,7 @@ export default {
       this.loading = true
       this.error = null
       try {
-        this.data = await getAdminDashboardData({ registered_limit: this.registeredLimit })
+        this.data = await getAdminDashboardData({ registered_limit: this.registeredLimit, registered_sort: this.registeredSort })
         this.lastUpdated = new Date().toLocaleString()
         if (this.data?.second_admin_username) {
           this.secondAdminUsername = this.data.second_admin_username
@@ -1006,6 +1020,16 @@ export default {
       } catch (err) {
         console.error('Reject withdraw failed:', err)
         alert(err.response?.data?.error || 'Failed to reject')
+      }
+    },
+    async deleteWithdraw(id) {
+      if (!confirm('Delete this withdrawal request? (No notification will be sent to the user.)')) return
+      try {
+        await apiDeleteWithdraw(id)
+        await this.loadData()
+      } catch (err) {
+        console.error('Delete withdraw failed:', err)
+        alert(err.response?.data?.error || 'Failed to delete')
       }
     },
     async loadSettings() {
@@ -1607,7 +1631,9 @@ export default {
 .link-btn { background: none; border: none; color: #3498db; cursor: pointer; font-size: 12px; padding: 2px 6px; }
 .link-btn:hover { text-decoration: underline; }
 .deposit-text-full { display: block; white-space: pre-wrap; word-break: break-word; max-width: 280px; }
-.user-actions-row { margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+.user-actions-row { margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.sort-label { font-size: 13px; margin-right: 4px; }
+.sort-select { padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px; }
 .col-check { width: 36px; }
 .col-actions { white-space: nowrap; }
 .btn-sm { padding: 4px 8px; font-size: 12px; }

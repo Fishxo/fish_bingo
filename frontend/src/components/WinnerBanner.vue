@@ -20,7 +20,7 @@
               <div class="winner-badge">{{ index + 1 }}</div>
               <div class="winner-name-multiple">
                 <span v-if="isWinnerCurrentUser(winnerData.winner)" class="winner-text-you-small">እርስዎ</span>
-                <span v-else>{{ winnerData.winner?.username || 'Winner' }}</span>
+                <span v-else>{{ winnerData.winner?.first_name || winnerData.winner?.username || winnerData.username || 'Winner' }}</span>
               </div>
             </div>
             <UserCard
@@ -53,7 +53,7 @@
             <div class="winner-text-you">አሸንፈዋል</div>
           </div>
           <div v-else class="winner-message">
-            <div class="winner-name">{{ displayWinner.username || displayWinner.name || 'Winner' }}</div>
+            <div class="winner-name">{{ displayWinner.first_name || displayWinner.name || displayWinner.username || 'Winner' }}</div>
             <div class="winner-text">ጨዋታውን አሸንፏል</div>
           </div>
         </div>
@@ -135,7 +135,7 @@ export default {
     displayWinner() {
       // First try to get from winner object
       if (this.winner && typeof this.winner === 'object' && Object.keys(this.winner).length > 0) {
-        if (this.winner.username || this.winner.name) {
+        if (this.winner.first_name != null || this.winner.username || this.winner.name) {
           return this.winner
         }
       }

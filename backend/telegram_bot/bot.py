@@ -779,7 +779,7 @@ DEFAULT_INSTRUCTIONS = (
     "   - በአንድ ጊዜ ወይም በ1 ሰከንድ ውስጥ ብዙ አሸናፊዎች ከተገኙ ደራሹን በእኩል ይከፋፈላሉ\n\n"
     "6. **ገንዘብ ለማስገባት**: /deposit(ለማስገባት) ይጫኑ፡፡\n\n"
     "7. **ገንዘብ ለማውጣት**: /withdraw(ለማውጣት) ይጫኑ፡፡\n\n"
-    "8. **ገንዘብ ለማስተላለፍ**: /transfer(ገንዘብ ማስተላለፍ) ለሌላ ተጠቃሚ ማስተላለፍ፡፡\n\n"
+    # "8. **ገንዘብ ለማስተላለፍ**: /transfer(ገንዘብ ማስተላለፍ) ለሌላ ተጠቃሚ ማስተላለፍ፡፡\n\n"  # Commented: hide transfer from users for now
     "መልካም ዕድል! 🍀"
 )
 
@@ -1798,8 +1798,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mes
                      InlineKeyboardButton("🎮 ጨዋታ ለመጀመር", callback_data="play")],
                     [InlineKeyboardButton("💰 ገንዘብ ለማስገባት", callback_data="deposit"),
                      InlineKeyboardButton("💸 ገንዘብ ለማውጣት", callback_data="withdraw")],
-                    [InlineKeyboardButton("💵 ሂሳብዎን ለማወቅ", callback_data="balance"),
-                     InlineKeyboardButton("💸 ገንዘብ ለማስተላለፍ", callback_data="transfer")],
+                    [InlineKeyboardButton("💵 ሂሳብዎን ለማወቅ", callback_data="balance")],
+                    # [InlineKeyboardButton("💸 ገንዘብ ለማስተላለፍ", callback_data="transfer")],  # Commented: hide from users for now
                     [InlineKeyboardButton("📋 የጨዋታ  መመሪያ", callback_data="instructions"),
                      InlineKeyboardButton("🆘 የድጋፍ ቡድን", callback_data="support")],
                     [InlineKeyboardButton("👥 ሰዎችን ለመጋበዝ", callback_data="invite")],
@@ -2072,10 +2072,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Clear any existing states before starting withdraw
         clear_financial_command_states(context)
         await withdraw_command(update, context)
-    elif query.data == "transfer":
-        # Clear any existing states before starting transfer
-        clear_financial_command_states(context)
-        await transfer_command(update, context)
+    # elif query.data == "transfer":  # Commented: hide from users for now
+    #     clear_financial_command_states(context)
+    #     await transfer_command(update, context)
     elif query.data == "transfer_confirm_yes":
         # User confirmed transfer
         try:
@@ -2286,7 +2285,7 @@ async def set_bot_commands(application: Application):
         BotCommand("deposit", "ገንዘብ ለማስገባት"),
         BotCommand("withdraw", "ገንዘብ ለማውጣት"),
         BotCommand("balance", "ሂሳብዎን ለማወቅ"),
-        BotCommand("transfer", "ገንዘብ ለማስተላለፍ"),
+        # BotCommand("transfer", "ገንዘብ ለማስተላለፍ"),  # Commented: hide from users for now
         BotCommand("instruction", "የጨዋታ መመሪያ"),
         BotCommand("support", "ድጋፍ ከፈለጉ"),
         BotCommand("invite", "ሰዎችን ለመጋበዝ"),
@@ -2391,7 +2390,7 @@ def setup_bot():
         application.add_handler(CommandHandler("deposit", deposit_command))
         application.add_handler(CommandHandler("withdraw", withdraw_command))
         application.add_handler(CommandHandler("balance", balance_command))
-        application.add_handler(CommandHandler("transfer", transfer_command))
+        # application.add_handler(CommandHandler("transfer", transfer_command))  # Commented: hide from users for now
         application.add_handler(CommandHandler("instruction", instruction_command))
         application.add_handler(CommandHandler("support", support_command))
         application.add_handler(CommandHandler("invite", invite_command))

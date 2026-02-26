@@ -5,6 +5,7 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.db.models import Sum, Count, Q, Prefetch
+from django.db.models.functions import Coalesce
 from datetime import datetime, timedelta
 from .models import Deposit, Game, CalledNumber, Transaction, User, DepositRequest, WithdrawRequest, GameSettings, Transfer, AdminMessage, SecondAdmin, BroadcastMessage, FailedDepositRequest
 from django.contrib.auth.hashers import make_password, check_password
@@ -519,34 +520,31 @@ def admin_dashboard(request):
 
 @require_http_methods(["GET"])
 def search_user(request):
-    """Search user by phone number"""
-    # Check authentication (works for both admin and second admin)
+    """Search user by phone number or Telegram username."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
-    
-    phone = request.GET.get('phone', '').strip()
-    if not phone:
-        return JsonResponse({'error': 'Phone number required'}, status=400)
-    
-    # Normalize phone number (remove 251 country code and add 0)
-    normalized_phone = normalize_phone_number(phone)
-    
+    query = (request.GET.get('phone') or request.GET.get('q') or request.GET.get('username') or '').strip()
+    if not query:
+        return JsonResponse({'error': 'Phone number or username required'}, status=400)
     try:
-        # Search by phone number with backward compatibility
-        user = find_user_by_phone(phone)
-        
+        user = None
+        # Search by Telegram username (with or without @)
+        username_query = query.lstrip('@')
+        if username_query:
+            user = User.objects.filter(telegram_id__isnull=False, username__icontains=username_query).first()
+        if not user:
+            user = find_user_by_phone(query)
         if not user:
             return JsonResponse({'error': 'User not found'}, status=404)
-        
-        # Use cached totals (survives prune); fallback to live query if cache not yet backfilled
         games_played = getattr(user, 'total_games_played', None)
-        total_wins = getattr(user, 'total_wins', None)
         total_deposits = getattr(user, 'total_deposits_amount', None)
         total_withdrawals = getattr(user, 'total_withdrawals_amount', None)
         if games_played is None:
             games_played = Game.objects.filter(gamecards__user=user).distinct().count()
-        if total_wins is None:
-            total_wins = Game.objects.filter(Q(winner=user) | Q(winners=user)).distinct().count()
+        # Compute wins from Game table (same as dashboard) so count is correct (distinct games)
+        won_game_ids = set(Game.objects.filter(winner=user).values_list('id', flat=True))
+        won_game_ids |= set(Game.winners.through.objects.filter(user=user).values_list('game_id', flat=True))
+        total_wins = len(won_game_ids)
         if total_deposits is None:
             total_deposits = Transaction.objects.filter(user=user, transaction_type='deposit').aggregate(s=Sum('amount'))['s'] or Decimal('0')
         if total_withdrawals is None:
@@ -557,7 +555,6 @@ def search_user(request):
         withdrawals = WithdrawRequest.objects.filter(user=user, status='approved')
         deposit_history = deposits.values('amount', 'platform', 'created_at')[:10]
         withdraw_history = withdrawals.values('amount', 'platform', 'created_at')[:10]
-        # Refresh approval in case it was updated elsewhere
         from .user_utils import update_user_withdrawal_approval
         update_user_withdrawal_approval(user)
         user.refresh_from_db()
@@ -1091,6 +1088,22 @@ def reject_withdraw_request_api(request, withdraw_id):
             pass
         
         return JsonResponse({'success': True, 'message': 'Withdraw request rejected'})
+    except WithdrawRequest.DoesNotExist:
+        return JsonResponse({'error': 'Withdraw request not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def delete_withdraw_request_api(request, withdraw_id):
+    """Delete a pending withdraw request without notifying the user."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        withdraw_request = WithdrawRequest.objects.get(id=withdraw_id, status='pending')
+        withdraw_request.delete()
+        return JsonResponse({'success': True, 'message': 'Withdraw request deleted'})
     except WithdrawRequest.DoesNotExist:
         return JsonResponse({'error': 'Withdraw request not found'}, status=404)
     except Exception as e:
@@ -1830,36 +1843,60 @@ def admin_dashboard_api(request):
             'created_at': game.created_at.strftime('%H:%M'),
         })
     
-    # Registered users - limit from query param (default 10), "See more" requests more
+    # Registered users - limit and sort from query params
     try:
         users_limit = max(1, min(500, int(request.GET.get('registered_limit', 10))))
     except (ValueError, TypeError):
         users_limit = 10
+    sort_param = (request.GET.get('registered_sort') or 'created_at').strip().lower()
+    valid_sorts = {'balance', 'wins', 'games_played', 'total_deposits', 'total_withdrawals', 'transfer_in', 'created_at'}
+    if sort_param not in valid_sorts:
+        sort_param = 'created_at'
     registered_users_count = User.objects.filter(telegram_id__isnull=False).count()
-    registered_users_raw = User.objects.filter(telegram_id__isnull=False).order_by('-created_at')[:users_limit]
+    base_qs = User.objects.filter(telegram_id__isnull=False)
+    if sort_param == 'wins':
+        registered_users_raw = list(base_qs.order_by('-created_at')[:500])
+    else:
+        if sort_param == 'transfer_in':
+            base_qs = base_qs.annotate(transfer_in_sum=Coalesce(Sum('transfers_received__amount'), Decimal('0')))
+            registered_users_raw = list(base_qs.order_by('-transfer_in_sum')[:users_limit])
+        elif sort_param == 'balance':
+            registered_users_raw = list(base_qs.order_by('-balance')[:users_limit])
+        elif sort_param == 'games_played':
+            registered_users_raw = list(base_qs.order_by('-total_games_played')[:users_limit])
+        elif sort_param == 'total_deposits':
+            registered_users_raw = list(base_qs.order_by('-total_deposits_amount')[:users_limit])
+        elif sort_param == 'total_withdrawals':
+            registered_users_raw = list(base_qs.order_by('-total_withdrawals_amount')[:users_limit])
+        else:
+            registered_users_raw = list(base_qs.order_by('-created_at')[:users_limit])
     user_ids = [u.id for u in registered_users_raw]
-    # Compute wins from Game table (winner FK + winners M2M) so count is correct even if User.total_wins cache is stale
+    # Transfer in (total received) per user
+    transfer_in_by_user = dict(
+        Transfer.objects.filter(to_user_id__in=user_ids).values('to_user_id').annotate(total=Sum('amount')).values_list('to_user_id', 'total')
+    )
+    # Compute wins from Game table (winner FK + winners M2M)
     win_count_by_user = {}
     if user_ids:
-        # Games where user is single winner (Game.winner)
         for winner_id, game_id in Game.objects.filter(winner_id__in=user_ids).values_list('winner_id', 'id'):
             if winner_id not in win_count_by_user:
                 win_count_by_user[winner_id] = set()
             win_count_by_user[winner_id].add(game_id)
-        # Games where user is in winners M2M (co-winner)
         through = Game.winners.through
         for uid, gid in through.objects.filter(user_id__in=user_ids).values_list('user_id', 'game_id'):
             if uid not in win_count_by_user:
                 win_count_by_user[uid] = set()
             win_count_by_user[uid].add(gid)
-        # Convert sets to counts
         win_count_by_user = {uid: len(s) for uid, s in win_count_by_user.items()}
+    if sort_param == 'wins':
+        registered_users_raw.sort(key=lambda u: win_count_by_user.get(u.id, u.total_wins or 0), reverse=True)
+        registered_users_raw = registered_users_raw[:users_limit]
     registered_users = []
     for user in registered_users_raw:
-        # Prefer computed count from Game table; fallback to cached total_wins for users with 0 wins (not in dict)
         wins = win_count_by_user.get(user.id)
         if wins is None:
             wins = user.total_wins or 0
+        transfer_in = transfer_in_by_user.get(user.id) or Decimal('0')
         registered_users.append({
             'id': user.id,
             'username': user.username,
@@ -1871,6 +1908,7 @@ def admin_dashboard_api(request):
             'wins': wins,
             'total_deposits': float(user.total_deposits_amount or 0),
             'total_withdrawals': float(user.total_withdrawals_amount or 0),
+            'transfer_in': float(transfer_in),
             'withdrawal_approved': user.withdrawal_approved,
             'created_at': user.created_at.strftime('%Y-%m-%d %H:%M'),
         })
