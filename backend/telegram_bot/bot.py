@@ -1797,7 +1797,7 @@ def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("📝 ለመመዝገብ"), KeyboardButton("🎮 ጨዋታ ለመጀመር")],
         [KeyboardButton("💰 ገንዘብ ለማስገባት"), KeyboardButton("💸 ገንዘብ ለማውጣት")],
-        [KeyboardButton("💵 ሂሳብዎን ለማወቅ"), KeyboardButton("💸 ገንዘብ ለማስተላለፍ")],
+        [KeyboardButton("💵 ሂሳብዎን ለማወቅ")],  # , KeyboardButton("💸 ገንዘብ ለማስተላለፍ")  # Commented: hide transfer for now, may need later
         [KeyboardButton("📋 የጨዋታ መመሪያ"), KeyboardButton("🆘 የድጋፍ ቡድን")],
         [KeyboardButton("👥 ሰዎችን ለመጋበዝ")],
     ]
