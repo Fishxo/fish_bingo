@@ -12,6 +12,7 @@ except ImportError:
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.db import connection, connections
 from api.models import Game, Deposit, DepositRequest, TelebirrReceipt, CbeReceipt, WithdrawRequest, GameSettings, Transfer, Transaction
 from api.telebirr_verify import (
@@ -943,7 +944,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Normalize phone number (remove 251 country code and add 0)
             normalized_phone = normalize_phone_number(phone_number)
             
-            # MINIMAL DB OPERATIONS: Get or create user
+            # MINIMAL DB OPERATIONS: Get or create user (password required by AbstractUser on create)
             async def get_or_create_user():
                 return await sync_to_async(User.objects.get_or_create)(
                     telegram_id=user.id,
@@ -951,6 +952,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'username': user.username or f"user_{user.id}",
                         'first_name': user.first_name or '',
                         'last_name': user.last_name or '',
+                        'password': make_password(None),  # unusable password for Telegram-only users
                     }
                 )
             telegram_user, created = await db_operation_with_retry(get_or_create_user)
@@ -991,44 +993,48 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db_operation_with_retry(save_user)
             
             # QUEUE CELERY TASK FOR REWARDS (async, non-blocking)
-            # This task will handle:
-            # - Registration gift (if first registration)
-            # - Referral reward (if user has referrer)
-            # - Transaction records
-            # - Fraud checks
-            task_process_registration_rewards.delay(telegram_user.id, is_first_registration)
-            logger.info(f"✅ Queued registration rewards task for user {telegram_user.telegram_id} (id={telegram_user.id}), is_first_registration={is_first_registration}")
+            try:
+                task_process_registration_rewards.delay(telegram_user.id, is_first_registration)
+                logger.info(f"✅ Queued registration rewards task for user {telegram_user.telegram_id} (id={telegram_user.id}), is_first_registration={is_first_registration}")
+            except Exception as task_err:
+                logger.error(f"Failed to queue registration rewards task: {task_err}", exc_info=True)
+                # Continue to show success; reward may be applied later or by admin
             
-            # Prepare success message
+            # Prepare success message (defensive: avoid raising on balance/settings access)
             reply_markup = None
+            try:
+                if is_first_registration:
+                    from api.models import GameSettings
+                    async def get_settings():
+                        return await sync_to_async(GameSettings.get_settings)()
+                    game_settings = await db_operation_with_retry(get_settings)
+                    bid_amount = getattr(game_settings, 'bid_amount', 10)
+                    message_text = (
+                        f"✅ ተመዝግበዋል! ስጦታ {bid_amount} ብር ተበርክቶሎታል፡፡\n\n"
+                        f"ያለዎት ሂሳብ: {bid_amount} ብር"
+                    )
+                else:
+                    async def refresh_user():
+                        await sync_to_async(telegram_user.refresh_from_db)()
+                    await db_operation_with_retry(refresh_user)
+                    bal = getattr(telegram_user, 'balance', None)
+                    if bal is None and hasattr(telegram_user, 'unwithdrawable_balance') and hasattr(telegram_user, 'withdrawable_balance'):
+                        from decimal import Decimal
+                        u = getattr(telegram_user, 'unwithdrawable_balance') or Decimal('0')
+                        w = getattr(telegram_user, 'withdrawable_balance') or Decimal('0')
+                        bal = float(u) + float(w)
+                    else:
+                        bal = float(bal) if bal is not None else 0
+                    message_text = (
+                        "✅ ስልክ ቁጥርዎ ተመዝግቧል!\n\n"
+                        f"ያለዎት ሂሳብ: {bal} ብር\n\n"
+                    )
+            except Exception as msg_err:
+                logger.error(f"Error building success message in handle_contact: {msg_err}", exc_info=True)
+                message_text = "✅ ስልክ ቁጥርዎ ተመዝግቧል!"
             
-            if is_first_registration:
-                # Get bid_amount for message (cached, fast)
-                from api.models import GameSettings
-                async def get_settings():
-                    return await sync_to_async(GameSettings.get_settings)()
-                game_settings = await db_operation_with_retry(get_settings)
-                bid_amount = game_settings.bid_amount
-                
-                # FIX: Don't refresh user balance immediately - the Celery task is async
-                # Instead, show the bid_amount as the balance since that's what they'll receive
-                # The actual balance will be updated by the async task shortly
-                message_text = (
-                    f"✅ ተመዝግበዋል! ስጦታ {bid_amount} ብር ተበርክቶሎታል፡፡\n\n"
-                    f"ያለዎት ሂሳብ: {bid_amount} ብር"
-                )
-            else:
-                # Refresh user to get latest balance
-                async def refresh_user():
-                    await sync_to_async(telegram_user.refresh_from_db)()
-                await db_operation_with_retry(refresh_user)
-                
-                message_text = (
-                    "✅ ስልክ ቁጥርዎ ተመዝግቧል!\n\n"
-                    f"ያለዎት ሂሳብ: {telegram_user.balance} ብር\n\n"
-                )
-            
-            await update.message.reply_text(message_text, reply_markup=reply_markup)
+            if update.message:
+                await update.message.reply_text(message_text, reply_markup=reply_markup)
         
         finally:
             # Always release registration lock
