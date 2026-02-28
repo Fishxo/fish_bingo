@@ -552,7 +552,6 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Get settings to fetch account details
-    from api.models import GameSettings
     async def get_settings():
         return await sync_to_async(GameSettings.get_settings)()
     settings = await db_operation_with_retry(get_settings)
@@ -636,7 +635,6 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Get minimum withdraw amount from settings
-    from api.models import GameSettings
     async def get_settings():
         return await sync_to_async(GameSettings.get_settings)()
     settings = await db_operation_with_retry(get_settings)

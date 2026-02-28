@@ -1285,10 +1285,12 @@ export default {
       try {
         const res = await getAdminUserDetail(userId)
         const u = res.user
-        const stats = res.statistics || {}
-        const totalBal = (u.unwithdrawable_balance != null ? u.unwithdrawable_balance : 0) + (u.withdrawable_balance != null ? u.withdrawable_balance : 0)
-        const balance = prompt('New balance (ETB) - will set as unwithdrawable:', totalBal)
-        if (balance === null) return
+        const unwith = u.unwithdrawable_balance != null ? u.unwithdrawable_balance : 0
+        const withVal = u.withdrawable_balance != null ? u.withdrawable_balance : 0
+        const unwithdrawableStr = prompt('Unwithdrawable balance (ETB) - play-only:', unwith)
+        if (unwithdrawableStr === null) return
+        const withdrawableStr = prompt('Withdrawable balance (ETB):', withVal)
+        if (withdrawableStr === null) return
         const phone = prompt('Phone number:', u.phone_number || '')
         if (phone === null) return
         const username = prompt('Username:', u.username || '')
@@ -1298,7 +1300,8 @@ export default {
         const lastName = prompt('Last name:', u.last_name || '')
         if (lastName === null) return
         await editAdminUser(userId, {
-          balance: parseFloat(balance) || 0, // backend treats as unwithdrawable total when only balance sent
+          unwithdrawable_balance: parseFloat(unwithdrawableStr) || 0,
+          withdrawable_balance: parseFloat(withdrawableStr) || 0,
           phone_number: phone,
           username: username,
           first_name: firstName,
