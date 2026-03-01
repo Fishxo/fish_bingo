@@ -129,14 +129,63 @@
       <!-- Search User -->
       <section class="section">
         <h2>🔍 Search User</h2>
+        <p class="section-hint">Search by phone number, Telegram @username, or user ID. After search, use <strong>Edit balance</strong> to change unwithdrawable and withdrawable amounts.</p>
         <div class="search-row">
-          <input v-model="searchQuery" type="text" placeholder="Phone number or Telegram @username" class="search-input" @keyup.enter="doSearchUser" />
+          <input v-model="searchQuery" type="text" placeholder="Phone, @username, or User ID" class="search-input" @keyup.enter="doSearchUser" />
           <button class="btn btn-primary" @click="doSearchUser">Search</button>
         </div>
-        <div v-if="searchResult" class="user-detail">
-          <pre>{{ searchResult }}</pre>
+        <div v-if="searchResultError" class="user-detail user-detail-error">
+          {{ searchResultError }}
+        </div>
+        <div v-else-if="searchResultData" class="user-detail user-detail-card">
+          <div class="search-user-header">
+            <h3>{{ searchResultData.user?.username || 'User' }} (ID: {{ searchResultData.user?.id }})</h3>
+            <button type="button" class="btn btn-primary" @click="openEditBalance">Edit balance</button>
+          </div>
+          <dl class="user-detail-dl">
+            <dt>Phone</dt>
+            <dd>{{ searchResultData.user?.phone_number || '—' }}</dd>
+            <dt>Telegram ID</dt>
+            <dd>{{ searchResultData.user?.telegram_id || '—' }}</dd>
+            <dt>Unwithdrawable balance</dt>
+            <dd>{{ formatCurrency(searchResultData.user?.unwithdrawable_balance ?? 0) }}</dd>
+            <dt>Withdrawable balance</dt>
+            <dd>{{ formatCurrency(searchResultData.user?.withdrawable_balance ?? 0) }}</dd>
+            <dt>Total balance</dt>
+            <dd>{{ formatCurrency(searchResultData.user?.balance ?? 0) }}</dd>
+            <dt>Withdrawal approved</dt>
+            <dd>{{ searchResultData.user?.withdrawal_approved ? 'Yes' : 'No' }}</dd>
+            <dt>Games played</dt>
+            <dd>{{ searchResultData.games_played ?? 0 }}</dd>
+            <dt>Total wins</dt>
+            <dd>{{ searchResultData.total_wins ?? 0 }}</dd>
+            <dt>Total deposits</dt>
+            <dd>{{ formatCurrency(searchResultData.total_deposits ?? 0) }}</dd>
+            <dt>Total withdrawals</dt>
+            <dd>{{ formatCurrency(searchResultData.total_withdrawals ?? 0) }}</dd>
+          </dl>
         </div>
       </section>
+
+      <!-- Edit balance modal -->
+      <div v-if="showEditBalanceModal" class="modal-overlay" @click.self="closeEditBalanceModal">
+        <div class="modal-box">
+          <h3>Edit balance — {{ editBalanceUser?.username }}</h3>
+          <div class="form-group">
+            <label>Unwithdrawable balance</label>
+            <input v-model="editBalanceUnwithdrawable" type="number" step="0.01" min="0" />
+          </div>
+          <div class="form-group">
+            <label>Withdrawable balance</label>
+            <input v-model="editBalanceWithdrawable" type="number" step="0.01" min="0" />
+          </div>
+          <p v-if="editBalanceMessage" class="edit-balance-msg" :class="{ error: editBalanceSaving && editBalanceMessage }">{{ editBalanceMessage }}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" @click="closeEditBalanceModal">Cancel</button>
+            <button type="button" class="btn btn-primary" :disabled="editBalanceSaving" @click="saveEditBalance">{{ editBalanceSaving ? 'Saving…' : 'Save' }}</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Search Transaction Number (CBE) -->
       <section class="section">
@@ -778,6 +827,7 @@ import {
   getAdminDashboardData,
   refreshDepositsWithdrawals,
   searchUser as apiSearchUser,
+  updateUserBalance as apiUpdateUserBalance,
   searchTransaction as apiSearchTransaction,
   approveDeposit as apiApproveDeposit,
   rejectDeposit as apiRejectDeposit,
@@ -818,6 +868,14 @@ export default {
       unauthorized: false,
       searchQuery: '',
       searchResult: null,
+      searchResultData: null,
+      searchResultError: null,
+      showEditBalanceModal: false,
+      editBalanceUser: null,
+      editBalanceUnwithdrawable: '0',
+      editBalanceWithdrawable: '0',
+      editBalanceSaving: false,
+      editBalanceMessage: '',
       searchTxQuery: '',
       searchTxResult: null,
       searchTxResultObj: null,
@@ -964,12 +1022,50 @@ export default {
     },
     async doSearchUser() {
       if (!this.searchQuery.trim()) return
-      this.searchResult = null
+      this.searchResultData = null
+      this.searchResultError = null
       try {
         const res = await apiSearchUser(this.searchQuery.trim())
-        this.searchResult = typeof res === 'object' ? JSON.stringify(res, null, 2) : res
+        this.searchResultData = res
       } catch (err) {
-        this.searchResult = 'Error: ' + (err.response?.data?.error || err.message || 'Search failed')
+        this.searchResultError = err.response?.data?.error || err.message || 'Search failed'
+      }
+    },
+    openEditBalance() {
+      if (!this.searchResultData?.user) return
+      this.editBalanceUser = this.searchResultData.user
+      this.editBalanceUnwithdrawable = String(this.searchResultData.user.unwithdrawable_balance ?? 0)
+      this.editBalanceWithdrawable = String(this.searchResultData.user.withdrawable_balance ?? 0)
+      this.editBalanceMessage = ''
+      this.showEditBalanceModal = true
+    },
+    closeEditBalanceModal() {
+      this.showEditBalanceModal = false
+      this.editBalanceUser = null
+      this.editBalanceMessage = ''
+    },
+    async saveEditBalance() {
+      if (!this.editBalanceUser) return
+      this.editBalanceSaving = true
+      this.editBalanceMessage = ''
+      try {
+        const u = parseFloat(this.editBalanceUnwithdrawable)
+        const w = parseFloat(this.editBalanceWithdrawable)
+        if (Number.isNaN(u) || u < 0 || Number.isNaN(w) || w < 0) {
+          this.editBalanceMessage = 'Enter valid non-negative numbers.'
+          return
+        }
+        const res = await apiUpdateUserBalance(this.editBalanceUser.id, u, w)
+        if (this.searchResultData?.user?.id === this.editBalanceUser.id) {
+          this.searchResultData.user.unwithdrawable_balance = res.user.unwithdrawable_balance
+          this.searchResultData.user.withdrawable_balance = res.user.withdrawable_balance
+          this.searchResultData.user.balance = res.user.balance
+        }
+        this.closeEditBalanceModal()
+      } catch (err) {
+        this.editBalanceMessage = err.response?.data?.error || err.message || 'Save failed'
+      } finally {
+        this.editBalanceSaving = false
       }
     },
     async doSearchTransaction() {
@@ -1645,6 +1741,88 @@ export default {
   margin: 0;
   font-size: 12px;
   white-space: pre-wrap;
+}
+
+.user-detail-error {
+  color: #c0392b;
+}
+
+.user-detail-card {
+  max-width: 480px;
+}
+
+.search-user-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search-user-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.user-detail-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  font-size: 13px;
+}
+
+.user-detail-dl dt {
+  margin: 0;
+  font-weight: 600;
+  color: #555;
+}
+
+.user-detail-dl dd {
+  margin: 0;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-box {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  min-width: 320px;
+  max-width: 90vw;
+}
+
+.modal-box h3 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.edit-balance-msg {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #27ae60;
+}
+
+.edit-balance-msg.error {
+  color: #c0392b;
 }
 
 .table-wrap {

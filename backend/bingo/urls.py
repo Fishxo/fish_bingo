@@ -48,6 +48,7 @@ urlpatterns = [
     path('admin', RedirectView.as_view(url='/admin/', permanent=True)),
     # Admin dashboard and secondadmin PAGE routes removed so SPA (index.html) is served for /admin-dashboard and /secondadmin
     path('admin-dashboard/search-user/', admin_views.search_user, name='search-user'),
+    path('admin-dashboard/users/<int:user_id>/balance/', admin_views.update_user_balance, name='update-user-balance'),
     path('admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction'),
     path('admin-dashboard/cbe-receipt-ref/add/', admin_views.add_cbe_receipt_ref_api, name='add-cbe-receipt-ref'),
     path('admin-dashboard/cbe-receipt-ref/delete/', admin_views.delete_cbe_receipt_ref_api, name='delete-cbe-receipt-ref'),
@@ -73,6 +74,7 @@ urlpatterns = [
     # secondadmin/ page route removed so SPA serves /secondadmin
     # Duplicate admin/secondadmin API routes under /api/ so requests to /api/admin-dashboard/api/ etc. work (e.g. if frontend uses api baseURL)
     path('api/admin-dashboard/search-user/', admin_views.search_user, name='search-user-api'),
+    path('api/admin-dashboard/users/<int:user_id>/balance/', admin_views.update_user_balance, name='update-user-balance-api'),
     path('api/admin-dashboard/search-transaction/', admin_views.search_transaction, name='search-transaction-api'),
     path('api/admin-dashboard/cbe-receipt-ref/add/', admin_views.add_cbe_receipt_ref_api, name='add-cbe-receipt-ref-api'),
     path('api/admin-dashboard/cbe-receipt-ref/delete/', admin_views.delete_cbe_receipt_ref_api, name='delete-cbe-receipt-ref-api'),

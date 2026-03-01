@@ -543,18 +543,25 @@ def admin_dashboard(request):
 
 @require_http_methods(["GET"])
 def search_user(request):
-    """Search user by phone number or Telegram username."""
+    """Search user by phone number, Telegram username, or user ID."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
         return JsonResponse({'error': 'Unauthorized'}, status=401)
-    query = (request.GET.get('phone') or request.GET.get('q') or request.GET.get('username') or '').strip()
+    query = (request.GET.get('phone') or request.GET.get('q') or request.GET.get('username') or request.GET.get('id') or '').strip()
     if not query:
-        return JsonResponse({'error': 'Phone number or username required'}, status=400)
+        return JsonResponse({'error': 'Phone number, username, or user ID required'}, status=400)
     try:
         user = None
+        # Search by user ID if query is numeric
+        if query.isdigit():
+            try:
+                user = User.objects.filter(telegram_id__isnull=False, pk=int(query)).first()
+            except (ValueError, TypeError):
+                pass
         # Search by Telegram username (with or without @)
-        username_query = query.lstrip('@')
-        if username_query:
-            user = User.objects.filter(telegram_id__isnull=False, username__icontains=username_query).first()
+        if not user:
+            username_query = query.lstrip('@')
+            if username_query:
+                user = User.objects.filter(telegram_id__isnull=False, username__icontains=username_query).first()
         if not user:
             user = find_user_by_phone(query)
         if not user:
@@ -584,6 +591,8 @@ def search_user(request):
                 'telegram_id': user.telegram_id,
                 'phone_number': user.phone_number,
                 'balance': float(user.balance),
+                'unwithdrawable_balance': float(user.unwithdrawable_balance or 0),
+                'withdrawable_balance': float(user.withdrawable_balance or 0),
                 'created_at': user.created_at.isoformat(),
                 'withdrawal_approved': user.withdrawal_approved,
             },
@@ -596,6 +605,49 @@ def search_user(request):
         })
     except User.DoesNotExist:
         return JsonResponse({'error': 'User not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["POST"])
+def update_user_balance(request, user_id):
+    """Update a user's unwithdrawable and withdrawable balances (admin only)."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    user = get_object_or_404(User, pk=user_id)
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    unwithdrawable = data.get('unwithdrawable_balance')
+    withdrawable = data.get('withdrawable_balance')
+    if unwithdrawable is None and withdrawable is None:
+        return JsonResponse({'error': 'Provide unwithdrawable_balance and/or withdrawable_balance'}, status=400)
+    try:
+        update_fields = []
+        if unwithdrawable is not None:
+            val = Decimal(str(unwithdrawable))
+            if val < 0:
+                return JsonResponse({'error': 'unwithdrawable_balance cannot be negative'}, status=400)
+            user.unwithdrawable_balance = val
+            update_fields.append('unwithdrawable_balance')
+        if withdrawable is not None:
+            val = Decimal(str(withdrawable))
+            if val < 0:
+                return JsonResponse({'error': 'withdrawable_balance cannot be negative'}, status=400)
+            user.withdrawable_balance = val
+            update_fields.append('withdrawable_balance')
+        if update_fields:
+            user.save(update_fields=update_fields)
+        return JsonResponse({
+            'success': True,
+            'user': {
+                'id': user.id,
+                'unwithdrawable_balance': float(user.unwithdrawable_balance or 0),
+                'withdrawable_balance': float(user.withdrawable_balance or 0),
+                'balance': float(user.balance),
+            }
+        })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 

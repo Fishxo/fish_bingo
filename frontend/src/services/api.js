@@ -312,6 +312,14 @@ export async function searchUser(query) {
   return response.data
 }
 
+export async function updateUserBalance(userId, unwithdrawableBalance, withdrawableBalance) {
+  const response = await adminApi.post(`/admin-dashboard/users/${userId}/balance/`, {
+    unwithdrawable_balance: unwithdrawableBalance,
+    withdrawable_balance: withdrawableBalance
+  })
+  return response.data
+}
+
 export async function searchTransaction(tx) {
   const response = await adminApi.get('/admin-dashboard/search-transaction/', { params: { tx: tx || undefined, transaction_number: tx || undefined } })
   return response.data
