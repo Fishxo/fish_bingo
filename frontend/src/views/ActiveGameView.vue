@@ -884,8 +884,9 @@ export default {
           this.interval = null
         }
         
-        // Set flag to prevent loadGame from running and interfering with banner
-        this._winnerBannerActive = true
+        // Do NOT set _winnerBannerActive until after winner data is applied successfully.
+        // If applyWinnerData throws while _winnerBannerActive is true, loadGame() early-returns forever
+        // and other players stay stuck with no banner (winner may see banner from HTTP claim only).
         
         // Helper: apply winner data to component state. When we set this.winner/this.winners,
         // canClaimBingo becomes false (button grays out). For fake winner we call this only AFTER
@@ -910,7 +911,7 @@ export default {
               this.winnerPrize = payload.prize ?? payload.winners[0].prize ?? 0
               this.totalPrize = payload.total_prize ?? null
             }
-            if (this.winners) {
+            if (this.winners && this.winners.length > 0) {
               if (this.userCard && this.userCard.user) {
                 const currentUserId = this.userCard.user.id
                 const currentUserWinner = this.winners.find(w =>
@@ -937,6 +938,20 @@ export default {
                       called_numbers: this.winners[0].called_numbers || [],
                       last_called_number: this.winners[0].last_called_number || null
                     }
+                  }
+                }
+              } else {
+                // Spectator or card without nested user — still show winner's card for everyone
+                this.isCurrentUserWinner = false
+                const w0 = this.winners[0]
+                if (w0 && w0.card_layout) {
+                  this.winnerCard = {
+                    card_layout: w0.card_layout,
+                    card_number: w0.card_number,
+                    winning_pattern: w0.winning_pattern,
+                    selected_numbers: w0.selected_numbers || [],
+                    called_numbers: w0.called_numbers || [],
+                    last_called_number: w0.last_called_number || null
                   }
                 }
               }
@@ -1011,13 +1026,49 @@ export default {
           this.$forceUpdate()
         }
 
+        const applyWinnerDataSafe = () => {
+          try {
+            applyWinnerData(data)
+          } catch (err) {
+            console.error('applyWinnerData failed (showing minimal banner):', err)
+            // Minimal state so banner still shows for non-winning players
+            this.game && !isFakeUserWinner && (this.game.status = 'completed')
+            if (data && data.winners && data.winners.length > 0) {
+              this.winners = data.winners
+              const w0 = data.winners[0]
+              if (w0 && w0.winner) this.winner = w0.winner
+              this.winnerPrize = data.prize ?? w0.prize ?? 0
+              this.totalPrize = data.total_prize ?? null
+              if (w0 && w0.card_layout) {
+                this.winnerCard = {
+                  card_layout: w0.card_layout,
+                  card_number: w0.card_number,
+                  winning_pattern: w0.winning_pattern,
+                  selected_numbers: w0.selected_numbers || [],
+                  called_numbers: w0.called_numbers || data.called_numbers || [],
+                  last_called_number: w0.last_called_number ?? data.last_called_number ?? null
+                }
+              }
+            } else if (data && data.winner) {
+              this.winner = data.winner
+              this.winnerPrize = data.prize ?? 0
+            }
+            if (this.userCard && this.userCard.user && this.winner && this.winner.id != null) {
+              this.isCurrentUserWinner = this.userCard.user.id === this.winner.id ||
+                Number(this.userCard.user.id) === Number(this.winner.id)
+            } else {
+              this.isCurrentUserWinner = false
+            }
+          }
+        }
+
         // CRITICAL: For fake user, do NOT set winner/winners yet so canClaimBingo stays true
         // for the full co-winner window (3s). Real users can still click Bingo and become co-winner.
         // Only after the window do we apply winner data and show the banner.
         const CO_WINNER_WINDOW_MS = 3000
         if (isFakeUserWinner) {
           setTimeout(() => {
-            applyWinnerData(data)
+            applyWinnerDataSafe()
             console.log('Winner banner state (after co-winner window):', {
               winner: this.winner,
               winners: this.winners,
@@ -1026,7 +1077,7 @@ export default {
             showWinnerBanner()
           }, CO_WINNER_WINDOW_MS)
         } else {
-          applyWinnerData(data)
+          applyWinnerDataSafe()
           console.log('Winner banner state:', {
             winner: this.winner,
             winners: this.winners,

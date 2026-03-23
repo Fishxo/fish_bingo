@@ -9,7 +9,32 @@ All broadcasts go to BOTH rooms by default unless specified otherwise.
 Legacy single group game_{game_id} is supported for backward compatibility during migration.
 """
 
+import json
+from decimal import Decimal
+
 from asgiref.sync import async_to_sync
+
+
+def _json_default(o):
+    if isinstance(o, Decimal):
+        return float(o)
+    raise TypeError(f'Object of type {type(o).__name__} is not JSON serializable')
+
+
+def json_safe_event_data(data):
+    """
+    Round-trip through JSON so Redis channel layer + all clients receive plain dicts/lists
+    (no Decimal, UUID, etc.) — prevents silent broadcast failures for winner_declared.
+    """
+    if data is None:
+        return None
+    try:
+        return json.loads(json.dumps(data, default=_json_default))
+    except Exception:
+        try:
+            return json.loads(json.dumps(data, default=str))
+        except Exception:
+            return data
 
 # Room name templates (Django Channels group names)
 def room_players(game_id):
@@ -62,8 +87,9 @@ def broadcast_to_game_rooms(game_id, event_type, event_data, rooms="both", use_l
         if use_legacy:
             groups.append(room_legacy(gid))
 
+        safe_payload = json_safe_event_data(event_data)
         for group_name in groups:
-            _send_to_group(channel_layer, group_name, event_type, event_data)
+            _send_to_group(channel_layer, group_name, event_type, safe_payload)
 
         return True
     except Exception as e:
@@ -101,13 +127,20 @@ def batch_broadcast_to_game_rooms(game_id, events, rooms="both", use_legacy=True
 
         if len(events) == 1:
             ev = events[0]
+            safe_data = json_safe_event_data(ev.get("data"))
             for group_name in groups:
-                _send_to_group(channel_layer, group_name, ev["type"], ev["data"])
+                _send_to_group(channel_layer, group_name, ev["type"], safe_data)
         else:
+            safe_events = []
+            for ev in events:
+                safe_events.append({
+                    "type": ev.get("type"),
+                    "data": json_safe_event_data(ev.get("data")),
+                })
             for group_name in groups:
                 async_to_sync(channel_layer.group_send)(
                     group_name,
-                    {"type": "batch_events", "data": {"events": events}}
+                    {"type": "batch_events", "data": {"events": safe_events}}
                 )
 
         return True
