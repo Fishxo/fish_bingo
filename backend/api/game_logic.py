@@ -565,7 +565,7 @@ def start_game(game: Game) -> bool:
     
     # CRITICAL: Cache game settings at game start to prevent mid-game changes.
     # free_play: when True, number calling is random (no extra processing). When False,
-    # task_auto_call_numbers uses get_safe_number_to_call so real users don't win (fake users can).
+    # Number calling uses fair random selection (per-user win control may be added separately).
     settings = GameSettings.get_settings()
     game_settings_cache_key = f'game:{game.id}:settings'
     pref = getattr(settings, 'fake_win_preference', 0)

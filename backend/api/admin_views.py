@@ -1005,6 +1005,35 @@ def reject_deposit_request_api(request, deposit_id):
 
 @csrf_exempt
 @require_http_methods(["POST"])
+def bulk_delete_pending_deposits_api(request):
+    """Delete many pending deposit requests. Body: {\"ids\": [1, 2, 3]} (no notifications)."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        ids = body.get('ids')
+        if not isinstance(ids, list) or len(ids) == 0:
+            return JsonResponse({'error': 'ids must be a non-empty list of deposit request ids'}, status=400)
+        id_list = []
+        seen = set()
+        for x in ids:
+            try:
+                i = int(x)
+                if i not in seen:
+                    seen.add(i)
+                    id_list.append(i)
+            except (TypeError, ValueError):
+                continue
+        if not id_list:
+            return JsonResponse({'error': 'No valid integer ids'}, status=400)
+        deleted_count, _ = DepositRequest.objects.filter(id__in=id_list, status='pending').delete()
+        return JsonResponse({'success': True, 'deleted': deleted_count, 'message': f'Deleted {deleted_count} pending deposit(s)'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
 def delete_failed_deposit_api(request, failed_id):
     """Delete a failed deposit request record (support cleanup)."""
     if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
@@ -1185,6 +1214,35 @@ def delete_withdraw_request_api(request, withdraw_id):
         return JsonResponse({'success': True, 'message': 'Withdraw request deleted'})
     except WithdrawRequest.DoesNotExist:
         return JsonResponse({'error': 'Withdraw request not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def bulk_delete_pending_withdraws_api(request):
+    """Delete many pending withdraw requests. Body: {\"ids\": [1, 2, 3]} (no notifications)."""
+    if not (request.user.is_staff or request.session.get('second_admin_authenticated')):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    try:
+        body = json.loads(request.body) if request.body else {}
+        ids = body.get('ids')
+        if not isinstance(ids, list) or len(ids) == 0:
+            return JsonResponse({'error': 'ids must be a non-empty list of withdraw request ids'}, status=400)
+        id_list = []
+        seen = set()
+        for x in ids:
+            try:
+                i = int(x)
+                if i not in seen:
+                    seen.add(i)
+                    id_list.append(i)
+            except (TypeError, ValueError):
+                continue
+        if not id_list:
+            return JsonResponse({'error': 'No valid integer ids'}, status=400)
+        deleted_count, _ = WithdrawRequest.objects.filter(id__in=id_list, status='pending').delete()
+        return JsonResponse({'success': True, 'deleted': deleted_count, 'message': f'Deleted {deleted_count} pending withdraw(s)'})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 

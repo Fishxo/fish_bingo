@@ -5,7 +5,7 @@ System players can also live in Redis only (no DB) - see redis_utils.system_play
 """
 import random
 import asyncio
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from django.utils import timezone
 from decimal import Decimal
 from .models import FakeUser, FakeUserGameCard, Game, GameSettings, GameCard
@@ -486,55 +486,6 @@ def batch_mark_number_on_system_players_redis(game_id: int, number: int) -> Tupl
     return (updated, winners)
 
 
-def get_fake_user_winning_numbers(card: FakeUserGameCard, called_numbers: set) -> List[int]:
-    """
-    Get the numbers that would make this fake user card win
-    Returns list of numbers that, if called, would complete a bingo pattern
-    """
-    layout = card.card_layout
-    if not layout:
-        return []
-    
-    winning_numbers = []
-    
-    # Helper to check if cell is marked
-    def is_cell_marked(cell):
-        if cell.get('letter') == 'FREE':
-            return True
-        number = cell.get('number')
-        if number is None:
-            return False
-        return number in called_numbers
-    
-    # Check each pattern and find missing numbers
-    # Horizontal lines
-    for row in layout:
-        missing = [cell.get('number') for cell in row if not is_cell_marked(cell) and cell.get('number') is not None]
-        if len(missing) == 1:
-            winning_numbers.append(missing[0])
-    
-    # Vertical lines
-    for col_idx in range(5):
-        missing = [layout[row_idx][col_idx].get('number') for row_idx in range(5) 
-                   if not is_cell_marked(layout[row_idx][col_idx]) and layout[row_idx][col_idx].get('number') is not None]
-        if len(missing) == 1:
-            winning_numbers.append(missing[0])
-    
-    # Diagonal 1
-    missing = [layout[i][i].get('number') for i in range(5) 
-               if not is_cell_marked(layout[i][i]) and layout[i][i].get('number') is not None]
-    if len(missing) == 1:
-        winning_numbers.append(missing[0])
-    
-    # Diagonal 2
-    missing = [layout[i][4-i].get('number') for i in range(5) 
-               if not is_cell_marked(layout[i][4-i]) and layout[i][4-i].get('number') is not None]
-    if len(missing) == 1:
-        winning_numbers.append(missing[0])
-    
-    return list(set(winning_numbers))  # Remove duplicates
-
-
 def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
     """
     Adjust fake users in real-time when a real player selects or unselects a card
@@ -673,108 +624,4 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
         return {'skipped': True, 'reason': 'No available fake users or cards to add'}
     
     return {'skipped': True, 'reason': 'No adjustment needed'}
-
-
-def get_real_user_winning_numbers(game: Game, called_numbers: set) -> List[int]:
-    """
-    Get numbers that would make real users win (one number away from bingo)
-    Returns list of numbers that should NOT be called if we want fake users to win
-    """
-    from .game_logic import check_bingo
-    from .models import GameCard
-    
-    blocking_numbers = []
-    real_cards = GameCard.objects.filter(game=game, is_winner=False)
-    
-    for card in real_cards:
-        # Get numbers on card that haven't been called
-        layout = card.card_layout
-        if not layout:
-            continue
-        
-        # Check each pattern
-        # Horizontal
-        for row in layout:
-            missing = [cell.get('number') for cell in row 
-                      if not cell.get('marked', False) and cell.get('number') is not None and cell.get('letter') != 'FREE']
-            if len(missing) == 1:
-                blocking_numbers.append(missing[0])
-        
-        # Vertical
-        for col_idx in range(5):
-            missing = [layout[row_idx][col_idx].get('number') for row_idx in range(5)
-                      if not layout[row_idx][col_idx].get('marked', False) and layout[row_idx][col_idx].get('number') is not None and layout[row_idx][col_idx].get('letter') != 'FREE']
-            if len(missing) == 1:
-                blocking_numbers.append(missing[0])
-        
-        # Diagonals
-        missing = [layout[i][i].get('number') for i in range(5)
-                  if not layout[i][i].get('marked', False) and layout[i][i].get('number') is not None and layout[i][i].get('letter') != 'FREE']
-        if len(missing) == 1:
-            blocking_numbers.append(missing[0])
-        
-        missing = [layout[i][4-i].get('number') for i in range(5)
-                  if not layout[i][4-i].get('marked', False) and layout[i][4-i].get('number') is not None and layout[i][4-i].get('letter') != 'FREE']
-        if len(missing) == 1:
-            blocking_numbers.append(missing[0])
-    
-    return list(set(blocking_numbers))
-
-
-def get_safe_number_to_call(game: Game, called_numbers: set, free_play: bool) -> Optional[int]:
-    """
-    Get a number that can be called safely.
-    If free_play is False, ensure the number won't let real users win.
-    fake_win_preference (from cached game settings): 0=current; 1=prefer fake wins (multi-fake); 2=+ when no safe number, pick to maximize fake wins.
-    Returns a number between 1-75 that hasn't been called yet.
-    """
-    from .models import GameSettings
-    from collections import Counter
-
-    all_numbers = set(range(1, 76))
-    available = all_numbers - called_numbers
-
-    if not available:
-        return None
-
-    if free_play:
-        return random.choice(list(available))
-
-    # Use cached game settings (set at game start)
-    settings = GameSettings.get_settings(game_id=game.id)
-    preference = getattr(settings, 'fake_win_preference', 0)
-
-    blocking_numbers = get_real_user_winning_numbers(game, called_numbers)
-    safe_numbers = available - set(blocking_numbers)
-
-    fake_cards = list(FakeUserGameCard.objects.filter(game=game, is_winner=False))
-    # number -> list of numbers that would make that card win
-    fake_winning_by_card = [get_fake_user_winning_numbers(card, called_numbers) for card in fake_cards]
-    all_fake_winning = []
-    for nums in fake_winning_by_card:
-        all_fake_winning.extend(nums)
-    fake_winning_counts = Counter(all_fake_winning)  # number -> how many fake cards it would make win
-
-    if safe_numbers:
-        preferred = set(all_fake_winning) & safe_numbers
-        if preferred:
-            if preference >= 1:
-                # Level 1/2: among preferred, pick number that helps the most fake cards
-                best = max(preferred, key=lambda n: fake_winning_counts.get(n, 0))
-                tied = [n for n in preferred if fake_winning_counts.get(n, 0) == fake_winning_counts.get(best, 0)]
-                return random.choice(tied)
-            return random.choice(list(preferred))
-        # No preferred: return any safe number (level 0 or 1/2 same here)
-        return random.choice(list(safe_numbers))
-
-    # No safe number: every remaining number would let some real user win
-    if preference >= 2:
-        # Level 2: pick number that minimizes real wins, then maximizes fake wins
-        def score(n):
-            real_wins = 1 if n in blocking_numbers else 0
-            fake_wins = fake_winning_counts.get(n, 0)
-            return (-real_wins, fake_wins)  # prefer 0 real wins, then higher fake wins
-        best = max(available, key=score)
-        return best
-    return random.choice(list(available))
 

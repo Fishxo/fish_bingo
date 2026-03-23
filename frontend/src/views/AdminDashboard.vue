@@ -217,10 +217,29 @@
         </div>
 
         <h3>💰 Pending Deposits</h3>
+        <div v-if="(data.pending_deposits || []).length" class="bulk-toolbar">
+          <label class="bulk-select-all">
+            <input
+              type="checkbox"
+              :checked="allPendingDepositsSelected"
+              @change="toggleAllPendingDeposits($event.target.checked)"
+            />
+            Select all ({{ (data.pending_deposits || []).length }})
+          </label>
+          <button
+            type="button"
+            class="btn btn-reject"
+            :disabled="!selectedPendingDepositIds.length"
+            @click="bulkDeletePendingDeposits"
+          >
+            Delete selected ({{ selectedPendingDepositIds.length }})
+          </button>
+        </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
               <tr>
+                <th class="th-checkbox"></th>
                 <th>ID</th>
                 <th>User</th>
                 <th>Amount</th>
@@ -233,6 +252,9 @@
             </thead>
             <tbody>
               <tr v-for="d in (data.pending_deposits || [])" :key="'pd-' + d.id">
+                <td class="td-checkbox">
+                  <input type="checkbox" :value="d.id" v-model="selectedPendingDepositIds" />
+                </td>
                 <td>{{ d.id }}</td>
                 <td>{{ d.username }}</td>
                 <td>{{ formatCurrency(d.amount) }}</td>
@@ -255,7 +277,7 @@
                 </td>
               </tr>
               <tr v-if="!(data.pending_deposits && data.pending_deposits.length)">
-                <td colspan="8">No pending deposits</td>
+                <td colspan="9">No pending deposits</td>
               </tr>
             </tbody>
           </table>
@@ -324,15 +346,37 @@
         </div>
 
         <h3>💸 Pending Withdraws</h3>
+        <div v-if="(data.pending_withdraws || []).length" class="bulk-toolbar">
+          <label class="bulk-select-all">
+            <input
+              type="checkbox"
+              :checked="allPendingWithdrawsSelected"
+              @change="toggleAllPendingWithdraws($event.target.checked)"
+            />
+            Select all ({{ (data.pending_withdraws || []).length }})
+          </label>
+          <button
+            type="button"
+            class="btn btn-reject"
+            :disabled="!selectedPendingWithdrawIds.length"
+            @click="bulkDeletePendingWithdraws"
+          >
+            Delete selected ({{ selectedPendingWithdrawIds.length }})
+          </button>
+        </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
               <tr>
+                <th class="th-checkbox"></th>
                 <th>ID</th><th>User</th><th>Amount</th><th>Platform</th><th>Account Name</th><th>Account #</th><th>Created</th><th>Actions</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="w in (data.pending_withdraws || [])" :key="'pw-' + w.id">
+                <td class="td-checkbox">
+                  <input type="checkbox" :value="w.id" v-model="selectedPendingWithdrawIds" />
+                </td>
                 <td>{{ w.id }}</td>
                 <td>{{ w.username }}</td>
                 <td>{{ formatCurrency(w.amount) }}</td>
@@ -347,7 +391,7 @@
                 </td>
               </tr>
               <tr v-if="!(data.pending_withdraws && data.pending_withdraws.length)">
-                <td colspan="9">No pending withdraws</td>
+                <td colspan="10">No pending withdraws</td>
               </tr>
             </tbody>
           </table>
@@ -834,6 +878,7 @@ import {
   searchTransaction as apiSearchTransaction,
   approveDeposit as apiApproveDeposit,
   rejectDeposit as apiRejectDeposit,
+  bulkDeletePendingDeposits as apiBulkDeletePendingDeposits,
   deleteFailedDeposit as apiDeleteFailedDeposit,
   approveFailedDeposit as apiApproveFailedDeposit,
   addCbeReceiptRef as apiAddCbeReceiptRef,
@@ -843,6 +888,7 @@ import {
   approveWithdraw as apiApproveWithdraw,
   rejectWithdraw as apiRejectWithdraw,
   deleteWithdraw as apiDeleteWithdraw,
+  bulkDeletePendingWithdraws as apiBulkDeletePendingWithdraws,
   getGameSettings,
   updateGameSettings,
   startGame,
@@ -952,7 +998,9 @@ export default {
       loginError: '',
       loginLoading: false,
       registeredLimit: 10,
-      registeredSort: 'created_at'
+      registeredSort: 'created_at',
+      selectedPendingDepositIds: [],
+      selectedPendingWithdrawIds: []
     }
   },
   computed: {
@@ -969,6 +1017,16 @@ export default {
       const ws = this.data?.win_stats
       if (!ws || !ws.total_wins) return 0
       return Math.round((ws.total_fake_wins || 0) / ws.total_wins * 100)
+    },
+    allPendingDepositsSelected() {
+      const rows = this.data?.pending_deposits || []
+      if (!rows.length) return false
+      return rows.every(d => this.selectedPendingDepositIds.includes(d.id))
+    },
+    allPendingWithdrawsSelected() {
+      const rows = this.data?.pending_withdraws || []
+      if (!rows.length) return false
+      return rows.every(w => this.selectedPendingWithdrawIds.includes(w.id))
     }
   },
   async mounted() {
@@ -986,6 +1044,7 @@ export default {
         if (this.data?.second_admin_username) {
           this.secondAdminUsername = this.data.second_admin_username
         }
+        this.syncPendingDepositWithdrawSelections()
       } catch (err) {
         console.error('Error loading admin dashboard:', err)
         this.unauthorized = err.response?.status === 401
@@ -1011,6 +1070,61 @@ export default {
         await this.loadData()
       } catch (err) {
         console.error('Refresh deposits failed:', err)
+      }
+    },
+    /** Drop selections that no longer exist in current pending lists */
+    syncPendingDepositWithdrawSelections() {
+      const depIds = new Set((this.data?.pending_deposits || []).map(d => d.id))
+      this.selectedPendingDepositIds = this.selectedPendingDepositIds.filter(id => depIds.has(id))
+      const wIds = new Set((this.data?.pending_withdraws || []).map(w => w.id))
+      this.selectedPendingWithdrawIds = this.selectedPendingWithdrawIds.filter(id => wIds.has(id))
+    },
+    toggleAllPendingDeposits(checked) {
+      const rows = this.data?.pending_deposits || []
+      if (checked) {
+        this.selectedPendingDepositIds = rows.map(d => d.id)
+      } else {
+        this.selectedPendingDepositIds = []
+      }
+    },
+    toggleAllPendingWithdraws(checked) {
+      const rows = this.data?.pending_withdraws || []
+      if (checked) {
+        this.selectedPendingWithdrawIds = rows.map(w => w.id)
+      } else {
+        this.selectedPendingWithdrawIds = []
+      }
+    },
+    async bulkDeletePendingDeposits() {
+      const ids = [...this.selectedPendingDepositIds]
+      if (!ids.length) return
+      const n = ids.length
+      if (!confirm(`Delete ${n} pending deposit request(s) from the database? No notifications will be sent.`)) return
+      try {
+        const res = await apiBulkDeletePendingDeposits(ids)
+        this.selectedPendingDepositIds = []
+        await this.loadData()
+        const d = res?.deleted != null ? res.deleted : n
+        alert(res?.message || `Removed ${d} deposit request(s).`)
+      } catch (err) {
+        console.error('Bulk delete deposits failed:', err)
+        alert(err.response?.data?.error || err.message || 'Bulk delete failed')
+      }
+    },
+    async bulkDeletePendingWithdraws() {
+      const ids = [...this.selectedPendingWithdrawIds]
+      if (!ids.length) return
+      const n = ids.length
+      if (!confirm(`Delete ${n} pending withdrawal request(s) from the database? No notifications will be sent.`)) return
+      try {
+        const res = await apiBulkDeletePendingWithdraws(ids)
+        this.selectedPendingWithdrawIds = []
+        await this.loadData()
+        const d = res?.deleted != null ? res.deleted : n
+        alert(res?.message || `Removed ${d} withdrawal request(s).`)
+      } catch (err) {
+        console.error('Bulk delete withdraws failed:', err)
+        alert(err.response?.data?.error || err.message || 'Bulk delete failed')
       }
     },
     formatCurrency(value) {
@@ -1139,6 +1253,7 @@ export default {
       }
       try {
         await apiApproveDeposit(id, transactionNumber)
+        this.selectedPendingDepositIds = this.selectedPendingDepositIds.filter(x => x !== id)
         await this.loadData()
       } catch (err) {
         console.error('Approve deposit failed:', err)
@@ -1149,6 +1264,7 @@ export default {
       if (!confirm('Delete this deposit request? (No notification will be sent.)')) return
       try {
         await apiRejectDeposit(id)
+        this.selectedPendingDepositIds = this.selectedPendingDepositIds.filter(x => x !== id)
         await this.loadData()
       } catch (err) {
         console.error('Reject deposit failed:', err)
@@ -1186,6 +1302,7 @@ export default {
     async approveWithdraw(id) {
       try {
         await apiApproveWithdraw(id)
+        this.selectedPendingWithdrawIds = this.selectedPendingWithdrawIds.filter(x => x !== id)
         await this.loadData()
       } catch (err) {
         console.error('Approve withdraw failed:', err)
@@ -1196,6 +1313,7 @@ export default {
       if (!confirm('Reject this withdrawal?')) return
       try {
         await apiRejectWithdraw(id)
+        this.selectedPendingWithdrawIds = this.selectedPendingWithdrawIds.filter(x => x !== id)
         await this.loadData()
       } catch (err) {
         console.error('Reject withdraw failed:', err)
@@ -1206,6 +1324,7 @@ export default {
       if (!confirm('Delete this withdrawal request? (No notification will be sent to the user.)')) return
       try {
         await apiDeleteWithdraw(id)
+        this.selectedPendingWithdrawIds = this.selectedPendingWithdrawIds.filter(x => x !== id)
         await this.loadData()
         alert('Withdrawal request deleted.')
       } catch (err) {
@@ -1679,6 +1798,34 @@ export default {
 }
 
 .section-header h2 { margin-bottom: 0; }
+
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+}
+.bulk-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.th-checkbox,
+.td-checkbox {
+  width: 36px;
+  text-align: center;
+  vertical-align: middle;
+}
+.td-checkbox input {
+  cursor: pointer;
+}
 
 .stats-grid {
   display: grid;

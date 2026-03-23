@@ -148,7 +148,11 @@ export default {
       winnerCard: null,
       isCurrentUserWinner: false,
       _winnerRedirectTimeoutId: null,
-      _completedRedirectTimeoutId: null
+      _completedRedirectTimeoutId: null,
+      /** Tracks last game id we bound UI/timer/WS to — new id resets phase state */
+      _loadedGameId: null,
+      /** Last WebSocket role (player vs watcher) we connected with */
+      _wsBoundRole: null
     }
   },
   async mounted() {
@@ -187,7 +191,7 @@ export default {
     }
     
     await this.loadGame()
-    this.setupWebSocket()
+    // WebSocket is attached inside loadGame() for the current game id
     // Only start polling if WebSocket is not connected (fallback)
     if (!this.wsConnected) {
       this.startPolling()
@@ -195,12 +199,10 @@ export default {
     
     // Start timer after a short delay to ensure game is loaded
     this.$nextTick(() => {
-      // Start timer if game is waiting (even if user has a card - they need to see when game starts)
+      // Timer is started from loadGame() when status is waiting (uses server selection_remaining_seconds when present)
       if (this.game && this.game.status === 'waiting' && !this.timerInterval) {
-        console.log('🎮 Initial timer start - game status:', this.game.status, 'selectedCard:', this.selectedCard)
+        console.log('🎮 Fallback initial timer start')
         this.startTimer()
-      } else {
-        console.log('🎮 Timer not started initially - game:', this.game?.status, 'selectedCard:', this.selectedCard, 'timerInterval:', this.timerInterval)
       }
     })
     
@@ -262,24 +264,43 @@ export default {
     async loadGame() {
       try {
         const game = await getCurrentGame()
-        this.game = game
         
-        // Update timer seconds from game settings if available
-        // CRITICAL: Calculate remaining time based on game.created_at, not full timer
-        if (game && game.card_selection_timer && game.created_at && !this.timerInterval) {
-          const timerValue = game.card_selection_timer
-          // Calculate elapsed time since game was created
-          const gameCreatedAt = new Date(game.created_at)
-          const now = new Date()
-          const elapsedSeconds = Math.floor((now - gameCreatedAt) / 1000)
-          // Calculate remaining time
-          const remainingSeconds = Math.max(0, timerValue - elapsedSeconds)
-          this.timerSeconds = remainingSeconds
-          console.log(`⏱️ Timer calculated: ${remainingSeconds}s remaining (${elapsedSeconds}s elapsed of ${timerValue}s total)`)
-        } else if (game && game.card_selection_timer && !this.timerInterval) {
-          // Fallback if created_at is not available
-          this.timerSeconds = game.card_selection_timer
+        const idChanged = this._loadedGameId != null && game && game.id !== this._loadedGameId
+        if (idChanged) {
+          console.log('🎮 Card selection: new game id', this._loadedGameId, '->', game.id, '— resetting phase state')
+          if (this.timerInterval) {
+            clearInterval(this.timerInterval)
+            this.timerInterval = null
+          }
+          if (this.interval) {
+            clearInterval(this.interval)
+            this.interval = null
+          }
+          if (this._completedRedirectTimeoutId) {
+            clearTimeout(this._completedRedirectTimeoutId)
+            this._completedRedirectTimeoutId = null
+          }
+          if (this._winnerRedirectTimeoutId) {
+            clearTimeout(this._winnerRedirectTimeoutId)
+            this._winnerRedirectTimeoutId = null
+          }
+          this.showWinnerBanner = false
+          this.winner = null
+          this.winners = null
+          this.winnerCard = null
+          this.isCurrentUserWinner = false
+          this.isRedirecting = false
+          this._wsBoundRole = null
+          if (this.ws) {
+            this.ws.disconnect()
+            this.ws = null
+          }
         }
+        if (game) {
+          this._loadedGameId = game.id
+        }
+        
+        this.game = game
         
         // Refresh balance when game loads (in case it changed)
         if (this.isAuthenticated) {
@@ -323,6 +344,19 @@ export default {
           const totalCards = game.total_cards || 200
           const allCards = Array.from({ length: totalCards }, (_, i) => i + 1)
           this.takenCards = allCards.filter(num => !this.availableCards.includes(num))
+          
+          const nextWsRole = (this.userCard || this.selectedCard) ? 'player' : 'watcher'
+          const needWs = !this.ws ||
+            Number(this.ws.gameId) !== Number(game.id) ||
+            this._wsBoundRole !== nextWsRole
+          if (needWs) {
+            if (this.ws) {
+              this.ws.disconnect()
+              this.ws = null
+            }
+            this._wsBoundRole = nextWsRole
+            this.setupWebSocket()
+          }
           
           // Redirect if game status changes - but only if user has a card
           // If game is active and user has a card, redirect to game view
@@ -379,24 +413,37 @@ export default {
             }, 3500)
             return // Stop further execution
           } else if (game.status === 'waiting') {
-            // Start timer if game is waiting (user may or may not have a card - they need to see countdown)
-            // CRITICAL: Only start if timer is not already running
-            // Don't reset timer if it's already counting down!
-            if (!this.timerInterval) {
-              console.log('🎮 Game is waiting, starting timer (user has card:', this.selectedCard, ')')
-              this.startTimer()
-            } else {
-              // Timer is running - DO NOT RESTART IT!
-              // Just verify it's still counting (don't log every time to reduce spam)
-              const expectedTimerValue = this.game?.card_selection_timer || 30
-              if (this.timerSeconds === expectedTimerValue && this.timerSeconds > 0) {
-                console.warn('⚠️ Timer stuck at initial value! Restarting...')
+            // Prefer server selection_remaining_seconds; restart on new game id or when no interval
+            if (idChanged || !this.timerInterval) {
+              if (this.timerInterval) {
                 clearInterval(this.timerInterval)
                 this.timerInterval = null
+              }
+              if (typeof game.selection_remaining_seconds === 'number') {
+                console.log('🎮 Waiting: starting timer from server remaining:', game.selection_remaining_seconds)
+                this.startTimer({ serverRemainingSeconds: game.selection_remaining_seconds })
+              } else {
+                console.log('🎮 Waiting: starting timer (client fallback from created_at)')
+                this.startTimer()
+              }
+            } else if (typeof game.selection_remaining_seconds === 'number') {
+              const drift = Math.abs(this.timerSeconds - game.selection_remaining_seconds)
+              if (drift > 2) {
+                console.log('⏱️ Syncing timer to server remaining:', game.selection_remaining_seconds)
+                this.timerSeconds = game.selection_remaining_seconds
+              }
+            }
+            const expectedTimerValue = this.game?.card_selection_timer || 30
+            if (this.timerInterval && this.timerSeconds === expectedTimerValue && this.timerSeconds > 0) {
+              console.warn('⚠️ Timer stuck at full duration — restarting from server/elapsed')
+              clearInterval(this.timerInterval)
+              this.timerInterval = null
+              if (typeof game.selection_remaining_seconds === 'number') {
+                this.startTimer({ serverRemainingSeconds: game.selection_remaining_seconds })
+              } else {
                 this.startTimer()
               }
             }
-            // Don't reset timer if it's already running - let it count down
           } else if (game.status === 'active' && !this.selectedCard) {
             console.log('🎮 Game is active but user has no card - clearing timer')
             // Game is active but user has no card - clear timer if running
@@ -601,7 +648,9 @@ export default {
       this.isRedirecting = true
       this.$router.push('/completed').catch(() => {})
     },
-    startTimer(forceFullRestart = false) {
+    startTimer(opts = {}) {
+      const forceFullRestart = opts === true || opts.forceFullRestart === true
+      const serverRemainingSeconds = typeof opts.serverRemainingSeconds === 'number' ? opts.serverRemainingSeconds : null
       // Only start timer if not already running
       if (this.timerInterval) {
         console.log('⏱️ Timer already running, skipping start. Current:', this.timerSeconds)
@@ -613,6 +662,9 @@ export default {
       if (forceFullRestart) {
         this.timerSeconds = timerValue
         console.log('⏱️ Timer restarted from full:', this.timerSeconds, 's (min players not reached)')
+      } else if (serverRemainingSeconds !== null) {
+        this.timerSeconds = Math.max(0, Math.floor(serverRemainingSeconds))
+        console.log('⏱️ Timer from server remaining:', this.timerSeconds, 's')
       } else if (this.game && this.game.created_at) {
         const gameCreatedAt = new Date(this.game.created_at)
         const now = new Date()
@@ -700,7 +752,7 @@ export default {
             // Timer hit 0 but game still waiting (e.g. 1 player) - restart timer from full
             if (!this.interval) this.startPolling()
             if (!this.timerInterval) {
-              this.startTimer(true) // forceFullRestart = true so countdown restarts from full
+              this.startTimer({ forceFullRestart: true })
             }
           }
         } catch (e) {
@@ -711,7 +763,7 @@ export default {
           } else {
             if (!this.interval) this.startPolling()
             if (this.game && this.game.status === 'waiting' && !this.timerInterval) {
-              this.startTimer(true)
+              this.startTimer({ forceFullRestart: true })
             }
           }
         }

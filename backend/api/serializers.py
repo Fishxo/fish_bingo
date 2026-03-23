@@ -37,13 +37,15 @@ class GameSerializer(serializers.ModelSerializer):
     total_cards = serializers.SerializerMethodField()
     card_selection_timer = serializers.SerializerMethodField()
     automatic_mode_enabled = serializers.SerializerMethodField()
+    selection_remaining_seconds = serializers.SerializerMethodField()
     
     class Meta:
         model = Game
         fields = [
             'id', 'status', 'derash_amount', 'bet_amount', 'current_call_count',
             'started_at', 'completed_at', 'winner', 'created_at', 'updated_at',
-            'gamecards', 'called_numbers', 'total_players', 'total_derash', 'total_cards', 'card_selection_timer', 'automatic_mode_enabled'
+            'gamecards', 'called_numbers', 'total_players', 'total_derash', 'total_cards',
+            'card_selection_timer', 'automatic_mode_enabled', 'selection_remaining_seconds',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
@@ -115,6 +117,20 @@ class GameSerializer(serializers.ModelSerializer):
         from .models import GameSettings
         settings = GameSettings.get_settings()
         return settings.card_selection_timer
+    
+    def get_selection_remaining_seconds(self, obj):
+        """
+        Server-computed seconds left in card selection (waiting games only).
+        Clients should prefer this over local created_at math to avoid drift and stale timers.
+        """
+        if obj.status != 'waiting' or not obj.created_at:
+            return None
+        from django.utils import timezone
+        from .models import GameSettings
+        settings = GameSettings.get_settings()
+        total = int(getattr(settings, 'card_selection_timer', 30) or 30)
+        elapsed = (timezone.now() - obj.created_at).total_seconds()
+        return max(0, int(total - elapsed))
     
     def get_automatic_mode_enabled(self, obj):
         """Get automatic_mode_enabled from GameSettings"""

@@ -809,27 +809,8 @@ def task_auto_call_numbers(self, game_id: int):
                 release_number_calling_lock(game_id)
                 return {'success': True, 'message': 'All numbers called', 'stopped': True}
             
-            # Pick a number - use safe selection if fake users are enabled and free_play is off
-            # Use cached settings from game start (prevents mid-game changes)
-            from .fake_user_manager import get_safe_number_to_call
-            called_numbers_set = set(called_numbers)
-            
-            # Get allow_system_account and free_play from cached settings
-            # These are cached at game start to prevent mid-game changes
-            allow_system_account = getattr(settings, 'allow_system_account', False)
-            free_play = getattr(settings, 'free_play', False)
-            
-            if allow_system_account and not free_play:
-                # Use safe number selection to ensure fake users can win
-                number = get_safe_number_to_call(game, called_numbers_set, free_play=False)
-                if number is None:
-                    # No safe number (every remaining number would let a real user win) - skip this round
-                    release_number_calling_lock(game_id)
-                    task_auto_call_numbers.apply_async(args=[game_id], countdown=time_between_calls)
-                    return {'success': True, 'skipped': True, 'reason': 'No safe number (skip real-user-winning numbers)'}
-            else:
-                # Free play or no fake users - use random selection
-                number = random.choice(remaining)
+            # Fair random call among remaining numbers (no "safe call" / fake-win biasing)
+            number = random.choice(remaining)
             
             # Call the number directly (we're already in a background task)
             # CRITICAL: We have the lock, so only one instance can call a number at a time
@@ -1155,8 +1136,6 @@ def task_call_first_number(self, game_id: int):
             return {'success': True, 'lock_held': True}
         
         try:
-            # Call first number - use normal number calling logic
-            from .fake_user_manager import get_safe_number_to_call
             import random
             
             available_numbers = list(range(1, 76))
@@ -2752,47 +2731,59 @@ def task_finalize_game(self, game_id: int):
     try:
         from .redis_utils import (
             get_game_live_state, get_called_numbers_list_from_redis,
-            cleanup_game_live_state
+            cleanup_game_live_state, get_bingo_winners, SYSTEM_WINNER_CARD_ID,
         )
         from .models import Game, GameCard, FakeUserGameCard, CalledNumber, Transaction
         from django.db import transaction
         from django.db.models import F
         from decimal import Decimal
         
-        # Get final state from Redis
+        # Redis live hash may be empty after a race or partial cleanup — still finalize using fallbacks
         state = get_game_live_state(game_id)
-        called_numbers = get_called_numbers_list_from_redis(game_id)
+        if not isinstance(state, dict):
+            state = {}
+        called_numbers = get_called_numbers_list_from_redis(game_id) or []
         
         logger.info(f"🏁 [FINALIZE] Game {game_id}: Redis state: {state}")
-        logger.info(f"🏁 [FINALIZE] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Called numbers count: {len(called_numbers)}")
         print(f"🏁 [FINALIZE] Game {game_id}: Redis state: {state}")
         print(f"🏁 [FINALIZE] Game {game_id}: Called numbers: {called_numbers}")
         
-        if not state:
-            logger.error(f"❌ [FINALIZE] Game {game_id}: Game state not found in Redis")
-            print(f"❌ [FINALIZE] Game {game_id}: Game state not found in Redis")
-            return {'error': 'Game state not found in Redis'}
+        winner_card_id = state.get('winner_card_id')
+        winner_user_id = state.get('winner_user_id')
         
-        # Get game from DB
+        if winner_card_id is None:
+            bw = get_bingo_winners(game_id)
+            if bw:
+                winner_card_id = bw[0].get('card_id')
+                winner_user_id = bw[0].get('user_id')
+                logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner from bingo_winners fallback: card={winner_card_id}, user={winner_user_id}")
+                print(f"🏁 [FINALIZE] Game {game_id}: Winner from bingo_winners fallback")
+        
         game = Game.objects.get(id=game_id)
-        logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, current status: {game.status}, derash_amount: {game.derash_amount}")
-        print(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, current status: {game.status}, derash_amount: {game.derash_amount}")
+        
+        if winner_card_id is None and game.winner_id:
+            wc = GameCard.objects.filter(game=game, user_id=game.winner_id).first()
+            if wc:
+                winner_card_id = wc.id
+                winner_user_id = game.winner_id
+                logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner from DB game.winner fallback: card={winner_card_id}, user={winner_user_id}")
+        
+        is_system_sentinel = winner_card_id == SYSTEM_WINNER_CARD_ID
+        
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, status: {game.status}, derash_amount: {game.derash_amount}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Loaded game from DB, status: {game.status}, derash_amount: {game.derash_amount}")
         
         # CRITICAL: Recalculate derash before finalization to ensure accurate prize calculation
-        # This ensures derash_amount is up-to-date with all cards (real + fake)
         logger.info(f"🏁 [FINALIZE] Game {game_id}: Recalculating derash before finalization")
         print(f"🏁 [FINALIZE] Game {game_id}: Recalculating derash - current derash_amount: {game.derash_amount}")
         game.recalculate_derash()
         game.refresh_from_db()
-        logger.info(f"🏁 [FINALIZE] Game {game_id}: Derash recalculated - new derash_amount: {game.derash_amount}, total_derash: {game.total_derash}")
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Derash recalculated - derash_amount: {game.derash_amount}, total_derash: {game.total_derash}")
         print(f"🏁 [FINALIZE] Game {game_id}: Derash recalculated - derash_amount: {game.derash_amount}, total_derash: {game.total_derash}")
         
-        # Get winner from Redis state
-        winner_card_id = state.get('winner_card_id')
-        winner_user_id = state.get('winner_user_id')
-        
-        logger.info(f"🏁 [FINALIZE] Game {game_id}: Winner from Redis - card_id={winner_card_id}, user_id={winner_user_id}")
-        print(f"🏁 [FINALIZE] Game {game_id}: Winner from Redis - card_id={winner_card_id}, user_id={winner_user_id}")
+        logger.info(f"🏁 [FINALIZE] Game {game_id}: Resolved winner card_id={winner_card_id}, user_id={winner_user_id}, system_sentinel={is_system_sentinel}")
+        print(f"🏁 [FINALIZE] Game {game_id}: Winner card_id={winner_card_id}, user_id={winner_user_id}, system_sentinel={is_system_sentinel}")
         
         # Write final state to DB
         with transaction.atomic():
@@ -2802,23 +2793,28 @@ def task_finalize_game(self, game_id: int):
             game.current_call_count = len(called_numbers)
             logger.info(f"🏁 [FINALIZE] Game {game_id}: Updating game status to 'completed', call_count={len(called_numbers)}")
             
-            if winner_card_id:
+            # Reset winner flags then set the actual winner (real prizes use is_winner=True)
+            GameCard.objects.filter(game=game).update(is_winner=False)
+            FakeUserGameCard.objects.filter(game=game).update(is_winner=False)
+            
+            if winner_card_id is not None and not is_system_sentinel:
                 # Check if real user or fake user
                 if winner_user_id:
                     # Real user winner
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Processing real user winner - card_id={winner_card_id}, user_id={winner_user_id}")
                     print(f"🏁 [FINALIZE] Game {game_id}: Processing real user winner")
-                    winner_card = GameCard.objects.get(id=winner_card_id)
+                    winner_card = GameCard.objects.get(id=winner_card_id, game=game)
                     game.winner = winner_card.user
                     game.winners.add(winner_card.user)
-                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Set winner in DB - user: {winner_card.user.username} (id: {winner_card.user.id})")
+                    GameCard.objects.filter(id=winner_card_id, game=game).update(is_winner=True)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Set winner in DB - user: {winner_card.user.username} (id: {winner_card.user.id}), is_winner=True on card")
                 else:
                     # Fake user winner
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Processing fake user winner - card_id={winner_card_id}")
                     print(f"🏁 [FINALIZE] Game {game_id}: Processing fake user winner")
-                    fake_card = FakeUserGameCard.objects.get(id=winner_card_id)
-                    # Fake users don't get prizes, but game still ends
-                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - no prize awarded")
+                    FakeUserGameCard.objects.get(id=winner_card_id, game=game)
+                    FakeUserGameCard.objects.filter(id=winner_card_id, game=game).update(is_winner=True)
+                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - no prize awarded, is_winner=True on fake card")
             
             game.save()
             logger.info(f"🏁 [FINALIZE] Game {game_id}: Game saved to DB")
@@ -2885,7 +2881,7 @@ def task_finalize_game(self, game_id: int):
         # CRITICAL: Broadcast winner_declared FIRST (frontend listens for this)
         # Get winner card data for broadcast (works for both real and fake users)
         winner_data = None
-        if winner_card_id:
+        if winner_card_id is not None and not is_system_sentinel:
             logger.info(f"🏁 [FINALIZE] Game {game_id}: Preparing winner data for broadcast")
             print(f"🏁 [FINALIZE] Game {game_id}: Preparing winner data for broadcast")
             try:

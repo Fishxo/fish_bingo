@@ -338,6 +338,12 @@ export async function rejectDeposit(depositId) {
   return response.data
 }
 
+/** Delete multiple pending deposit requests (same as reject/delete per row). */
+export async function bulkDeletePendingDeposits(ids) {
+  const response = await adminApi.post('/admin-dashboard/deposits/pending/bulk-delete/', { ids })
+  return response.data
+}
+
 export async function deleteFailedDeposit(failedId) {
   const response = await adminApi.post(`/admin-dashboard/failed-deposits/${failedId}/delete/`)
   return response.data
@@ -390,6 +396,12 @@ export async function rejectWithdraw(withdrawId) {
 export async function deleteWithdraw(withdrawId) {
   const id = parseInt(withdrawId, 10)
   const response = await api.post(`/admin-dashboard/withdraws/${id}/delete/`)
+  return response.data
+}
+
+/** Delete multiple pending withdraw requests (same as Delete per row; no user notification). */
+export async function bulkDeletePendingWithdraws(ids) {
+  const response = await api.post('/admin-dashboard/withdraws/pending/bulk-delete/', { ids })
   return response.data
 }
 

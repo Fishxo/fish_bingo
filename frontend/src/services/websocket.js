@@ -5,6 +5,7 @@ export class WebSocketService {
    */
   constructor(gameId, options = {}) {
     this.gameId = gameId
+    this._intentionalDisconnect = false
     this.role = options.role || null
     this.ws = null
     this.reconnectAttempts = 0
@@ -56,7 +57,10 @@ export class WebSocketService {
     this.ws.onclose = () => {
       console.log('WebSocket disconnected')
       this.emit('disconnected')
-      this.reconnect()
+      if (!this._intentionalDisconnect) {
+        this.reconnect()
+      }
+      this._intentionalDisconnect = false
     }
   }
 
@@ -146,6 +150,7 @@ export class WebSocketService {
 
   disconnect() {
     if (this.ws) {
+      this._intentionalDisconnect = true
       this.ws.close()
       this.ws = null
     }
