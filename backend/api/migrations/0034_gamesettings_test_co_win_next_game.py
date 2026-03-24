@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('api', '0032_win_stats_and_game_snapshot'),
+        ('api', '0033_alter_gamesettings_deposit_bonus_percent'),
     ]
 
     operations = [
