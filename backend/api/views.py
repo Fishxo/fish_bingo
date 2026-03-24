@@ -938,9 +938,18 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
         game = card.game
         game.refresh_from_db()
         from .redis_utils import get_called_numbers_from_redis
-        called_set = get_called_numbers_from_redis(game.id) or set()
-        db_numbers = set(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
-        called_set = called_set | db_numbers
+
+        def _called_union():
+            s = get_called_numbers_from_redis(game.id) or set()
+            s |= set(CalledNumber.objects.filter(game=game).values_list("number", flat=True))
+            return s
+
+        called_set = _called_union()
+        # Brief retry: another worker may have just written Redis before DB; avoids false "not called yet".
+        if number not in called_set:
+            import time
+            time.sleep(0.08)
+            called_set = _called_union()
         if number not in called_set:
             return Response(
                 {'error': 'ይህ ቁጥር እስካሁን አልተጠራም'},

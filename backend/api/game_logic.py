@@ -227,8 +227,10 @@ def mark_number_on_card(card: GameCard, number: int) -> bool:
         card.save(update_fields=['card_layout', 'selected_numbers'])
         
         # PHASE 3 OPTIMIZATION: Update Redis tracking for faster bingo checking
-        from .redis_utils import mark_number_on_card_redis
+        # Keep legacy key + live game-scoped key in sync so Celery and claims agree.
+        from .redis_utils import mark_number_on_card_redis, mark_number_on_card_live
         mark_number_on_card_redis(card.id, number)
+        mark_number_on_card_live(card.game_id, card.id, number)
         
         # Invalidate card cache when card is updated
         cache.delete(f'card:{card.game.id}:{card.user.id}')
@@ -238,84 +240,80 @@ def mark_number_on_card(card: GameCard, number: int) -> bool:
     return False
 
 
-def check_bingo(card: GameCard, game: Game) -> Tuple[bool, str]:
-    """Check if a card has a winning BINGO pattern. Returns (has_bingo, pattern_type)
-    
-    Optimized: Early exit for cards with < 5 marked numbers. No database queries needed.
-    Pattern checking only uses card layout (already in memory).
-    Only checks patterns enabled in game settings.
+def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) -> Tuple[bool, Optional[str]]:
     """
-    # Early exit optimization: if card has less than 5 numbers marked, it can't have bingo
-    # Minimum bingo requires 5 numbers in a line (row, column, or diagonal)
-    if len(card.selected_numbers) < 5:
+    Check if a card has bingo using a set of marked cell numbers (ints).
+    Same algorithm as Celery task_check_bingo_for_number — single source of truth.
+    FREE space is always treated as marked.
+    """
+    if not layout or not marked_numbers or len(marked_numbers) < 5:
         return (False, None)
-    
-    # Check if card has winning pattern (no DB query needed - uses card layout in memory)
+
+    from .models import GameSettings
+    settings = GameSettings.get_settings(game_id=game_id)
+    enabled_patterns = getattr(settings, "winning_patterns", [])
+    if not enabled_patterns:
+        enabled_patterns = ["horizontal", "vertical", "diagonal", "corner", "full_card"]
+    enabled_patterns_set = set(enabled_patterns)
+
+    def is_marked(cell):
+        if cell.get("letter") == "FREE":
+            return True
+        cell_number = cell.get("number")
+        if cell_number is None:
+            return False
+        try:
+            return int(cell_number) in marked_numbers
+        except (ValueError, TypeError):
+            return False
+
+    only_full_card = enabled_patterns_set == {"full_card"}
+
+    if not only_full_card and "horizontal" in enabled_patterns_set:
+        for row_idx, row in enumerate(layout):
+            if all(is_marked(cell) for cell in row):
+                return (True, f"row_{row_idx}")
+
+    if not only_full_card and "vertical" in enabled_patterns_set:
+        for col_idx in range(5):
+            if all(is_marked(layout[row_idx][col_idx]) for row_idx in range(5)):
+                return (True, f"col_{col_idx}")
+
+    if not only_full_card and "diagonal" in enabled_patterns_set:
+        if all(is_marked(layout[i][i]) for i in range(5)):
+            return (True, "diagonal_1")
+        if all(is_marked(layout[i][4 - i]) for i in range(5)):
+            return (True, "diagonal_2")
+
+    if not only_full_card and "corner" in enabled_patterns_set:
+        corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
+        if all(is_marked(cell) for cell in corners):
+            return (True, "corner")
+
+    if "full_card" in enabled_patterns_set:
+        if all(is_marked(cell) for row in layout for cell in row):
+            return (True, "full_card")
+
+    return (False, None)
+
+
+def check_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
+    """Check if a card has a winning BINGO using effective marks (Redis + DB), not layout flags alone."""
+    from .redis_utils import get_effective_marked_numbers_for_card
+
+    if not game:
+        return (False, None)
     layout = card.card_layout
     if not layout:
         return (False, None)
-    
-    # Get enabled winning patterns from settings
-    from .models import GameSettings
-    settings = GameSettings.get_settings(game_id=game.id if game else None)
-    enabled_patterns = getattr(settings, 'winning_patterns', [])
-    
-    # If no patterns specified, default to all patterns (backward compatibility)
-    if not enabled_patterns:
-        enabled_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
-    
-    # Convert to set for faster lookup
-    enabled_patterns_set = set(enabled_patterns)
-    
-    # Helper function to check if a cell is marked (including FREE space)
-    def is_cell_marked(cell):
-        if cell.get('letter') == 'FREE':
-            return True  # FREE is always considered marked
-        return cell.get('marked', False)
-    
-    # IMPORTANT: If only 'full_card' is enabled, skip all other pattern checks
-    # This ensures full_card only wins when ALL cells are marked, not when other patterns are complete
-    only_full_card = enabled_patterns_set == {'full_card'}
-    
-    # Check horizontal lines (any row) - skip if only full_card is enabled
-    if not only_full_card and 'horizontal' in enabled_patterns_set:
-        for row_idx, row in enumerate(layout):
-            if all(is_cell_marked(cell) for cell in row):
-                return (True, f'row_{row_idx}')
-    
-    # Check vertical lines (any column) - skip if only full_card is enabled
-    if not only_full_card and 'vertical' in enabled_patterns_set:
-        for col_idx in range(5):
-            if all(is_cell_marked(layout[row_idx][col_idx]) for row_idx in range(5)):
-                return (True, f'col_{col_idx}')
-    
-    # Check diagonal (top-left to bottom-right) - skip if only full_card is enabled
-    if not only_full_card and 'diagonal' in enabled_patterns_set:
-        if all(is_cell_marked(layout[i][i]) for i in range(5)):
-            return (True, 'diagonal_1')
-        
-        # Check diagonal (top-right to bottom-left)
-        if all(is_cell_marked(layout[i][4-i]) for i in range(5)):
-            return (True, 'diagonal_2')
-    
-    # Check corner bingo (4 corners + FREE cell) - skip if only full_card is enabled
-    if not only_full_card and 'corner' in enabled_patterns_set:
-        corners = [
-            layout[0][0],  # Top-left
-            layout[0][4],  # Top-right
-            layout[4][0],  # Bottom-left
-            layout[4][4],  # Bottom-right
-            layout[2][2]   # FREE cell (center) - included for visual appeal
-        ]
-        if all(is_cell_marked(cell) for cell in corners):
-            return (True, 'corner')
-    
-    # Check full card - ONLY wins if ALL cells are marked
-    if 'full_card' in enabled_patterns_set:
-        if all(is_cell_marked(cell) for row in layout for cell in row):
-            return (True, 'full_card')
-    
-    return (False, None)
+
+    marked_numbers = get_effective_marked_numbers_for_card(
+        game.id, card.id, card.card_layout, card.selected_numbers
+    )
+    if len(marked_numbers) < 5:
+        return (False, None)
+
+    return check_bingo_from_marked(layout, marked_numbers, game.id)
 
 
 def get_winning_number(card: GameCard, winning_pattern: str, called_numbers: list) -> Optional[int]:
@@ -405,7 +403,7 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
     - Ends game and broadcasts winner (single authority)
     """
     from .models import GameSettings, GameCard, FakeUserGameCard
-    from .redis_utils import get_called_numbers_from_redis
+    from .redis_utils import get_called_numbers_from_redis, get_effective_marked_numbers_for_card
     
     # CRITICAL: Acquire Redis lock for atomic bingo claim
     # This ensures only ONE claim is processed at a time across all machines
@@ -455,25 +453,19 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         
         # Validate that all marked numbers on card were actually called
         if is_fake_user:
-            # For fake users, check selected_numbers against called_numbers
-            marked_numbers = set(card.selected_numbers or [])
-            if not marked_numbers.issubset(called_set):
+            effective_marked = get_effective_marked_numbers_for_card(
+                game.id, card.id, card.card_layout, card.selected_numbers
+            )
+            if not effective_marked.issubset(called_set):
                 return (False, None, "አንዳንድ ቁጥሮች አልተጠራትም")
-            
-            # Check bingo using fake user bingo checker
             from .fake_user_manager import check_fake_user_bingo
             has_bingo, winning_pattern = check_fake_user_bingo(card, called_set, game)
         else:
-            # For real users, validate card layout
-            layout = card.card_layout
-            if layout:
-                for row in layout:
-                    for cell in row:
-                        if cell.get('marked', False) and cell.get('number') is not None:
-                            if cell['number'] not in called_set:
-                                return (False, None, "ይህ ቁጥር አልተጠራም")
-            
-            # Check bingo using real user bingo checker
+            effective_marked = get_effective_marked_numbers_for_card(
+                game.id, card.id, card.card_layout, card.selected_numbers
+            )
+            if not effective_marked.issubset(called_set):
+                return (False, None, "ይህ ቁጥር አልተጠራም")
             has_bingo, winning_pattern = check_bingo(card, game)
         
         if not has_bingo:

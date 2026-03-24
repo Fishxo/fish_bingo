@@ -1344,6 +1344,45 @@ def get_card_marked_numbers_live(game_id: int, card_id: int) -> set:
         return set()
 
 
+def get_effective_marked_numbers_for_card(
+    game_id: int,
+    card_id: int,
+    card_layout=None,
+    selected_numbers=None,
+) -> set:
+    """
+    Single source of truth for "which numbers are marked" on a card.
+
+    Unions:
+    - Live gameplay Redis (auto marks from Celery)
+    - Legacy per-card Redis (older mark_number_on_card_redis path)
+    - DB card_layout cells with marked=True
+    - selected_numbers from the GameCard / FakeUserGameCard model
+
+    Use this for bingo validation, claims, and Celery checks so manual vs automatic
+    mode and Redis/DB never disagree.
+    """
+    live = get_card_marked_numbers_live(game_id, card_id)
+    legacy = get_card_marked_numbers_redis(card_id)
+    out = set(live) | set(legacy)
+    if selected_numbers:
+        for x in selected_numbers:
+            try:
+                if x is not None:
+                    out.add(int(x))
+            except (TypeError, ValueError):
+                pass
+    if card_layout:
+        for row in card_layout:
+            for cell in row:
+                if cell.get("marked") and cell.get("number") is not None:
+                    try:
+                        out.add(int(cell["number"]))
+                    except (TypeError, ValueError):
+                        pass
+    return out
+
+
 # =============================================================================
 # SYSTEM PLAYERS (Redis-only, no DB – see docs/ARCHITECTURE.md)
 # =============================================================================

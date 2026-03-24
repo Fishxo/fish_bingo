@@ -4,7 +4,14 @@ Celery background tasks for Bingo game operations
 from celery import shared_task
 from django.utils import timezone
 from .models import Game, GameCard, CalledNumber, User, FakeUserGameCard
-from .game_logic import call_number, check_bingo, claim_bingo, generate_bingo_card, create_game_card
+from .game_logic import (
+    call_number,
+    check_bingo,
+    claim_bingo,
+    generate_bingo_card,
+    create_game_card,
+    check_bingo_from_marked,
+)
 from .channels import broadcast_to_game_rooms
 from .redis_utils import batch_broadcast_to_game
 from decimal import Decimal
@@ -2485,8 +2492,10 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
     
     try:
         from .redis_utils import (
-            get_game_live_state, get_card_marked_numbers_live,
-            set_game_winner, get_called_numbers_from_redis
+            get_game_live_state,
+            get_effective_marked_numbers_for_card,
+            set_game_winner,
+            get_called_numbers_from_redis,
         )
         from .models import GameCard, FakeUserGameCard
         
@@ -2515,8 +2524,9 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
         # Check each card for bingo (using Redis marked numbers)
         checked_count = 0
         for card in real_cards:
-            # Get marked numbers from Redis
-            marked = get_card_marked_numbers_live(game_id, card.id)
+            marked = get_effective_marked_numbers_for_card(
+                game_id, card.id, card.card_layout, card.selected_numbers
+            )
             logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} has {len(marked) if marked else 0} marked numbers")
             
             # Only check if card has this number marked
@@ -2534,7 +2544,7 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
                 continue
             
             # Check bingo patterns (pass game_id to check enabled patterns)
-            has_bingo, pattern = _check_bingo_from_marked(card.card_layout, marked, game_id)
+            has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
             logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check result: has_bingo={has_bingo}, pattern={pattern}")
             print(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}")
             
@@ -2579,8 +2589,9 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
         logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Converted {len(fake_cards_list)} fake cards to list for iteration")
         
         for idx, card in enumerate(fake_cards_list):
-            # Get marked numbers from Redis
-            marked = get_card_marked_numbers_live(game_id, card.id)
+            marked = get_effective_marked_numbers_for_card(
+                game_id, card.id, card.card_layout, card.selected_numbers
+            )
             marked_count = len(marked) if marked else 0
             logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} ({idx+1}/{len(fake_cards_list)}) has {marked_count} marked numbers")
             
@@ -2604,7 +2615,7 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
                 logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} layout first row numbers: {first_row_numbers}")
             
             # Check bingo patterns (pass game_id to check enabled patterns)
-            has_bingo, pattern = _check_bingo_from_marked(card.card_layout, marked, game_id)
+            has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
             logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}, marked_count={marked_count}, marked={sorted(marked) if marked else 'empty'}")
             print(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo: has_bingo={has_bingo}, pattern={pattern}, marked={len(marked)} numbers")
             
@@ -2640,79 +2651,6 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
         import traceback
         traceback.print_exc()
         return {'error': str(e)}
-
-
-def _check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) -> tuple:
-    """
-    Check if card has bingo using marked numbers set.
-    Returns (has_bingo: bool, pattern: str or None)
-    
-    CRITICAL: Checks only enabled patterns from GameSettings.
-    """
-    if not layout or len(marked_numbers) < 5:
-        return (False, None)
-    
-    # Get enabled winning patterns from settings
-    from .models import GameSettings
-    settings = GameSettings.get_settings(game_id=game_id)
-    enabled_patterns = getattr(settings, 'winning_patterns', [])
-    
-    # If no patterns specified, default to all patterns (backward compatibility)
-    if not enabled_patterns:
-        enabled_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
-    
-    enabled_patterns_set = set(enabled_patterns)
-    
-    # Helper to check if cell is marked
-    def is_marked(cell):
-        if cell.get('letter') == 'FREE':
-            return True
-        # CRITICAL FIX: Ensure number comparison works (handle both int and str)
-        cell_number = cell.get('number')
-        if cell_number is None:
-            return False
-        # Convert to int for comparison (marked_numbers is set of ints)
-        try:
-            cell_number_int = int(cell_number)
-            return cell_number_int in marked_numbers
-        except (ValueError, TypeError):
-            return False
-    
-    # IMPORTANT: If only 'full_card' is enabled, skip all other pattern checks
-    only_full_card = enabled_patterns_set == {'full_card'}
-    
-    # Check horizontal lines (any row) - skip if only full_card is enabled
-    if not only_full_card and 'horizontal' in enabled_patterns_set:
-        for row_idx, row in enumerate(layout):
-            if all(is_marked(cell) for cell in row):
-                return (True, f'row_{row_idx}')
-    
-    # Check vertical lines (any column) - skip if only full_card is enabled
-    if not only_full_card and 'vertical' in enabled_patterns_set:
-        for col_idx in range(5):
-            if all(is_marked(layout[row_idx][col_idx]) for row_idx in range(5)):
-                return (True, f'col_{col_idx}')
-    
-    # Check diagonal (top-left to bottom-right) - skip if only full_card is enabled
-    if not only_full_card and 'diagonal' in enabled_patterns_set:
-        if all(is_marked(layout[i][i]) for i in range(5)):
-            return (True, 'diagonal_1')
-        # Check diagonal (top-right to bottom-left)
-        if all(is_marked(layout[i][4-i]) for i in range(5)):
-            return (True, 'diagonal_2')
-    
-    # Check corner bingo (4 corners + FREE cell) - skip if only full_card is enabled
-    if not only_full_card and 'corner' in enabled_patterns_set:
-        corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
-        if all(is_marked(cell) for cell in corners):
-            return (True, 'corner')
-    
-    # Check full card - ONLY wins if ALL cells are marked
-    if 'full_card' in enabled_patterns_set:
-        if all(is_marked(cell) for row in layout for cell in row):
-            return (True, 'full_card')
-    
-    return (False, None)
 
 
 @shared_task(bind=True, max_retries=2, queue='gameplay')
@@ -2899,10 +2837,11 @@ def task_finalize_game(self, game_id: int):
                     called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Got {len(called_numbers_list)} called numbers from DB")
                     
-                    # Check bingo pattern using Redis marked numbers
-                    from .redis_utils import get_card_marked_numbers_live
-                    marked = get_card_marked_numbers_live(game_id, fake_card.id)
-                    has_bingo, pattern = _check_bingo_from_marked(fake_card.card_layout, marked, game_id)
+                    from .redis_utils import get_effective_marked_numbers_for_card
+                    marked = get_effective_marked_numbers_for_card(
+                        game_id, fake_card.id, fake_card.card_layout, fake_card.selected_numbers
+                    )
+                    has_bingo, pattern = check_bingo_from_marked(fake_card.card_layout, marked, game_id)
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake card bingo check - has_bingo={has_bingo}, pattern={pattern}")
                     
                     # Calculate prize (fake users don't get prizes, but show total prize for display)

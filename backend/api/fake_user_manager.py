@@ -256,14 +256,25 @@ def _check_bingo_layout_patterns(layout: list, marked_numbers: set, game_id: int
 def check_fake_user_bingo(card: FakeUserGameCard, called_numbers: set, game=None) -> tuple:
     """
     Check if a fake user card has a winning BINGO pattern (DB fake card).
+    Uses effective marks (Redis live + layout + selected_numbers), not the full
+    called_numbers set as marks — the latter was incorrect and could skew results.
     Returns (has_bingo, pattern_type).
     """
-    if len(card.selected_numbers) < 5:
+    from .redis_utils import get_effective_marked_numbers_for_card
+
+    if not game:
         return (False, None)
     layout = card.card_layout
     if not layout:
         return (False, None)
-    return _check_bingo_layout_patterns(layout, called_numbers, game.id if game else None)
+    marked = get_effective_marked_numbers_for_card(
+        game.id, card.id, card.card_layout, card.selected_numbers
+    )
+    if len(marked) < 5:
+        return (False, None)
+    if not marked.issubset(called_numbers):
+        return (False, None)
+    return _check_bingo_layout_patterns(layout, marked, game.id)
 
 
 def check_system_player_bingo(layout: list, marked_numbers: set, game_id: int) -> tuple:
