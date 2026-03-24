@@ -246,7 +246,9 @@ def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) ->
     Same algorithm as Celery task_check_bingo_for_number — single source of truth.
     FREE space is always treated as marked.
     """
-    if not layout or not marked_numbers or len(marked_numbers) < 5:
+    # Minimum real-number marks can be 4 because FREE participates in center row/col,
+    # both diagonals, and corner pattern.
+    if not layout or not marked_numbers or len(marked_numbers) < 4:
         return (False, None)
 
     from .models import GameSettings
@@ -310,7 +312,8 @@ def check_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
     marked_numbers = get_effective_marked_numbers_for_card(
         game.id, card.id, card.card_layout, card.selected_numbers
     )
-    if len(marked_numbers) < 5:
+    # Keep consistent with check_bingo_from_marked (FREE can reduce required marks to 4).
+    if len(marked_numbers) < 4:
         return (False, None)
 
     return check_bingo_from_marked(layout, marked_numbers, game.id)
@@ -445,9 +448,13 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         # Get called numbers: union Redis + DB so co-winner can claim after fake winner
         # (finalize may have cleared Redis and persisted to DB only).
         from .models import CalledNumber
-        called_set = get_called_numbers_from_redis(game.id) or set()
-        db_called = set(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
-        called_set = called_set | db_called
+
+        def _called_union() -> set:
+            redis_called = get_called_numbers_from_redis(game.id) or set()
+            db_called_local = set(CalledNumber.objects.filter(game=game).values_list('number', flat=True))
+            return redis_called | db_called_local
+
+        called_set = _called_union()
         if not called_set:
             return (False, None, "እስካሁን ምንም ቁጥር አልተጠራም")
         
@@ -457,7 +464,12 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                 game.id, card.id, card.card_layout, card.selected_numbers
             )
             if not effective_marked.issubset(called_set):
-                return (False, None, "አንዳንድ ቁጥሮች አልተጠራትም")
+                # Small retry for Redis/DB visibility race around the latest called number.
+                import time
+                time.sleep(0.08)
+                called_set = _called_union()
+                if not effective_marked.issubset(called_set):
+                    return (False, None, "አንዳንድ ቁጥሮች አልተጠራትም")
             from .fake_user_manager import check_fake_user_bingo
             has_bingo, winning_pattern = check_fake_user_bingo(card, called_set, game)
         else:
@@ -465,11 +477,29 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
                 game.id, card.id, card.card_layout, card.selected_numbers
             )
             if not effective_marked.issubset(called_set):
-                return (False, None, "ይህ ቁጥር አልተጠራም")
+                # Small retry for Redis/DB visibility race around the latest called number.
+                import time
+                time.sleep(0.08)
+                called_set = _called_union()
+                if not effective_marked.issubset(called_set):
+                    return (False, None, "ይህ ቁጥር አልተጠራም")
             has_bingo, winning_pattern = check_bingo(card, game)
         
         if not has_bingo:
-            return (False, None, "ቢንጎ አልሰሩም")
+            # Retry once for mark/claim race: user may press Bingo immediately after
+            # tapping the last number while mark save is still in-flight.
+            import time
+            time.sleep(0.12)
+            if is_fake_user:
+                card = FakeUserGameCard.objects.select_related('fake_user').get(id=card.id)
+                called_set = _called_union()
+                from .fake_user_manager import check_fake_user_bingo
+                has_bingo, winning_pattern = check_fake_user_bingo(card, called_set, game)
+            else:
+                card = GameCard.objects.select_related('user').get(id=card.id)
+                has_bingo, winning_pattern = check_bingo(card, game)
+            if not has_bingo:
+                return (False, None, "ቢንጎ አልሰሩም")
         
         # CRITICAL: Check free_play setting for priority logic
         # If free_play is OFF and this is a fake user, check if any real user has bingo

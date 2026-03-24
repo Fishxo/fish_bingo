@@ -214,7 +214,9 @@ def _check_bingo_layout_patterns(layout: list, marked_numbers: set, game_id: int
     Check if a card layout has a winning BINGO pattern given marked numbers.
     Returns (has_bingo, pattern_type). Used for both DB fake cards and Redis-only system players.
     """
-    if not layout or len(marked_numbers) < 5:
+    # Minimum real-number marks can be 4 because FREE cell can complete
+    # center row/col, diagonals, and corner pattern.
+    if not layout or len(marked_numbers) < 4:
         return (False, None)
     from .models import GameSettings
     settings = GameSettings.get_settings(game_id=game_id)
@@ -270,7 +272,7 @@ def check_fake_user_bingo(card: FakeUserGameCard, called_numbers: set, game=None
     marked = get_effective_marked_numbers_for_card(
         game.id, card.id, card.card_layout, card.selected_numbers
     )
-    if len(marked) < 5:
+    if len(marked) < 4:
         return (False, None)
     if not marked.issubset(called_numbers):
         return (False, None)

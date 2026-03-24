@@ -1070,8 +1070,15 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             success, winning_pattern = claim_bingo(card, game)
         except ValueError as e:
+            message = str(e)
+            # Normalize "no bingo" responses so frontend can apply false-claim policy consistently.
+            if "ቢንጎ አልሰሩም" in message:
+                return Response(
+                    {'error': message, 'false_claim': True},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             return Response(
-                {'error': str(e)},
+                {'error': message},
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
