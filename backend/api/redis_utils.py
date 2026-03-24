@@ -359,6 +359,10 @@ def cleanup_game_redis_keys(game_id):
             get_number_calling_lock_key(game_id),
             get_called_numbers_key(game_id),
             get_game_state_key(game_id),
+            get_test_co_win_queue_key(game_id),
+            get_test_co_win_completing_key(game_id),
+            get_test_co_win_fake_card_key(game_id),
+            get_test_co_win_active_key(game_id),
         ]
         for key in keys_to_delete:
             r.delete(key)
@@ -376,6 +380,51 @@ def get_test_co_win_completing_key(game_id: int) -> str:
 
 def get_test_co_win_fake_card_key(game_id: int) -> str:
     return f"game:{game_id}:test_fake_card_id"
+
+
+def get_test_co_win_active_key(game_id: int) -> str:
+    """Celery workers must read test mode from Redis (Django cache is often not shared with Celery)."""
+    return f"game:{game_id}:test_co_win_active"
+
+
+def set_test_co_win_active_redis(game_id: int, active: bool) -> None:
+    r = get_redis_client()
+    if not r:
+        return
+    try:
+        k = get_test_co_win_active_key(game_id)
+        if active:
+            r.set(k, "1", ex=3600)
+        else:
+            r.delete(k)
+    except Exception as e:
+        print(f"set_test_co_win_active_redis error: {e}")
+
+
+def is_test_co_win_active_redis(game_id: int) -> bool:
+    r = get_redis_client()
+    if not r:
+        return False
+    try:
+        v = r.get(get_test_co_win_active_key(game_id))
+        if v is None:
+            return False
+        s = v.decode() if isinstance(v, bytes) else str(v)
+        return s == "1"
+    except Exception as e:
+        print(f"is_test_co_win_active_redis error: {e}")
+        return False
+
+
+def test_co_win_queue_length(game_id: int) -> int:
+    r = get_redis_client()
+    if not r:
+        return 0
+    try:
+        return int(r.llen(get_test_co_win_queue_key(game_id)) or 0)
+    except Exception as e:
+        print(f"test_co_win_queue_length error: {e}")
+        return 0
 
 
 def test_co_win_push_queue(game_id: int, sequence: list) -> bool:
@@ -1623,6 +1672,9 @@ def cleanup_game_live_state(game_id: int):
         ]
         
         # Delete specific keys
+        # Do NOT delete test co-win keys here: start_game() may have just written the
+        # predetermined call queue; views.py calls cleanup_game_live_state immediately after.
+        # Those keys are removed in cleanup_game_redis_keys when the game ends.
         specific_keys = [
             f"game:{game_id}:live",
             f"game:{game_id}:called_numbers",
@@ -1631,9 +1683,6 @@ def cleanup_game_live_state(game_id: int):
             f"game:{game_id}:bingo_window",
             f"game:{game_id}:bingo_winners",
             f"game:{game_id}:bingo_claim_lock",
-            get_test_co_win_queue_key(game_id),
-            get_test_co_win_completing_key(game_id),
-            get_test_co_win_fake_card_key(game_id),
         ]
         
         # Delete specific keys

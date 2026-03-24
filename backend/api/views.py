@@ -492,6 +492,14 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 from datetime import timedelta
                 elapsed_time = timezone.now() - game.created_at
                 timer_seconds = getattr(settings, 'card_selection_timer', 30)
+                remaining_sec = timer_seconds - elapsed_time.total_seconds()
+                # Test co-win: ~10s left — build predetermined call sequence (cards should be ready)
+                if 0 < remaining_sec <= 10:
+                    try:
+                        from .game_logic import maybe_prepare_test_co_win_when_waiting
+                        maybe_prepare_test_co_win_when_waiting(game, settings)
+                    except Exception as e:
+                        print(f"maybe_prepare_test_co_win_when_waiting: {e}")
                 
                 # Start immediately when timer elapses (no grace period needed)
                 # State transitions are handled atomically with locks

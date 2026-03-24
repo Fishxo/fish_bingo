@@ -333,7 +333,8 @@ def task_process_bingo_winners(self, game_id: int):
         all_winner_count = len(real_winner_cards) + len(fake_winner_cards)
         
         gs_cache = cache.get(f'game:{game_id}:settings') or {}
-        test_co_win_mode = bool(gs_cache.get('test_co_win_mode'))
+        from .redis_utils import is_test_co_win_active_redis
+        test_co_win_mode = bool(gs_cache.get('test_co_win_mode')) or is_test_co_win_active_redis(game_id)
         
         # CRITICAL FIX: Split prize by ALL winners (real + fake) to make it look realistic
         # Real players see 3 winners announced, so prize should be split 3 ways
@@ -2224,10 +2225,10 @@ def task_test_co_win_fake_claim(self, game_id: int):
     logger = logging.getLogger(__name__)
     try:
         from django.core.cache import cache
-        from .redis_utils import get_test_co_win_fake_card_id
+        from .redis_utils import get_test_co_win_fake_card_id, is_test_co_win_active_redis
         from .game_logic import claim_bingo_unified
         gs = cache.get(f'game:{game_id}:settings') or {}
-        if not gs.get('test_co_win_mode'):
+        if not gs.get('test_co_win_mode') and not is_test_co_win_active_redis(game_id):
             return {'skipped': True}
         fc_id = get_test_co_win_fake_card_id(game_id)
         if not fc_id:
@@ -2379,8 +2380,9 @@ def task_call_next_number(self, game_id: int):
             task_check_all_numbers_called.apply_async(args=[game_id], countdown=5)
             return {'stopped': True, 'reason': 'No available numbers'}
         
+        from .redis_utils import is_test_co_win_active_redis
         gs = cache.get(f'game:{game_id}:settings') or {}
-        test_mode = bool(gs.get('test_co_win_mode'))
+        test_mode = bool(gs.get('test_co_win_mode')) or is_test_co_win_active_redis(game_id)
         if test_mode:
             from .redis_utils import test_co_win_pop_next_call_number
             queued = test_co_win_pop_next_call_number(game_id)
@@ -2577,9 +2579,9 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
             print(f"⚠️ [BINGO CHECK] Game {game_id}: Already has winner, skipping")
             return {'skipped': True, 'reason': 'Game already has winner'}
         
-        from .redis_utils import get_test_co_win_completing_number
+        from .redis_utils import get_test_co_win_completing_number, is_test_co_win_active_redis
         gs = cache.get(f'game:{game_id}:settings') or {}
-        if gs.get('test_co_win_mode'):
+        if gs.get('test_co_win_mode') or is_test_co_win_active_redis(game_id):
             comp = get_test_co_win_completing_number(game_id)
             if comp is not None and number == comp:
                 print(f"🔍 [BINGO CHECK] Game {game_id}: test co-win completion number {number} — skip auto winner (claim flow)")

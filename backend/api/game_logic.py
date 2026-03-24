@@ -569,6 +569,71 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
         release_bingo_claim_lock(game.id)
 
 
+def prepare_test_co_win_sequence_for_game(game: Game, armed: bool) -> bool:
+    """
+    Build predetermined call order in Redis (shared last number for 1 real + 1 fake).
+    Idempotent: if queue already exists (e.g. prepared at T-10s), only refreshes Redis active flag.
+    """
+    if not armed:
+        return False
+    from .models import GameSettings, FakeUserGameCard
+    from .redis_utils import (
+        test_co_win_queue_length,
+        test_co_win_push_queue,
+        set_test_co_win_completing_number,
+        set_test_co_win_fake_card_id,
+        set_test_co_win_active_redis,
+    )
+    from .test_co_win_sequence import build_test_co_win_sequence
+    settings = GameSettings.get_settings()
+    allow_system_account = settings.allow_system_account
+    if test_co_win_queue_length(game.id) > 0:
+        set_test_co_win_active_redis(game.id, True)
+        return True
+    real_n = game.gamecards.count()
+    try:
+        from .fake_user_manager import get_fake_user_count_for_game
+        fake_n = get_fake_user_count_for_game(game) if allow_system_account else 0
+    except Exception:
+        fake_n = 0
+    wp = getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card'])
+    if not allow_system_account or real_n != 1 or fake_n != 1:
+        return False
+    rc = game.gamecards.first()
+    fc = FakeUserGameCard.objects.filter(game=game).first()
+    if not rc or not fc or not rc.card_layout or not fc.card_layout:
+        return False
+    seq = build_test_co_win_sequence(rc.card_layout, fc.card_layout, wp, game.id)
+    if not seq:
+        print(f"prepare_test_co_win_sequence_for_game: game {game.id} no valid sequence for layouts/patterns")
+        return False
+    if not test_co_win_push_queue(game.id, seq):
+        return False
+    set_test_co_win_completing_number(game.id, seq[-1])
+    set_test_co_win_fake_card_id(game.id, fc.id)
+    set_test_co_win_active_redis(game.id, True)
+    print(f"prepare_test_co_win_sequence_for_game: game {game.id} len={len(seq)} last={seq[-1]}")
+    return True
+
+
+def maybe_prepare_test_co_win_when_waiting(game: Game, settings) -> None:
+    """
+    When ~10s remain on card selection, scan real/fake cards and build the call sequence early.
+    Throttled so we retry if players finish picking cards late.
+    """
+    from django.core.cache import cache
+    if not settings:
+        return
+    if not getattr(settings, 'test_co_win_next_game', False):
+        return
+    throttle_key = f"game:{game.id}:test_co_win_prep_throttle"
+    if cache.get(throttle_key):
+        return
+    cache.set(throttle_key, 1, 2)
+    if prepare_test_co_win_sequence_for_game(game, armed=True):
+        cache.set(f"game:{game.id}:test_co_win_prep_sent", 1, timeout=120)
+
+
 def start_game(game: Game) -> bool:
     """Start a game - requires at least 2 total players (real + fake)
     Also caches game settings to prevent mid-game changes
@@ -831,44 +896,20 @@ def start_game(game: Game) -> bool:
     
     # Test co-win QA: one-shot DB flag; predetermined calls; fake auto-claims on last number (needs 1 real + 1 fake)
     if test_co_win_armed:
-        from .models import GameSettings as GSModel, FakeUserGameCard
-        from .redis_utils import (
-            test_co_win_push_queue,
-            set_test_co_win_completing_number,
-            set_test_co_win_fake_card_id,
-        )
-        from .test_co_win_sequence import build_test_co_win_sequence
+        from .models import GameSettings as GSModel
         gs_row = GSModel.objects.get(pk=1)
         gs_row.test_co_win_next_game = False
         gs_row.save(update_fields=['test_co_win_next_game'])
         cache.delete('game_settings')
         game.refresh_from_db()
-        real_n = game.gamecards.count()
-        try:
-            from .fake_user_manager import get_fake_user_count_for_game as _gffc
-            fake_n = _gffc(game) if allow_system_account else 0
-        except Exception:
-            fake_n = 0
-        wp = getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card'])
-        if allow_system_account and real_n == 1 and fake_n == 1:
-            rc = game.gamecards.first()
-            fc = FakeUserGameCard.objects.filter(game=game).first()
-            if rc and fc and rc.card_layout and fc.card_layout:
-                seq = build_test_co_win_sequence(rc.card_layout, fc.card_layout, wp, game.id)
-                if seq:
-                    test_co_win_push_queue(game.id, seq)
-                    set_test_co_win_completing_number(game.id, seq[-1])
-                    set_test_co_win_fake_card_id(game.id, fc.id)
-                    gs_cache = cache.get(game_settings_cache_key) or {}
-                    gs_cache['test_co_win_mode'] = True
-                    cache.set(game_settings_cache_key, gs_cache, 3600)
-                    print(f"Game {game.id}: test_co_win_mode active, sequence len={len(seq)}, last={seq[-1]}")
-                else:
-                    print(f"Game {game.id}: test co-win armed but no valid sequence for these cards/patterns")
-            else:
-                print(f"Game {game.id}: test co-win armed but missing card layouts")
+        ok = prepare_test_co_win_sequence_for_game(game, armed=True)
+        if ok:
+            gs_cache = cache.get(game_settings_cache_key) or {}
+            gs_cache['test_co_win_mode'] = True
+            cache.set(game_settings_cache_key, gs_cache, 3600)
+            print(f"Game {game.id}: test_co_win_mode cached (Django) + queue in Redis")
         else:
-            print(f"Game {game.id}: test co-win armed but need exactly 1 real + 1 fake (got {real_n} real, {fake_n} fake)")
+            print(f"Game {game.id}: test co-win armed but preparation failed (need 1 real + 1 fake, layouts, solvable patterns)")
     
     # Invalidate game cache when game starts
     cache.delete('game:current')
