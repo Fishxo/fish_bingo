@@ -442,6 +442,11 @@ class GameSettings(models.Model):
         default=0,
         help_text="0=default (current). 1=prefer fake wins when safe. 2=stronger preference (multi-fake, fallback). Only applies when system accounts on and not free play."
     )
+    # When True, the next started game arms test co-win mode (1 real + 1 fake, predetermined call order, fake auto-claims on last number).
+    test_co_win_next_game = models.BooleanField(
+        default=False,
+        help_text="If True, the next game that starts will run in test co-win mode (admin QA: same last call, banner shows both, payout real-only)."
+    )
     
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -492,7 +497,9 @@ class GameSettings(models.Model):
                             self.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
                         if not hasattr(self, 'fake_win_preference'):
                             self.fake_win_preference = 0
-                
+                        if not hasattr(self, 'test_co_win_mode'):
+                            self.test_co_win_mode = False
+
                 cached_obj = CachedSettings(cached_game_settings)
                 # Also fetch original for any methods that might be called
                 cached_obj._original = cls.get_settings()

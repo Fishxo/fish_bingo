@@ -1289,6 +1289,7 @@ def game_settings_api(request):
             'disable_bot_deposit': getattr(settings, 'disable_bot_deposit', False),
             'disable_bot_withdraw': getattr(settings, 'disable_bot_withdraw', False),
             'fake_win_preference': getattr(settings, 'fake_win_preference', 0),
+            'test_co_win_next_game': getattr(settings, 'test_co_win_next_game', False),
         }
         try:
             response_data['users_created_today'] = _get_users_created_today_count()
@@ -1400,6 +1401,8 @@ def game_settings_api(request):
             if 'fake_win_preference' in data:
                 val = int(data['fake_win_preference'])
                 settings_obj.fake_win_preference = max(0, min(2, val))  # 0, 1, or 2
+            if 'test_co_win_next_game' in data:
+                settings_obj.test_co_win_next_game = bool(data['test_co_win_next_game'])
             
             settings_obj.save()
             

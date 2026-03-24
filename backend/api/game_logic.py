@@ -589,6 +589,7 @@ def start_game(game: Game) -> bool:
     # free_play: when True, number calling is random (no extra processing). When False,
     # Number calling uses fair random selection (per-user win control may be added separately).
     settings = GameSettings.get_settings()
+    test_co_win_armed = getattr(settings, 'test_co_win_next_game', False)
     game_settings_cache_key = f'game:{game.id}:settings'
     pref = getattr(settings, 'fake_win_preference', 0)
     cache.set(game_settings_cache_key, {
@@ -603,6 +604,7 @@ def start_game(game: Game) -> bool:
         'system_accounts_min': getattr(settings, 'system_accounts_min', 15),
         'system_accounts_max': getattr(settings, 'system_accounts_max', 30),
         'winning_patterns': getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']),
+        'test_co_win_mode': False,
     }, 3600)  # Cache for 1 hour (game won't last that long)
     game.fake_win_preference_snapshot = max(0, min(2, int(pref)))
     game.save(update_fields=['fake_win_preference_snapshot'])
@@ -627,7 +629,8 @@ def start_game(game: Game) -> bool:
     
     # CRITICAL: If system accounts are enabled, ensure we have at least the minimum
     # This is a final check right before game starts to catch any edge cases
-    if allow_system_account:
+    # Skip minimum fake fill when test co-win next game is armed (need exactly 1 real + 1 fake for QA)
+    if allow_system_account and not test_co_win_armed:
         min_system_accounts = getattr(settings, 'system_accounts_min', 15)
         # If we have fewer fake users than minimum, add more immediately
         if fake_player_count < min_system_accounts:
@@ -734,7 +737,7 @@ def start_game(game: Game) -> bool:
     
     # FINAL CHECK: Ensure we have at least minimum fake users before starting
     # This is the absolute last check before game starts
-    if allow_system_account:
+    if allow_system_account and not test_co_win_armed:
         min_system_accounts = getattr(settings, 'system_accounts_min', 15)
         current_fake_count = get_fake_user_count_for_game(game)
         if current_fake_count < min_system_accounts:
@@ -825,6 +828,47 @@ def start_game(game: Game) -> bool:
     
     # Final refresh to ensure all values are synced
     game.refresh_from_db()
+    
+    # Test co-win QA: one-shot DB flag; predetermined calls; fake auto-claims on last number (needs 1 real + 1 fake)
+    if test_co_win_armed:
+        from .models import GameSettings as GSModel, FakeUserGameCard
+        from .redis_utils import (
+            test_co_win_push_queue,
+            set_test_co_win_completing_number,
+            set_test_co_win_fake_card_id,
+        )
+        from .test_co_win_sequence import build_test_co_win_sequence
+        gs_row = GSModel.objects.get(pk=1)
+        gs_row.test_co_win_next_game = False
+        gs_row.save(update_fields=['test_co_win_next_game'])
+        cache.delete('game_settings')
+        game.refresh_from_db()
+        real_n = game.gamecards.count()
+        try:
+            from .fake_user_manager import get_fake_user_count_for_game as _gffc
+            fake_n = _gffc(game) if allow_system_account else 0
+        except Exception:
+            fake_n = 0
+        wp = getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card'])
+        if allow_system_account and real_n == 1 and fake_n == 1:
+            rc = game.gamecards.first()
+            fc = FakeUserGameCard.objects.filter(game=game).first()
+            if rc and fc and rc.card_layout and fc.card_layout:
+                seq = build_test_co_win_sequence(rc.card_layout, fc.card_layout, wp, game.id)
+                if seq:
+                    test_co_win_push_queue(game.id, seq)
+                    set_test_co_win_completing_number(game.id, seq[-1])
+                    set_test_co_win_fake_card_id(game.id, fc.id)
+                    gs_cache = cache.get(game_settings_cache_key) or {}
+                    gs_cache['test_co_win_mode'] = True
+                    cache.set(game_settings_cache_key, gs_cache, 3600)
+                    print(f"Game {game.id}: test_co_win_mode active, sequence len={len(seq)}, last={seq[-1]}")
+                else:
+                    print(f"Game {game.id}: test co-win armed but no valid sequence for these cards/patterns")
+            else:
+                print(f"Game {game.id}: test co-win armed but missing card layouts")
+        else:
+            print(f"Game {game.id}: test co-win armed but need exactly 1 real + 1 fake (got {real_n} real, {fake_n} fake)")
     
     # Invalidate game cache when game starts
     cache.delete('game:current')

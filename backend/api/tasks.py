@@ -254,6 +254,7 @@ def task_process_bingo_winners(self, game_id: int):
     """
     try:
         from django.utils import timezone
+        from django.core.cache import cache
         from .models import Game, GameCard, Transaction, User
         from .redis_utils import get_bingo_winners, cleanup_game_redis_keys, sync_game_state_to_redis
         from decimal import Decimal
@@ -319,7 +320,6 @@ def task_process_bingo_winners(self, game_id: int):
                         pass
             print(f"Game {game_id} marked completed in task_process_bingo_winners (split prize)")
             try:
-                from django.core.cache import cache
                 cache.delete('game:current')
             except Exception:
                 pass
@@ -332,13 +332,20 @@ def task_process_bingo_winners(self, game_id: int):
         real_winner_count = len(real_winner_cards)
         all_winner_count = len(real_winner_cards) + len(fake_winner_cards)
         
+        gs_cache = cache.get(f'game:{game_id}:settings') or {}
+        test_co_win_mode = bool(gs_cache.get('test_co_win_mode'))
+        
         # CRITICAL FIX: Split prize by ALL winners (real + fake) to make it look realistic
         # Real players see 3 winners announced, so prize should be split 3 ways
         # But only real winners actually receive the split amount
         prize_per_winner = total_prize / Decimal(str(all_winner_count)) if all_winner_count > 0 else Decimal('0')
+        # Test co-win QA: credit real winners with full share among reals only (banner still shows split by all)
+        prize_credit_per_real = (
+            total_prize / Decimal(str(real_winner_count)) if real_winner_count > 0 else Decimal('0')
+        ) if test_co_win_mode else prize_per_winner
         
         # Award prizes to real winners only (fake users don't get prizes, but are counted in split)
-        print(f"Processing {all_winner_count} winners ({real_winner_count} real, {len(fake_winner_cards)} fake) for game {game_id}, total prize: {total_prize}, prize split by {all_winner_count} winners = {prize_per_winner} per winner (only real winners receive)")
+        print(f"Processing {all_winner_count} winners ({real_winner_count} real, {len(fake_winner_cards)} fake) for game {game_id}, total prize: {total_prize}, display split {prize_per_winner}, credit per real {prize_credit_per_real} (test_co_win={test_co_win_mode})")
         
         # CRITICAL FIX: Use atomic transaction and F() expressions for balance updates
         from django.db import transaction
@@ -359,18 +366,18 @@ def task_process_bingo_winners(self, game_id: int):
                         old_balance = user.balance
                         # Prize: add to withdrawable_balance if user has deposited >= min_withdraw, else unwithdrawable_balance
                         if user.has_withdrawable_active():
-                            User.objects.filter(id=user.id).update(withdrawable_balance=F('withdrawable_balance') + prize_per_winner)
+                            User.objects.filter(id=user.id).update(withdrawable_balance=F('withdrawable_balance') + prize_credit_per_real)
                         else:
-                            User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + prize_per_winner)
+                            User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + prize_credit_per_real)
                         user.refresh_from_db()
                         Transaction.objects.create(
                             user=user,
                             transaction_type='win',
-                            amount=prize_per_winner,
+                            amount=prize_credit_per_real,
                             game=game,
                             description=f'Won game {game.id} (split among {all_winner_count} winners) with card {winner_card.card_number}'
                         )
-                        print(f"✅ Awarded prize {prize_per_winner} to user {user.id} (card {winner_card.card_number}), balance: {old_balance} -> {user.balance}")
+                        print(f"✅ Awarded prize {prize_credit_per_real} to user {user.id} (card {winner_card.card_number}), balance: {old_balance} -> {user.balance}")
                 except Exception as e:
                     print(f"❌ ERROR awarding prize to user {winner_card.user.id}: {e}")
                     import traceback
@@ -2210,6 +2217,35 @@ def task_process_fake_user_claim(self, game_id: int, fake_card_id: int):
         return {'error': str(e)}
 
 
+@shared_task(bind=True, max_retries=2, queue='gameplay', name='api.tasks.task_test_co_win_fake_claim')
+def task_test_co_win_fake_claim(self, game_id: int):
+    """Admin test: after predetermined last call, fake claims first so real can co-claim in the tie window."""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from django.core.cache import cache
+        from .redis_utils import get_test_co_win_fake_card_id
+        from .game_logic import claim_bingo_unified
+        gs = cache.get(f'game:{game_id}:settings') or {}
+        if not gs.get('test_co_win_mode'):
+            return {'skipped': True}
+        fc_id = get_test_co_win_fake_card_id(game_id)
+        if not fc_id:
+            logger.warning(f"task_test_co_win_fake_claim: no fake card id for game {game_id}")
+            return {'error': 'no fake card'}
+        game = Game.objects.get(id=game_id)
+        fake_card = FakeUserGameCard.objects.select_related('fake_user').get(id=fc_id)
+        ok, pattern, err = claim_bingo_unified(fake_card, game, is_fake_user=True)
+        if ok:
+            print(f"task_test_co_win_fake_claim: fake claimed game {game_id} pattern={pattern}")
+            return {'success': True, 'pattern': pattern}
+        print(f"task_test_co_win_fake_claim: claim failed: {err}")
+        return {'success': False, 'error': err}
+    except Exception as e:
+        logger.exception(f"task_test_co_win_fake_claim game {game_id}: {e}")
+        return {'error': str(e)}
+
+
 @shared_task(bind=True, max_retries=2, queue='gameplay', name='api.tasks.task_call_next_number')
 def task_call_next_number(self, game_id: int):
     """
@@ -2343,7 +2379,20 @@ def task_call_next_number(self, game_id: int):
             task_check_all_numbers_called.apply_async(args=[game_id], countdown=5)
             return {'stopped': True, 'reason': 'No available numbers'}
         
-        number = random.choice(available)
+        gs = cache.get(f'game:{game_id}:settings') or {}
+        test_mode = bool(gs.get('test_co_win_mode'))
+        if test_mode:
+            from .redis_utils import test_co_win_pop_next_call_number
+            queued = test_co_win_pop_next_call_number(game_id)
+            if queued is not None and queued in available:
+                number = queued
+            elif queued is not None:
+                logger.error(f"Test co-win: queued {queued} not in available for game {game_id}, using random")
+                number = random.choice(available)
+            else:
+                number = random.choice(available)
+        else:
+            number = random.choice(available)
         
         # REDIS-FIRST: Add to Redis only (fast, no DB hit during gameplay)
         # DB records will be created at game end for history
@@ -2383,9 +2432,28 @@ def task_call_next_number(self, game_id: int):
         # We add a small delay to bingo check to ensure marking completes first
         task_mark_cards_for_number.delay(game_id, number)
         
-        # Add 0.3 second delay to bingo check to ensure marking has time to complete
-        # This is a workaround - ideally we'd chain tasks, but this is simpler and more reliable
-        task_check_bingo_for_number.apply_async(args=[game_id, number], countdown=0.3)
+        is_test_completion = False
+        if test_mode:
+            from .redis_utils import get_test_co_win_completing_number
+            comp = get_test_co_win_completing_number(game_id)
+            if comp is not None and number == comp:
+                is_test_completion = True
+        
+        if is_test_completion:
+            # Co-win test: no auto set_game_winner; fake claims via task, real claims in UI
+            from celery import current_app
+            current_app.send_task(
+                'api.tasks.task_test_co_win_fake_claim',
+                args=[game_id],
+                countdown=1.0,
+            )
+        else:
+            # Add 0.3 second delay to bingo check to ensure marking has time to complete
+            task_check_bingo_for_number.apply_async(args=[game_id, number], countdown=0.3)
+        
+        if is_test_completion:
+            print(f"Game {game_id}: test co-win completing number {number} — no further calls scheduled")
+            return {'success': True, 'number': number, 'call_count': call_count, 'stopped': True, 'reason': 'test_co_win_completion'}
         
         # CRITICAL: Schedule next call ONLY if game is still active
         # Re-check state before scheduling (game might have ended during this task)
@@ -2508,6 +2576,14 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
             logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Already has winner (card_id: {state.get('winner_card_id')}), skipping")
             print(f"⚠️ [BINGO CHECK] Game {game_id}: Already has winner, skipping")
             return {'skipped': True, 'reason': 'Game already has winner'}
+        
+        from .redis_utils import get_test_co_win_completing_number
+        gs = cache.get(f'game:{game_id}:settings') or {}
+        if gs.get('test_co_win_mode'):
+            comp = get_test_co_win_completing_number(game_id)
+            if comp is not None and number == comp:
+                print(f"🔍 [BINGO CHECK] Game {game_id}: test co-win completion number {number} — skip auto winner (claim flow)")
+                return {'skipped': True, 'reason': 'test_co_win_completion'}
         
         # Get all cards that might have this number
         # Only check cards that could have bingo (have this number)

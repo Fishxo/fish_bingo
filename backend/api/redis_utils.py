@@ -366,6 +366,98 @@ def cleanup_game_redis_keys(game_id):
         print(f"Error cleaning up Redis keys for game {game_id}: {e}")
 
 
+def get_test_co_win_queue_key(game_id: int) -> str:
+    return f"game:{game_id}:test_call_queue"
+
+
+def get_test_co_win_completing_key(game_id: int) -> str:
+    return f"game:{game_id}:test_co_win_completing"
+
+
+def get_test_co_win_fake_card_key(game_id: int) -> str:
+    return f"game:{game_id}:test_fake_card_id"
+
+
+def test_co_win_push_queue(game_id: int, sequence: list) -> bool:
+    """FIFO queue: RPUSH sequence, consumed with LPOP."""
+    r = get_redis_client()
+    if not r or not sequence:
+        return False
+    k = get_test_co_win_queue_key(game_id)
+    try:
+        r.delete(k)
+        for n in sequence:
+            r.rpush(k, str(int(n)))
+        r.expire(k, 3600)
+        return True
+    except Exception as e:
+        print(f"test_co_win_push_queue error: {e}")
+        return False
+
+
+def test_co_win_pop_next_call_number(game_id: int):
+    """LPOP next predetermined number, or None if empty / error."""
+    r = get_redis_client()
+    if not r:
+        return None
+    try:
+        v = r.lpop(get_test_co_win_queue_key(game_id))
+        if v is None:
+            return None
+        return int(v)
+    except Exception as e:
+        print(f"test_co_win_pop_next_call_number error: {e}")
+        return None
+
+
+def set_test_co_win_completing_number(game_id: int, n: int) -> None:
+    r = get_redis_client()
+    if not r:
+        return
+    try:
+        r.set(get_test_co_win_completing_key(game_id), str(int(n)), ex=3600)
+    except Exception as e:
+        print(f"set_test_co_win_completing_number error: {e}")
+
+
+def get_test_co_win_completing_number(game_id: int):
+    r = get_redis_client()
+    if not r:
+        return None
+    try:
+        v = r.get(get_test_co_win_completing_key(game_id))
+        if v is None:
+            return None
+        return int(v)
+    except Exception as e:
+        print(f"get_test_co_win_completing_number error: {e}")
+        return None
+
+
+def set_test_co_win_fake_card_id(game_id: int, card_id: int) -> None:
+    r = get_redis_client()
+    if not r:
+        return
+    try:
+        r.set(get_test_co_win_fake_card_key(game_id), str(int(card_id)), ex=3600)
+    except Exception as e:
+        print(f"set_test_co_win_fake_card_id error: {e}")
+
+
+def get_test_co_win_fake_card_id(game_id: int):
+    r = get_redis_client()
+    if not r:
+        return None
+    try:
+        v = r.get(get_test_co_win_fake_card_key(game_id))
+        if v is None:
+            return None
+        return int(v)
+    except Exception as e:
+        print(f"get_test_co_win_fake_card_id error: {e}")
+        return None
+
+
 # --- Bot new registration limit (24h rolling window) ---
 # Counter increments when a new user completes registration (contact). When count >= limit,
 # /start and /register do not respond at all (no server load). Window resets 24h after it started.
@@ -1539,6 +1631,9 @@ def cleanup_game_live_state(game_id: int):
             f"game:{game_id}:bingo_window",
             f"game:{game_id}:bingo_winners",
             f"game:{game_id}:bingo_claim_lock",
+            get_test_co_win_queue_key(game_id),
+            get_test_co_win_completing_key(game_id),
+            get_test_co_win_fake_card_key(game_id),
         ]
         
         # Delete specific keys
