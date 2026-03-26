@@ -525,6 +525,10 @@ export default {
         this.loadGame()
       })
       
+      this.ws.on('game_state_sync', () => {
+        this.loadGame()
+      })
+
       this.ws.on('game_started', () => {
         // Clear timer and interval if game starts
         if (this.timerInterval) {

@@ -66,6 +66,13 @@
         </div>
       </section>
 
+      <!-- Last game avoid list (anti-abuse snapshot) -->
+      <section class="section" v-if="data">
+        <h2>🎯 Last completed game — avoid list</h2>
+        <p v-if="data.last_completed_game_avoid_game_id != null" class="section-hint muted">Game ID {{ data.last_completed_game_avoid_game_id }}</p>
+        <p class="avoid-list-line">{{ (data.last_completed_game_avoid_list && data.last_completed_game_avoid_list.length) ? (data.last_completed_game_avoid_list || []).join(', ') : 'None stored (anti-abuse off or no restricted users on that game).' }}</p>
+      </section>
+
       <!-- Game Mode Statistics -->
       <section class="section">
         <h2>🎮 Game Mode</h2>
@@ -155,6 +162,8 @@
             <dd>{{ formatCurrency(searchResultData.user?.balance ?? 0) }}</dd>
             <dt>Withdrawal approved</dt>
             <dd>{{ searchResultData.user?.withdrawal_approved ? 'Yes' : 'No' }}</dd>
+            <dt>Free play allowed</dt>
+            <dd>{{ searchResultData.user?.free_play_allowed !== false ? 'Yes' : 'No' }}</dd>
             <dt>Games played</dt>
             <dd>{{ searchResultData.games_played ?? 0 }}</dd>
             <dt>Total wins</dt>
@@ -182,6 +191,9 @@
           <div class="form-group checkbox">
             <label><input v-model="editBalanceWithdrawalApproved" type="checkbox" /> Withdrawal approved (can request withdraw)</label>
           </div>
+          <div class="form-group checkbox">
+            <label><input v-model="editBalanceFreePlayAllowed" type="checkbox" /> Free play allowed (fair play / no avoid-list delay)</label>
+          </div>
           <p v-if="editBalanceMessage" class="edit-balance-msg" :class="{ error: editBalanceSaving && editBalanceMessage }">{{ editBalanceMessage }}</p>
           <div class="modal-actions">
             <button type="button" class="btn btn-secondary" @click="closeEditBalanceModal">Cancel</button>
@@ -193,7 +205,7 @@
       <!-- Search Transaction Number (CBE) -->
       <section class="section">
         <h2>🔎 Search Transaction Number</h2>
-        <p class="section-hint">CBE: enter FT... (e.g. FT26048WBS7024627387). Telebirr: enter receipt reference (e.g. DBK10S886V). Same list as auto-verified and manual approvals.</p>
+        <p class="section-hint">CBE: full FT id or hyphen form (e.g. FT26083S3478-24627387 or legacy FT26048WBS7024627387). Telebirr: receipt reference (e.g. DBK10S886V). Same list as auto-verified and manual approvals.</p>
         <div class="search-row">
           <input v-model="searchTxQuery" type="text" placeholder="CBE: FT... or Telebirr ref" class="search-input" @keyup.enter="doSearchTransaction" />
           <button class="btn btn-primary" @click="doSearchTransaction">Search</button>
@@ -426,13 +438,14 @@
         <div class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>ID</th><th>Status</th><th>Players</th><th>Derash</th><th>Actions</th></tr>
+              <tr><th>ID</th><th>Status</th><th>Players</th><th>Spectators</th><th>Derash</th><th>Actions</th></tr>
             </thead>
             <tbody>
               <tr v-for="g in (data.active_games || [])" :key="'ag-' + g.id">
                 <td>{{ g.id }}</td>
                 <td>{{ g.status }}</td>
                 <td>{{ g.players }}</td>
+                <td>{{ g.spectator_count ?? 0 }}</td>
                 <td>{{ formatCurrency(g.derash_amount) }}</td>
                 <td>
                   <template v-if="g.status === 'waiting'">
@@ -447,7 +460,7 @@
                 </td>
               </tr>
               <tr v-if="!(data.active_games && data.active_games.length)">
-                <td colspan="5">No active games</td>
+                <td colspan="6">No active games</td>
               </tr>
             </tbody>
           </table>
@@ -460,20 +473,21 @@
         <div class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>ID</th><th>Time</th><th>Players</th><th>Bid</th><th>Real</th><th>System</th><th>Status</th></tr>
+              <tr><th>ID</th><th>Time</th><th>Players</th><th>Spectators</th><th>Bid</th><th>Real</th><th>System</th><th>Status</th></tr>
             </thead>
             <tbody>
               <tr v-for="g in (data.today_games || [])" :key="'tg-' + g.id">
                 <td>{{ g.id }}</td>
                 <td>{{ g.created_at }}</td>
                 <td>{{ g.players }}</td>
+                <td>{{ g.spectator_count ?? 0 }}</td>
                 <td>{{ formatCurrency(g.bid_amount) }}</td>
                 <td>{{ g.real_users }}</td>
                 <td>{{ g.system_users }}</td>
                 <td>{{ g.status }}</td>
               </tr>
               <tr v-if="!(data.today_games && data.today_games.length)">
-                <td colspan="7">No games today</td>
+                <td colspan="8">No games today</td>
               </tr>
             </tbody>
           </table>
@@ -506,7 +520,7 @@
             <thead>
               <tr>
                 <th v-if="deleteMode" class="col-check"><input type="checkbox" :checked="allUsersSelected" @change="toggleSelectAll" title="Select all" /></th>
-                <th>ID</th><th>Username</th><th>Telegram ID</th><th>Phone</th><th>Name</th><th>ወጭ የማይደረግ (ጨዋታ)</th><th>ወጭ የሚቻል</th><th>Games</th><th>Wins</th><th>Deposits</th><th>Withdrawals</th><th>Transfers in</th><th>Approved</th><th>Joined</th>
+                <th>ID</th><th>Username</th><th>Telegram ID</th><th>Phone</th><th>Name</th><th>ወጭ የማይደረግ (ጨዋታ)</th><th>ወጭ የሚቻል</th><th>Games</th><th>Wins</th><th>Deposits</th><th>Withdrawals</th><th>Transfers in</th><th>Approved</th><th>Free play</th><th>Joined</th>
                 <th v-if="!deleteMode">Actions</th>
               </tr>
             </thead>
@@ -526,6 +540,7 @@
                 <td>{{ formatCurrency(u.total_withdrawals) }}</td>
                 <td>{{ formatCurrency(u.transfer_in != null ? u.transfer_in : 0) }}</td>
                 <td>{{ u.withdrawal_approved ? '✓' : '–' }}</td>
+                <td>{{ u.free_play_allowed !== false ? '✓' : '–' }}</td>
                 <td>{{ u.created_at }}</td>
                 <td v-if="!deleteMode" class="col-actions">
                   <button type="button" class="btn btn-secondary btn-sm" @click="editUser(u.id)">Edit</button>
@@ -533,7 +548,7 @@
                 </td>
               </tr>
               <tr v-if="!(data.registered_users && data.registered_users.length)">
-                <td :colspan="deleteMode ? 16 : 15">No registered users yet</td>
+                <td :colspan="deleteMode ? 17 : 16">No registered users yet</td>
               </tr>
             </tbody>
           </table>
@@ -820,13 +835,14 @@
         <div v-if="showGameDetails" class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>ID</th><th>Status</th><th>Players</th><th>Bid</th><th>Derash</th><th>Winner</th><th>Called</th><th>Created</th></tr>
+              <tr><th>ID</th><th>Status</th><th>Players</th><th>Spectators</th><th>Bid</th><th>Derash</th><th>Winner</th><th>Called</th><th>Created</th></tr>
             </thead>
             <tbody>
               <tr v-for="g in (data.games_detail || [])" :key="'gd-' + g.id">
                 <td>{{ g.id }}</td>
                 <td>{{ g.status }}</td>
                 <td>{{ g.players }}</td>
+                <td>{{ g.spectator_count ?? 0 }}</td>
                 <td>{{ formatCurrency(g.bid_amount) }}</td>
                 <td>{{ formatCurrency(g.derash_amount) }}</td>
                 <td>{{ (g.winner_phones || []).join(', ') || '-' }}</td>
@@ -834,7 +850,7 @@
                 <td>{{ g.created_at }}</td>
               </tr>
               <tr v-if="!(data.games_detail && data.games_detail.length)">
-                <td colspan="8">No games found</td>
+                <td colspan="9">No games found</td>
               </tr>
             </tbody>
           </table>
@@ -932,6 +948,7 @@ export default {
       editBalanceUnwithdrawable: '0',
       editBalanceWithdrawable: '0',
       editBalanceWithdrawalApproved: false,
+      editBalanceFreePlayAllowed: true,
       editBalanceSaving: false,
       editBalanceMessage: '',
       searchTxQuery: '',
@@ -1165,6 +1182,7 @@ export default {
       this.editBalanceUnwithdrawable = String(this.searchResultData.user.unwithdrawable_balance ?? 0)
       this.editBalanceWithdrawable = String(this.searchResultData.user.withdrawable_balance ?? 0)
       this.editBalanceWithdrawalApproved = !!this.searchResultData.user.withdrawal_approved
+      this.editBalanceFreePlayAllowed = this.searchResultData.user.free_play_allowed !== false
       this.editBalanceMessage = ''
       this.showEditBalanceModal = true
     },
@@ -1184,12 +1202,13 @@ export default {
           this.editBalanceMessage = 'Enter valid non-negative numbers.'
           return
         }
-        const res = await apiUpdateUserBalance(this.editBalanceUser.id, u, w, this.editBalanceWithdrawalApproved)
+        const res = await apiUpdateUserBalance(this.editBalanceUser.id, u, w, this.editBalanceWithdrawalApproved, this.editBalanceFreePlayAllowed)
         if (this.searchResultData?.user?.id === this.editBalanceUser.id) {
           this.searchResultData.user.unwithdrawable_balance = res.user.unwithdrawable_balance
           this.searchResultData.user.withdrawable_balance = res.user.withdrawable_balance
           this.searchResultData.user.balance = res.user.balance
           if (res.user.withdrawal_approved !== undefined) this.searchResultData.user.withdrawal_approved = res.user.withdrawal_approved
+          if (res.user.free_play_allowed !== undefined) this.searchResultData.user.free_play_allowed = res.user.free_play_allowed
         }
         this.closeEditBalanceModal()
       } catch (err) {

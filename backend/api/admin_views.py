@@ -595,6 +595,7 @@ def search_user(request):
                 'withdrawable_balance': float(user.withdrawable_balance or 0),
                 'created_at': user.created_at.isoformat(),
                 'withdrawal_approved': user.withdrawal_approved,
+                'free_play_allowed': user.free_play_allowed,
             },
             'games_played': games_played,
             'total_wins': total_wins,
@@ -622,8 +623,9 @@ def update_user_balance(request, user_id):
     unwithdrawable = data.get('unwithdrawable_balance')
     withdrawable = data.get('withdrawable_balance')
     withdrawal_approved = data.get('withdrawal_approved')
-    if unwithdrawable is None and withdrawable is None and withdrawal_approved is None:
-        return JsonResponse({'error': 'Provide unwithdrawable_balance and/or withdrawable_balance and/or withdrawal_approved'}, status=400)
+    free_play_allowed = data.get('free_play_allowed')
+    if unwithdrawable is None and withdrawable is None and withdrawal_approved is None and free_play_allowed is None:
+        return JsonResponse({'error': 'Provide unwithdrawable_balance and/or withdrawable_balance and/or withdrawal_approved and/or free_play_allowed'}, status=400)
     try:
         update_fields = []
         if unwithdrawable is not None:
@@ -641,6 +643,9 @@ def update_user_balance(request, user_id):
         if withdrawal_approved is not None:
             user.withdrawal_approved = bool(withdrawal_approved)
             update_fields.append('withdrawal_approved')
+        if free_play_allowed is not None:
+            user.free_play_allowed = bool(free_play_allowed)
+            update_fields.append('free_play_allowed')
         if update_fields:
             user.save(update_fields=update_fields)
         return JsonResponse({
@@ -651,6 +656,7 @@ def update_user_balance(request, user_id):
                 'withdrawable_balance': float(user.withdrawable_balance or 0),
                 'balance': float(user.balance),
                 'withdrawal_approved': user.withdrawal_approved,
+                'free_play_allowed': user.free_play_allowed,
             }
         })
     except Exception as e:
@@ -658,12 +664,8 @@ def update_user_balance(request, user_id):
 
 
 def _parse_cbe_tx(tx_str):
-    if not tx_str or len(tx_str.strip()) < 9:
-        return None, None
-    s = tx_str.strip().upper()
-    if not s.startswith('FT') or len(s) < 9:
-        return None, None
-    return s[:-8], s[-8:]
+    from .cbe_verify import parse_cbe_reference_suffix
+    return parse_cbe_reference_suffix(tx_str)
 
 
 @require_http_methods(["GET"])
@@ -2011,6 +2013,7 @@ def admin_dashboard_api(request):
         today_games_data.append({
             'id': game.id,
             'players': game.total_players,
+            'spectator_count': getattr(game, 'spectator_count', 0) or 0,
             'bid_amount': float(game.bet_amount),
             'automatic_count': 0,  # Removed expensive calculation
             'manual_count': 0,  # Removed expensive calculation
@@ -2090,6 +2093,7 @@ def admin_dashboard_api(request):
             'total_withdrawals': float(user.total_withdrawals_amount or 0),
             'transfer_in': float(transfer_in),
             'withdrawal_approved': user.withdrawal_approved,
+            'free_play_allowed': user.free_play_allowed,
             'created_at': user.created_at.strftime('%Y-%m-%d %H:%M'),
         })
     
@@ -2129,6 +2133,7 @@ def admin_dashboard_api(request):
             'id': game.id,
             'status': game.status,
             'players': game.total_players,
+            'spectator_count': getattr(game, 'spectator_count', 0) or 0,
             'derash_amount': float(game.derash_amount),
         })
     
@@ -2201,6 +2206,10 @@ def admin_dashboard_api(request):
     except Exception:
         failed_deposits_data = []
     
+    last_completed_game = Game.objects.filter(status='completed').order_by('-completed_at').first()
+    last_game_avoid_list = list(last_completed_game.avoid_list_numbers or []) if last_completed_game else []
+    last_game_avoid_game_id = last_completed_game.id if last_completed_game else None
+    
     return JsonResponse({
         'games_today': games_today,
         'games_yesterday': games_yesterday,
@@ -2265,6 +2274,7 @@ def admin_dashboard_api(request):
                 'id': g.id,
                 'status': g.status,
                 'players': g.total_players,
+                'spectator_count': getattr(g, 'spectator_count', 0) or 0,
                 'bid_amount': float(g.bet_amount),
                 'derash_amount': float(g.derash_amount),
                 'winner_phones': list({(w.phone_number or 'N/A') for w in [g.winner] + list(g.winners.all()) if w}),
@@ -2275,6 +2285,8 @@ def admin_dashboard_api(request):
                 'winners', Prefetch('called_numbers', queryset=CalledNumber.objects.all().only('number'))
             ).select_related('winner')
         ],
+        'last_completed_game_avoid_list': last_game_avoid_list,
+        'last_completed_game_avoid_game_id': last_game_avoid_game_id,
         'recent_broadcasts': [
             {
                 'id': b.id,
@@ -2399,6 +2411,7 @@ def second_admin_dashboard_api(request):
             'id': game.id,
             'status': game.status,
             'players': game.total_players,
+            'spectator_count': getattr(game, 'spectator_count', 0) or 0,
             'derash_amount': float(game.derash_amount),
         })
     
@@ -2435,6 +2448,7 @@ def second_admin_dashboard_api(request):
         today_games_data.append({
             'id': game.id,
             'players': game.total_players,
+            'spectator_count': getattr(game, 'spectator_count', 0) or 0,
             'bid_amount': float(game.bet_amount),
             'automatic_count': 0,  # Removed expensive calculation
             'manual_count': 0,  # Removed expensive calculation
@@ -2484,6 +2498,7 @@ def second_admin_dashboard_api(request):
             'wins': wins,
             'total_deposits': float(user_total_deposits),
             'total_withdrawals': float(user_total_withdrawals),
+            'free_play_allowed': user.free_play_allowed,
             'created_at': user.created_at.strftime('%Y-%m-%d %H:%M'),
         })
     
@@ -2581,6 +2596,10 @@ def second_admin_dashboard_api(request):
         # Cache for 5 minutes (300 seconds)
         cache.set(cache_key, (total_automatic_games, total_manual_games), 300)
     
+    last_completed_game_sec = Game.objects.filter(status='completed').order_by('-completed_at').first()
+    last_game_avoid_list_sec = list(last_completed_game_sec.avoid_list_numbers or []) if last_completed_game_sec else []
+    last_game_avoid_game_id_sec = last_completed_game_sec.id if last_completed_game_sec else None
+    
     return JsonResponse({
         'games_today': games_today,
         'games_yesterday': games_yesterday,
@@ -2626,6 +2645,8 @@ def second_admin_dashboard_api(request):
         'approved_deposits_count': approved_deposits_count,
         'approved_withdraws_count': approved_withdraws_count,
         'win_stats': _get_win_stats(),
+        'last_completed_game_avoid_list': last_game_avoid_list_sec,
+        'last_completed_game_avoid_game_id': last_game_avoid_game_id_sec,
     })
 
 

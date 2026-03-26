@@ -618,15 +618,24 @@ def prepare_test_co_win_sequence_for_game(game: Game, armed: bool) -> bool:
 
 def prepare_anti_abuse_avoid_numbers_for_game(game: Game, enabled: bool) -> bool:
     """Store deduplicated avoid-list numbers for free_play_allowed=False users in Redis."""
-    if not enabled:
-        return False
     from .models import GameCard
     from .redis_utils import set_abuse_avoid_numbers
+    if not enabled:
+        set_abuse_avoid_numbers(game.id, [])
+        try:
+            Game.objects.filter(id=game.id).update(avoid_list_numbers=[])
+        except Exception:
+            pass
+        return False
     restricted_cards = list(
         GameCard.objects.filter(game=game, user__free_play_allowed=False).select_related('user')
     )
     if not restricted_cards:
         set_abuse_avoid_numbers(game.id, [])
+        try:
+            Game.objects.filter(id=game.id).update(avoid_list_numbers=[])
+        except Exception:
+            pass
         return False
     # Positions by user requirement: 1o, 2n, 3i, 4g, 5b
     cells = [(0, 4), (1, 2), (2, 1), (3, 3), (4, 0)]
@@ -646,7 +655,12 @@ def prepare_anti_abuse_avoid_numbers_for_game(game: Game, enabled: bool) -> bool
                     avoid.add(int(n))
             except Exception:
                 continue
-    set_abuse_avoid_numbers(game.id, sorted(list(avoid)))
+    avoid_list = sorted(list(avoid))
+    set_abuse_avoid_numbers(game.id, avoid_list)
+    try:
+        Game.objects.filter(id=game.id).update(avoid_list_numbers=avoid_list)
+    except Exception:
+        pass
     print(f"prepare_anti_abuse_avoid_numbers_for_game: game {game.id} restricted={len(restricted_cards)} avoid={len(avoid)}")
     return bool(avoid)
 
@@ -926,6 +940,11 @@ def start_game(game: Game) -> bool:
     game.status = 'active'
     game.started_at = timezone.now()
     game.save()
+    
+    # Reset spectator tracking for this game (new active session)
+    from .redis_utils import reset_game_spectator_count_redis
+    reset_game_spectator_count_redis(game.id)
+    Game.objects.filter(id=game.id).update(spectator_count=0)
     
     # PHASE 4 OPTIMIZATION: Sync game state to Redis immediately when game starts
     from .redis_utils import sync_game_state_to_redis

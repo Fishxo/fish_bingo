@@ -11,39 +11,71 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Sample: "Dear Nigus, You have transfered ETB 6,625.00 to Jibril Shikuri on 17/02/2026..."
-# Link: https://apps.cbe.com.et:100/?id=FT26048WBS7024627387
-# From id we get reference = id[:-8] (FT26048WBS70), accountSuffix = id[-8:] (24627387)
-# Amount to credit = transfer amount from text (first ETB X,XXX.XX), not API total (includes fees)
+# Old link: https://apps.cbe.com.et:100/?id=FT26048WBS7024627387
+# New link: https://Mbreciept.cbe.com.et/FT26083S3478-24627387
+# From full id (no hyphen) we get reference = id[:-8], accountSuffix = id[-8:]
+# Amount: first "ETB 500.61" after transfer (not "ETB0.08" / service lines)
 
-_CBE_ID_RE = re.compile(r'[?&]id=(FT[A-Z0-9]+)', re.IGNORECASE)
+_CBE_QUERY_ID_RE = re.compile(r'[?&]id=(FT[A-Z0-9]+)', re.IGNORECASE)
+# Path with hyphen before last 8 digits (new receipt host)
+_CBE_PATH_HYPHEN_RE = re.compile(r'/(FT[A-Z0-9]+)-([0-9]{8})\b', re.IGNORECASE)
+# Long FT id in path without hyphen (legacy)
+_CBE_PATH_PLAIN_RE = re.compile(r'/(FT[A-Z0-9]{9,})\b', re.IGNORECASE)
+# Transfer amount: space after ETB (avoids matching "ETB0.08" style in same message)
 _CBE_AMOUNT_RE = re.compile(r'\bETB\s+([0-9,]+(?:\.[0-9]{1,2})?)\b', re.IGNORECASE)
-_REQUIRED_MARKERS = ['transfered', 'ETB', 'CBE']
+
+
+def _normalize_cbe_full_id(raw: str) -> Optional[str]:
+    """Normalize FT... or FT...-12345678 to a single alphanumeric id (no hyphen)."""
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip().upper()
+    if not s.startswith('FT'):
+        return None
+    m = re.match(r'^(FT[A-Z0-9]+)-([0-9]{8})$', s)
+    if m:
+        return m.group(1) + m.group(2)
+    return s
+
+
+def _extract_cbe_full_id_from_text(text: str) -> Optional[str]:
+    """Find transaction id from query param, URL path, or trailing FT...-suffix."""
+    m = _CBE_QUERY_ID_RE.search(text)
+    if m:
+        return _normalize_cbe_full_id(m.group(1))
+    m = _CBE_PATH_HYPHEN_RE.search(text)
+    if m:
+        return _normalize_cbe_full_id(m.group(1) + '-' + m.group(2))
+    m = _CBE_PATH_PLAIN_RE.search(text)
+    if m:
+        return _normalize_cbe_full_id(m.group(1))
+    m = re.search(r'\b(FT[A-Z0-9]+)-([0-9]{8})\b', text, re.IGNORECASE)
+    if m:
+        return _normalize_cbe_full_id(m.group(1) + '-' + m.group(2))
+    return None
 
 
 def parse_cbe_receipt_text(text: str) -> Optional[dict]:
     """
     Parse full CBE receipt SMS text.
-    Extracts: transaction id from link (?id=FT...) -> reference, account_suffix;
-    first ETB amount in text (transfer amount, not fees) -> amount.
+    Extracts: transaction id -> reference, account_suffix; first ETB amount with space (transfer amount).
     Returns dict with reference, account_suffix, amount, or None if invalid.
     """
     if not text or not isinstance(text, str):
         return None
     text = text.strip()
-    if len(text) < 80:
+    if len(text) < 50:
         return None
 
     text_lower = text.lower()
-    for marker in _REQUIRED_MARKERS:
-        if marker.lower() not in text_lower:
-            return None
-
-    match = _CBE_ID_RE.search(text)
-    if not match:
+    if 'cbe' not in text_lower or 'etb' not in text_lower:
         return None
-    full_id = match.group(1).strip().upper()
-    # Need at least 8 chars for suffix (last 8), and at least 1 for reference
+    if 'transferred' not in text_lower and 'transfered' not in text_lower:
+        return None
+
+    full_id = _extract_cbe_full_id_from_text(text)
+    if not full_id:
+        return None
     if len(full_id) < 9:
         return None
     reference = full_id[:-8]
@@ -169,6 +201,24 @@ def _first_name(full_name: str) -> str:
 def _last4_digits(value: str) -> str:
     digits = re.sub(r'\D', '', str(value or ''))
     return digits[-4:] if len(digits) >= 4 else digits
+
+
+def parse_cbe_reference_suffix(tx_str: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Parse a pasted CBE transaction id (SMS URL fragment, ?id=..., or FT...-12345678).
+    Returns (reference, account_suffix) or (None, None).
+    """
+    if not tx_str or not isinstance(tx_str, str):
+        return None, None
+    s = tx_str.strip()
+    if len(s) < 9:
+        return None, None
+    if not s.upper().startswith('FT'):
+        return None, None
+    full = _normalize_cbe_full_id(s)
+    if not full or len(full) < 9:
+        return None, None
+    return full[:-8], full[-8:]
 
 
 def cbe_receiver_matches(

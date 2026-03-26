@@ -5,6 +5,18 @@ from django.contrib.auth import get_user_model
 
 from api.channels import room_players, room_watchers, room_legacy
 
+
+@database_sync_to_async
+def _spectator_incr(game_id):
+    from api.redis_utils import incr_game_spectator_count
+    incr_game_spectator_count(int(game_id))
+
+
+@database_sync_to_async
+def _spectator_decr(game_id):
+    from api.redis_utils import decr_game_spectator_count
+    decr_game_spectator_count(int(game_id))
+
 User = get_user_model()
 
 
@@ -32,6 +44,10 @@ class GameConsumer(AsyncWebsocketConsumer):
             await self.channel_layer.group_add(group_name, self.channel_name)
 
         await self.accept()
+
+        self._spectator_tracked = role == 'watcher'
+        if self._spectator_tracked:
+            await _spectator_incr(self.game_id)
 
     async def disconnect(self, close_code):
         # Leave all groups we may have joined (players, watchers, legacy)
@@ -124,4 +140,10 @@ class GameConsumer(AsyncWebsocketConsumer):
                 'type': evt.get('type', 'unknown'),
                 'data': evt.get('data', {})
             }))
+
+    async def game_state_sync(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'game_state_sync',
+            'data': event['data']
+        }))
 

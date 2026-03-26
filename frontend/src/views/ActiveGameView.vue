@@ -448,12 +448,12 @@ export default {
             this._countdownInitialized = true // Mark as initialized to prevent duplicate starts
             this.showStartCountdown = true
             this.startCountdownSeconds = 8
-            this.startCountdownText = 'ጨዋታው ሊጀምር ነው፣ ተዘጋጅ!'
+            this.startCountdownText = 'ጨዋታውን ለመጀመር ...'
             this.countdownInterval = setInterval(() => {
               if (this.startCountdownSeconds > 1) {
                 this.startCountdownSeconds--
                 if (this.startCountdownSeconds <= 3) {
-                  this.startCountdownText = 'ቁጥሮች ለመጥራት በመጀመር ላይ...'
+                  this.startCountdownText = 'ጨዋታውን ለመጀመር ...'
                 }
               } else {
                 clearInterval(this.countdownInterval)
@@ -633,10 +633,28 @@ export default {
         console.error('Error loading game (non-404):', error)
       }
     },
+    mergeGameStateFromSync(payload) {
+      if (!payload || !payload.game) return
+      if (this._pendingFakeWinnerDeclaration || this._winnerBannerActive) return
+      if (this.game && payload.game.id !== this.game.id) return
+      const game = payload.game
+      this.game = { ...this.game, ...game }
+      if (game.called_numbers && Array.isArray(game.called_numbers)) {
+        const newCalledNumbers = game.called_numbers.map((cn) =>
+          typeof cn === 'object' && cn !== null ? cn.number : cn
+        )
+        const merged = [...newCalledNumbers]
+        for (const n of this.calledNumbers) {
+          if (!merged.includes(n)) merged.push(n)
+        }
+        this.calledNumbers = merged
+        if (this.game) this.game.current_call_count = this.calledNumbers.length
+      }
+    },
     setupWebSocket() {
       if (!this.game) return
-      // Room separation: game view = player room (see docs/WEBSOCKET_EVENTS.md)
-      this.ws = new WebSocketService(this.game.id, { role: 'player' })
+      // Room separation: player = has card, watcher = spectating (see docs/WEBSOCKET_EVENTS.md)
+      this.ws = new WebSocketService(this.game.id, { role: this.userCard ? 'player' : 'watcher' })
       
       this.ws.on('connected', () => {
         console.log('WebSocket connected successfully')
@@ -659,6 +677,10 @@ export default {
         // Resume polling when WebSocket disconnects - fallback to HTTP polling
         this.startPolling()
       })
+
+      this.ws.on('game_state_sync', (payload) => {
+        this.mergeGameStateFromSync(payload)
+      })
       
       this.ws.on('number_called', (data) => {
         console.log('Number called via WebSocket:', data)
@@ -667,7 +689,7 @@ export default {
         // This fixes "only first number shows then stuck" when numbers arrive during or right after countdown.
         if (this.showStartCountdown) {
           this.showStartCountdown = false
-          this.startCountdownText = 'ቁጥሮች ለመጥራት በመጀመር ላይ...'
+          this.startCountdownText = 'ጨዋታውን ለመጀመር ...'
           if (this.countdownInterval) {
             clearInterval(this.countdownInterval)
             this.countdownInterval = null

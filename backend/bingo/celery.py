@@ -2,6 +2,7 @@
 Celery configuration for Bingo project
 """
 import os
+from datetime import timedelta
 from celery import Celery
 
 # Set the default Django settings module for the 'celery' program.
@@ -17,6 +18,14 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 
 # Load task modules from all registered Django apps.
 app.autodiscover_tasks()
+
+# Periodic tasks (requires Celery Beat: celery -A bingo beat)
+_beat = dict(getattr(app.conf, 'beat_schedule', None) or {})
+_beat['broadcast-active-game-state-sync'] = {
+    'task': 'api.tasks.task_broadcast_active_game_state_sync',
+    'schedule': timedelta(seconds=10),
+}
+app.conf.beat_schedule = _beat
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):
