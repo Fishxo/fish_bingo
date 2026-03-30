@@ -280,7 +280,7 @@ export default {
 }
 
 .card-cell.free {
-  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-coral-dark) 100%);
+  background: linear-gradient(135deg, var(--success-green) 0%, var(--success-green-dark) 100%);
   color: white;
   border-color: var(--accent-coral-dark);
   cursor: default;
