@@ -162,7 +162,7 @@ export default {
 }
 
 .number-cell.current {
-  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-coral-dark) 100%);
+  background: var(--accent-coral);
   color: white;
   border-color: var(--accent-coral-dark);
   transform: scale(1.15);

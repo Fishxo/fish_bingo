@@ -58,7 +58,7 @@ export default {
 
 <style scoped>
 .number-call-display {
-  background: linear-gradient(135deg, var(--primary-medium) 0%, var(--primary-dark) 100%);
+  background: var(--primary-dark);
   padding: 10px;
   border-radius: 16px;
   margin: 5px;

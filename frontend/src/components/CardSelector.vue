@@ -106,14 +106,13 @@ export default {
 }
 
 .card-option.taken {
-  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-coral-dark) 100%);
+  background: var(--accent-coral);
   cursor: not-allowed;
   opacity: 0.85;
-  border-color: var(--accent-coral-dark);
 }
 
 .card-option.selected {
-  background: linear-gradient(135deg, var(--success-green) 0%, var(--success-green-dark) 100%);
+  background:var(--success-green-dark);
   transform: scale(1.15);
   box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
   cursor: pointer;

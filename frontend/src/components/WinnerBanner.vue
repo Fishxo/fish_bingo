@@ -230,7 +230,7 @@ export default {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-coral-dark) 100%);
+  background: var(--accent-coral-dark);
   color: white;
   padding: 20px;
   border-radius: 14px;
