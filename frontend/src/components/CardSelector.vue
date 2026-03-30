@@ -78,7 +78,7 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  background:#5e6269;
+  background: rgba(94, 98, 105, 0.3);
   color: white;
   border-radius: 10px;
   font-weight: 600;

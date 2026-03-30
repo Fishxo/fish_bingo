@@ -1655,7 +1655,7 @@ export default {
 .bingo-rule-hint {
   text-align: center;
   font-size: 20px;
-  color: #db0000;
+  color: #440035;
   margin: 12px 0 0;
   padding: 0 8px;
 }
