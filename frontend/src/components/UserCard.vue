@@ -385,7 +385,7 @@ export default {
 
 /* Static, darker coral when clickable - no motion to avoid distracting from card */
 .bingo-btn.enabled:not(:disabled) {
-  background: linear-gradient(135deg, #c94a4a 0%, #a63d3d 100%);
+  background: linear-gradient(135deg, #8f2086 0%, #bd329f 100%);
   cursor: pointer;
   opacity: 1;
   box-shadow: 0 2px 8px rgba(160, 60, 60, 0.4);
