@@ -326,6 +326,20 @@ def task_process_bingo_winners(self, game_id: int):
         
         # Refresh game to get latest derash
         game.refresh_from_db()
+
+        # Free play policy (unified claim path): record_game_completed is not called here; apply the same rule as stats_utils.
+        # When allow_free_play_after_real_win is False, real winners get free_play_allowed=False after the win is finalized.
+        if real_winner_cards:
+            from .models import GameSettings
+            _gs = GameSettings.get_settings()
+            if not getattr(_gs, 'allow_free_play_after_real_win', True):
+                _wids = [c.user_id for c in real_winner_cards if getattr(c, 'user_id', None)]
+                if _wids:
+                    User.objects.filter(id__in=_wids).update(free_play_allowed=False)
+                    print(
+                        f"Game {game_id}: allow_free_play_after_real_win=False → "
+                        f"free_play_allowed=False for real winner user id(s) {_wids}"
+                    )
         
         # Calculate prize split (split by ALL winners for realism, but only real users receive prizes)
         total_prize = game.total_derash
