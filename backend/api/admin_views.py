@@ -68,20 +68,28 @@ def _get_register_window_stats():
             new_starts_count_in_window = _get_users_created_today_count()
         else:
             new_starts_count_in_window = count
+        users_created_yesterday = _get_users_created_yesterday_count()
+        # When the rolling window has ended, prefer Redis ended-window count; else calendar yesterday.
+        registers_yesterday_display = registers_last_window if not window_active and registers_last_window > 0 else users_created_yesterday
         return {
             'new_starts_count_in_window': new_starts_count_in_window,
             'registers_last_window': registers_last_window,
             'register_window_active': window_active,
+            'register_window_end_ts': window_end_ts if window_active else None,
+            'registers_yesterday_display': registers_yesterday_display,
             'users_created_today': _get_users_created_today_count(),
-            'users_created_yesterday': _get_users_created_yesterday_count(),
+            'users_created_yesterday': users_created_yesterday,
         }
     except Exception:
+        users_created_yesterday = _get_users_created_yesterday_count()
         return {
             'new_starts_count_in_window': _get_users_created_today_count(),
             'registers_last_window': 0,
             'register_window_active': False,
+            'register_window_end_ts': None,
+            'registers_yesterday_display': users_created_yesterday,
             'users_created_today': _get_users_created_today_count(),
-            'users_created_yesterday': _get_users_created_yesterday_count(),
+            'users_created_yesterday': users_created_yesterday,
         }
 
 

@@ -584,13 +584,25 @@
             <div class="form-group full-width">
               <label>📋 Max register limit (new users per 24h window)</label>
               <input v-model.number="settings.daily_new_start_limit" type="number" min="0" placeholder="0 = no limit" />
-              <small class="form-hint">Registers (24h window): <strong>{{ (settings.new_starts_count_in_window ?? 0) }} / {{ settings.daily_new_start_limit }}</strong> — count updates when a new user shares contact. Users created today: <strong>{{ settings.users_created_today ?? 0 }}</strong>. 0 = no limit.</small>
-              <small
-                v-if="settings.register_window_active === false && (settings.registers_last_window ?? 0) > 0"
-                class="form-hint yesterday-registers"
-              >
-                Registers (last 24h window — ended): <strong>{{ settings.registers_last_window }}</strong>
-                — Users created yesterday: <strong>{{ settings.users_created_yesterday ?? 0 }}</strong>
+              <small class="form-hint">
+                Registers (24h window): <strong>{{ (settings.new_starts_count_in_window ?? 0) }} / {{ settings.daily_new_start_limit }}</strong>
+                <span v-if="settings.register_window_active"> — window active</span>
+                <span v-else-if="(settings.registers_last_window ?? 0) > 0"> — last window ended</span>
+                — count updates when a new user shares contact.
+                Users created today: <strong>{{ settings.users_created_today ?? 0 }}</strong>. 0 = no limit.
+              </small>
+              <small class="form-hint yesterday-registers">
+                <template v-if="settings.register_window_active === false && (settings.registers_last_window ?? 0) > 0">
+                  Registers (last 24h window — ended): <strong>{{ settings.registers_last_window }}</strong>
+                  — Users created yesterday (calendar): <strong>{{ settings.users_created_yesterday ?? 0 }}</strong>
+                </template>
+                <template v-else-if="settings.register_window_active && (settings.registers_last_window ?? 0) > 0">
+                  Registers (previous 24h window): <strong>{{ settings.registers_last_window }}</strong>
+                  — Users created yesterday (calendar): <strong>{{ settings.users_created_yesterday ?? 0 }}</strong>
+                </template>
+                <template v-else>
+                  Users created yesterday (calendar): <strong>{{ settings.users_created_yesterday ?? 0 }}</strong>
+                </template>
               </small>
             </div>
           </div>
@@ -1014,7 +1026,9 @@ export default {
         users_created_today: 0,
         users_created_yesterday: 0,
         registers_last_window: 0,
+        registers_yesterday_display: 0,
         register_window_active: true,
+        register_window_end_ts: null,
         disable_bot_start: false,
         disable_bot_register: false,
         disable_bot_transfer: false,
@@ -1133,7 +1147,7 @@ export default {
       }
     },
     async refreshData() {
-      await this.loadData()
+      await Promise.all([this.loadData(), this.loadSettings()])
     },
     async seeMoreUsers() {
       this.registeredLimit = 500
