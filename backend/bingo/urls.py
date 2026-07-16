@@ -25,24 +25,40 @@ from api import admin_views
 import os
 
 
+def _spa_index_candidates():
+    """Production build paths first; dev source index only when DEBUG is on."""
+    candidates = []
+    for dist_dir in getattr(settings, 'FRONTEND_DIST_DIRS', []):
+        candidates.append(os.path.join(dist_dir, 'index.html'))
+    if settings.DEBUG:
+        base = str(settings.BASE_DIR)
+        candidates.append(os.path.join(base, '..', 'frontend', 'index.html'))
+    return candidates
+
+
+def _frontend_assets_dir():
+    frontend_dist = getattr(settings, 'FRONTEND_DIST', None)
+    if frontend_dist:
+        assets_dir = os.path.join(frontend_dist, 'assets')
+        if os.path.isdir(assets_dir):
+            return assets_dir
+    for dist_dir in getattr(settings, 'FRONTEND_DIST_DIRS', []):
+        assets_dir = os.path.join(dist_dir, 'assets')
+        if os.path.isdir(assets_dir):
+            return assets_dir
+    return os.path.join(settings.BASE_DIR, 'frontend_dist', 'assets')
+
+
 def serve_spa_index(request):
-    """Serve the SPA index.html from frontend_dist or frontend source tree."""
-    base = getattr(settings, 'BASE_DIR', None)
-    if base is None:
-        raise Http404('Frontend not configured')
-    # Path can be Path or str
-    base = str(base)
-    candidates = [
-        os.path.join(base, 'frontend_dist', 'index.html'),
-        os.path.join(base, '..', 'frontend_dist', 'index.html'),
-        os.path.join(base, '..', 'frontend', 'index.html'),
-    ]
-    for path in candidates:
-        abs_path = os.path.abspath(path)
+    """Serve the production SPA index.html from frontend_dist."""
+    for candidate in _spa_index_candidates():
+        abs_path = os.path.abspath(candidate)
         if os.path.isfile(abs_path):
             with open(abs_path, 'r', encoding='utf-8') as f:
                 return HttpResponse(f.read(), content_type='text/html')
-    raise Http404('index.html not found')
+    raise Http404(
+        'index.html not found. Run: cd frontend && npm install && npm run build'
+    )
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -106,7 +122,7 @@ urlpatterns = [
     path('api/', include('api.urls')),
     # Serve frontend assets (JS, CSS, etc.) as static files
     re_path(r'^assets/.*$', serve, {
-        'document_root': os.path.join(settings.BASE_DIR, 'frontend_dist', 'assets'),
+        'document_root': _frontend_assets_dir(),
         'show_indexes': False
     }),
     # Serve frontend for all non-API routes (SPA routing)
