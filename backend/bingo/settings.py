@@ -34,6 +34,7 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # Get allowed hosts from environment or use default
 ALLOWED_HOSTS = [
+    '16.16.200.57',
     'goodbingo.shop',
     'www.goodbingo.shop',
     '127.0.0.1',
@@ -42,6 +43,8 @@ ALLOWED_HOSTS = [
 
 # CSRF Configuration - Required for admin panel
 CSRF_TRUSTED_ORIGINS = [
+    'http://16.16.200.57',
+    'http://16.16.200.57:8000',
     'https://goodbingo.shop',
     'https://www.goodbingo.shop',
     'http://localhost:8000',
