@@ -26,7 +26,7 @@ import os
 
 
 def serve_spa_index(request):
-    """Serve the SPA index.html from frontend_dist (tries backend/frontend_dist and repo root frontend_dist)."""
+    """Serve the SPA index.html from frontend_dist or frontend source tree."""
     base = getattr(settings, 'BASE_DIR', None)
     if base is None:
         raise Http404('Frontend not configured')
@@ -35,6 +35,7 @@ def serve_spa_index(request):
     candidates = [
         os.path.join(base, 'frontend_dist', 'index.html'),
         os.path.join(base, '..', 'frontend_dist', 'index.html'),
+        os.path.join(base, '..', 'frontend', 'index.html'),
     ]
     for path in candidates:
         abs_path = os.path.abspath(path)
