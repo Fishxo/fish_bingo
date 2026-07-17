@@ -104,11 +104,11 @@ export default {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-.letter-b { background: linear-gradient(135deg, #ff6b6b 0%, #ff5252 100%); }
-.letter-i { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-.letter-n { background: linear-gradient(135deg, #00b4d8 0%, #0077b6 100%); }
-.letter-g { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-.letter-o { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.letter-b { background: var(--bingo-b); }
+.letter-i { background: var(--bingo-i); }
+.letter-n { background: var(--bingo-n); }
+.letter-g { background: var(--bingo-g); }
+.letter-o { background: var(--bingo-o); }
 
 .number {
   font-size: 26px;
@@ -141,10 +141,10 @@ export default {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-.call-b { background: linear-gradient(135deg, #ff6b6b 0%, #ff5252 100%); }
-.call-i { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-.call-n { background: linear-gradient(135deg, #00b4d8 0%, #0077b6 100%); }
-.call-g { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-.call-o { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.call-b { background: var(--bingo-b); }
+.call-i { background: var(--bingo-i); }
+.call-n { background: var(--bingo-n); }
+.call-g { background: var(--bingo-g); }
+.call-o { background: var(--bingo-o); }
 </style>
 

@@ -73,11 +73,11 @@ export default {
   transform: scale(1.1);
 }
 
-.letter.b { background: linear-gradient(135deg, #ff6b6b 0%, #ff5252 100%); }
-.letter.i { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-.letter.n { background: linear-gradient(135deg, #00b4d8 0%, #0077b6 100%); }
-.letter.g { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-.letter.o { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.letter.b { background: var(--bingo-b); }
+.letter.i { background: var(--bingo-i); }
+.letter.n { background: var(--bingo-n); }
+.letter.g { background: var(--bingo-g); }
+.letter.o { background: var(--bingo-o); }
 
 .status-text {
   font-weight: 600;

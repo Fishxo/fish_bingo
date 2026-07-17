@@ -31,7 +31,7 @@ export default {
 
 <style scoped>
 .header {
-  background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary-medium) 100%);
+  background: var(--primary-dark);
   color: white;
   padding: 12px 16px;
   position: sticky;
@@ -48,9 +48,9 @@ export default {
 }
 
 .close-btn {
-  background: var(--accent-coral);
+  background: transparent;
   color: white;
-  border: none;
+  border: 2px solid rgba(255, 255, 255, 0.85);
   padding: 8px 16px;
   border-radius: 20px;
   cursor: pointer;
@@ -60,7 +60,7 @@ export default {
 }
 
 .close-btn:hover {
-  background: var(--accent-coral-dark);
+  background: rgba(255, 255, 255, 0.15);
   transform: translateY(-1px);
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 }

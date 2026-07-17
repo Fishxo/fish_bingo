@@ -232,11 +232,11 @@ export default {
   transform: scale(1.05);
 }
 
-.letter-cell.letter-b { background: linear-gradient(135deg, #ff6b6b 0%, #ff5252 100%); }
-.letter-cell.letter-i { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-.letter-cell.letter-n { background: linear-gradient(135deg, #00b4d8 0%, #0077b6 100%); }
-.letter-cell.letter-g { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-.letter-cell.letter-o { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.letter-cell.letter-b { background: var(--bingo-b); }
+.letter-cell.letter-i { background: var(--bingo-i); }
+.letter-cell.letter-n { background: var(--bingo-n); }
+.letter-cell.letter-g { background: var(--bingo-g); }
+.letter-cell.letter-o { background: var(--bingo-o); }
 
 .card-cell {
   aspect-ratio: 1;

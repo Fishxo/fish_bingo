@@ -78,10 +78,10 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(94, 98, 105, 0.8);
-  color: white;
+  background: var(--accent-coral);
+  color: #1a1a2e;
   border-radius: 10px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.3s ease;
   position: relative;
@@ -89,7 +89,7 @@ export default {
   font-size: 15px;
   min-height: 28px;
   min-width: 28px;
-  border: 2px solid transparent;
+  border: 2px solid var(--accent-coral-dark);
 }
 
 .card-option:disabled,
@@ -101,28 +101,31 @@ export default {
 .card-option:hover:not(.taken):not(.selected) {
   transform: scale(1.1) translateY(-2px);
   box-shadow: 0 6px 12px rgba(0, 0, 0, 0.25);
-  border-color: var(--primary-medium);
-  background: linear-gradient(135deg, var(--primary-medium) 0%, var(--primary-dark) 100%);
+  border-color: var(--accent-coral-dark);
+  background: #ffa033;
 }
 
 .card-option.taken {
-  background: var(--accent-coral);
+  background: var(--neutral-btn-bg);
+  color: var(--neutral-btn-text);
+  border-color: #b8bcc4;
   cursor: not-allowed;
-  opacity: 0.85;
+  opacity: 0.95;
 }
 
 .card-option.selected {
-  background:var(--success-green-dark);
+  background: var(--success-green);
+  color: #fff;
   transform: scale(1.15);
-  box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 20px rgba(0, 128, 0, 0.45);
   cursor: pointer;
   border-color: var(--success-green-dark);
   animation: selectedPulse 2s infinite;
 }
 
 @keyframes selectedPulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.5); }
-  50% { box-shadow: 0 0 25px rgba(16, 185, 129, 0.7); }
+  0%, 100% { box-shadow: 0 0 20px rgba(0, 128, 0, 0.45); }
+  50% { box-shadow: 0 0 25px rgba(0, 128, 0, 0.65); }
 }
 
 .card-option.taken.selected {

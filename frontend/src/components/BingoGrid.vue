@@ -104,11 +104,11 @@ export default {
   transform: scale(1.05);
 }
 
-.letter-cell.letter-b { background: linear-gradient(135deg, #ff6b6b 0%, #ff5252 100%); }
-.letter-cell.letter-i { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-.letter-cell.letter-n { background: linear-gradient(135deg, #00b4d8 0%, #0077b6 100%); }
-.letter-cell.letter-g { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-.letter-cell.letter-o { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.letter-cell.letter-b { background: var(--bingo-b); }
+.letter-cell.letter-i { background: var(--bingo-i); }
+.letter-cell.letter-n { background: var(--bingo-n); }
+.letter-cell.letter-g { background: var(--bingo-g); }
+.letter-cell.letter-o { background: var(--bingo-o); }
 
 .grid-container {
   display: grid;
@@ -155,18 +155,18 @@ export default {
 }
 
 .number-cell.called {
-  background: linear-gradient(135deg, var(--success-green) 0%, var(--success-green-dark) 100%);
-  color: white;
-  border-color: var(--success-green-dark);
-  box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
+  background: var(--accent-coral);
+  color: #1a1a2e;
+  border-color: var(--accent-coral-dark);
+  box-shadow: 0 2px 4px rgba(255, 140, 0, 0.35);
 }
 
 .number-cell.current {
-  background: var(--accent-coral);
+  background: var(--success-green);
   color: white;
-  border-color: var(--accent-coral-dark);
+  border-color: var(--success-green-dark);
   transform: scale(1.15);
-  box-shadow: 0 0 15px rgba(255, 107, 107, 0.6);
+  box-shadow: 0 0 15px rgba(0, 128, 0, 0.55);
   z-index: 10;
   position: relative;
   animation: pulse 1s infinite;
