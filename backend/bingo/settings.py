@@ -346,7 +346,12 @@ CELERY_RESULT_EXPIRES = 3600  # Expire results after 1 hour
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 # Web app URL (EC2 production or localhost for development)
-TELEGRAM_WEB_APP_URL = os.getenv('TELEGRAM_WEB_APP_URL', 'https://goodbingo.shop')
+# TELEGRAM_WEB_URL is a legacy alias some deployments use by mistake
+TELEGRAM_WEB_APP_URL = (
+    os.getenv('TELEGRAM_WEB_APP_URL')
+    or os.getenv('TELEGRAM_WEB_URL')
+    or 'https://goodbingo.shop'
+)
 
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', SECRET_KEY)
