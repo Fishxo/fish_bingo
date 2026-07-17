@@ -1,4 +1,4 @@
-# Markos Bingo – Performance & Capacity Analysis (EC2 t3.micro, 20GB)
+# Feka Bingo – Performance & Capacity Analysis (EC2 t3.micro, 20GB)
 
 ## Quick answers (t3.micro, 20GB disk, single game)
 

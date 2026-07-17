@@ -3,7 +3,7 @@
     <div class="header-content">
       <button class="close-btn" @click="closeApp">Close</button>
       <div class="title">
-        <h1>ጉድ ቢንጎ</h1>
+        <h1>ፌካ ቢንጎ</h1>
         <p>mini app</p>
       </div>
       <button class="menu-btn">⋮</button>

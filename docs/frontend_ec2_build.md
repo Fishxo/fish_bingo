@@ -2,7 +2,7 @@
 
 ## Root cause of white screen
 
-If the browser shows a blank page but the tab title is **Markos Bingo**, Django is likely serving the **development** `frontend/index.html`, which contains:
+If the browser shows a blank page but the tab title is **Feka Bingo**, Django is likely serving the **development** `frontend/index.html`, which contains:
 
 ```html
 <script type="module" src="/src/main.js"></script>

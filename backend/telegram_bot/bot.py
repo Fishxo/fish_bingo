@@ -198,7 +198,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"Error storing referrer: {e}")
                 
                 # Show registration prompt
-                welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+                welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
                 # Show only register button
                 keyboard = [
                     [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
@@ -248,7 +248,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Created new user {user.id} with referrer {referrer_telegram_id}")
             
             # Show registration prompt
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             # Show only register button
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
@@ -367,7 +367,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if user is registered
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -525,7 +525,7 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if user is registered
     if not await is_user_registered(user.id):
-        welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+        welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
         keyboard = [
             [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
         ]
@@ -591,7 +591,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if user is registered
     if not await is_user_registered(user.id):
-        welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+        welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
         keyboard = [
             [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
         ]
@@ -688,7 +688,7 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if user is registered
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -759,7 +759,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if user is registered
     if not await is_user_registered(user.id):
-        welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+        welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
         keyboard = [
             [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
         ]
@@ -804,7 +804,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 DEFAULT_INSTRUCTIONS = (
-    "📋 ጉድ ቢንጎ የጨዋታ መመሪያ:\n\n"
+    "📋 ፌካ ቢንጎ የጨዋታ መመሪያ:\n\n"
     "1. **ለመመዝገብ**: /register(ለመመዝገብ) የሚለውን ይጫኑ፡፡\n\n"
     "2. **ለመጫወት**:\n"
     "   - ጨዋታ ለመቀላቀል /play(ጨዋታ ለመጀመር) ይጫኑ፡፡\n"
@@ -886,7 +886,7 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Fix URL encoding - use proper encoding for Amharic text
     import urllib.parse
-    invite_text = "ጎ ቢንጎ ጨዋታ ይጫወቱ!"
+    invite_text = "ፌካ ቢንጎ ጨዋታ ይጫወቱ!"
     encoded_text = urllib.parse.quote(invite_text)
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(invite_link)}&text={encoded_text}"
     
@@ -1113,7 +1113,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🎮 ጨዋታ ለመጀመር":
         # Check registration before allowing play
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -1127,7 +1127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_financial_command_states(context)
         # Check registration before allowing deposit
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -1141,7 +1141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_financial_command_states(context)
         # Check registration before allowing withdraw
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -1153,7 +1153,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "💵 ሂሳብዎን ለማወቅ":
         # Check registration before allowing balance
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -1167,7 +1167,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_financial_command_states(context)
         # Check registration before allowing transfer
         if not await is_user_registered(user.id):
-            welcome_msg = "እንኳን ወደ ጎ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+            welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
             keyboard = [
                 [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
             ]
@@ -2062,7 +2062,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await register_command(update, context)
     elif not is_registered:
         # User not registered, show registration prompt
-        welcome_msg = "እንኳን ወደ ጉድ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
+        welcome_msg = "እንኳን ወደ ፌካ ቢንጎ በደህና መጡ! 🎉\n\n/register በመንካት ይመዝገቡ፡፡"
         keyboard = [
             [InlineKeyboardButton("📝 ለመመዝገብ", callback_data="register")]
         ]
