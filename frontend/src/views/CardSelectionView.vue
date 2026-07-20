@@ -972,9 +972,23 @@ export default {
 </script>
 
 <style scoped>
+/* Card selection page only — teal & cream theme (not app-wide purple/lavender) */
 .card-selection-view {
+  --picker-free-bg: #ffffff;
+  --picker-free-border: #cbd5e1;
+  --picker-free-text: #64748b;
+  --picker-free-hover-bg: #f0fdfa;
+  --picker-free-hover-border: #5eead4;
+  --picker-free-hover-text: #0f766e;
+  --picker-busy-bg: #eef2f6;
+  --picker-busy-border: #e2e8f0;
+  --picker-busy-text: #a8b4c4;
+  --picker-mine-bg: #0d9488;
+  --picker-mine-border: #0f766e;
+  --picker-legend-text: #475569;
+
   min-height: 100vh;
-  background: var(--primary-light);
+  background: linear-gradient(180deg, #e8f4f2 0%, #f0f7fb 45%, #eef2f6 100%);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -988,13 +1002,39 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.95);
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #0f766e 0%, #115e59 100%);
   z-index: 100;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: 0 4px 16px rgba(15, 118, 110, 0.35);
   flex-wrap: nowrap;
   min-width: 0;
   gap: 10px;
+}
+
+.timer-label-text,
+.wallet-label,
+.bet-label {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.wallet-amount {
+  color: #a7f3d0;
+}
+
+.bet-amount-top {
+  color: #fde68a;
+}
+
+.top-section :deep(.card-selection-timer .timer-display) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+  box-shadow: none;
+}
+
+.top-section :deep(.card-selection-timer .timer-text) {
+  color: #fff;
+  font-weight: 700;
 }
 
 .timer-section-top {
@@ -1012,8 +1052,7 @@ export default {
 
 .timer-label-text {
   font-size: 11px;
-  font-weight: 700;
-  color: var(--primary-dark);
+  font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -1029,15 +1068,13 @@ export default {
 
 .wallet-label {
   font-size: 11px;
-  font-weight: 700;
-  color: var(--primary-dark);
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .wallet-amount {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--success-green);
+  font-size: 12px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
@@ -1051,49 +1088,54 @@ export default {
 
 .bet-label {
   font-size: 11px;
-  font-weight: 700;
-  color: var(--primary-dark);
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .bet-amount-top {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--accent-coral);
+  font-size: 12px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
 .select-card-section {
   position: fixed;
-  top: 60px; /* Adjust this value to change position below top section */
+  top: 50px;
   left: 0;
   right: 0;
-  padding: 10px;
+  padding: 10px 14px 0;
   text-align: center;
-  background: var(--primary-light);
+  background: transparent;
   z-index: 99;
-  border-radius: 0 0 12px 12px;
 }
 
 .select-card-text {
-  font-size: 17px;
+  display: inline-block;
+  font-size: 14px;
   font-weight: 700;
-  color: var(--primary-dark);
+  color: #0f766e;
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  padding: 8px 20px;
+  background: #fff;
+  border-radius: 999px;
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.1);
+  letter-spacing: 0.2px;
 }
 
 .card-selector-container {
   position: fixed;
-  top: 80px; /* Adjust this value - Start below top section and select card text */
-  left: 0;
-  right: 0;
-  bottom: 32vh; /* Increased space for cards section (reduced from 40vh) */
+  top: 96px;
+  left: 10px;
+  right: 10px;
+  bottom: 32vh;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px;
-  background: var(--primary-light);
+  padding: 16px 12px 18px;
+  background: #fff;
+  border: 1px solid rgba(13, 148, 136, 0.15);
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
   z-index: 10;
 }
 
@@ -1124,22 +1166,22 @@ export default {
    ============================================ */
 .selected-card-section {
   position: fixed;
-  top: auto; /* Ensure it never sticks to top */
-  bottom: 0; /* Keep at bottom so it does not overlay top row cards */
+  top: auto;
+  bottom: 0;
   left: 0;
   right: 0;
-  background: var(--primary-light);
-  padding: 20px 0px 12px; /* More top padding so card heading stays inside border */
-  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
-  border-top: 2px solid rgba(255, 255, 255, 0.3);
-  border-radius: 16px 16px 0 0;
+  background: linear-gradient(180deg, #fff 0%, #f0fdfa 100%);
+  padding: 16px 0 12px;
+  box-shadow: 0 -8px 24px rgba(15, 118, 110, 0.12);
+  border-top: 3px solid #0d9488;
+  border-radius: 20px 20px 0 0;
   z-index: 50;
-  height: 28vh; /* Reduced from 40vh to make more compact */
-  max-height: 28vh; /* Should match height value above */
+  height: 28vh;
+  max-height: 28vh;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center; /* Center the card vertically */
+  justify-content: center;
 }
 
 .selected-card-header {
