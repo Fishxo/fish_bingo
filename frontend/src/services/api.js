@@ -161,6 +161,16 @@ export async function getUserBalance() {
   return response.data
 }
 
+export async function getWalletInfo() {
+  const response = await api.get('/wallet/')
+  return response.data
+}
+
+export async function listGames(page = 1) {
+  const response = await api.get('/games/', { params: { page } })
+  return response.data
+}
+
 // Games
 export async function getCurrentGame() {
   const response = await api.get('/games/current/')

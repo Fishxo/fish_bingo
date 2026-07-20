@@ -75,13 +75,12 @@ export default {
             this.$router.push('/game').catch(() => {})
           }
         } else if (game && game.status === 'completed') {
-          // Game just finished - go to card selection to join next game
           this.redirecting = true
           if (this.interval) {
             clearInterval(this.interval)
             this.interval = null
           }
-          this.$router.push('/select-card').catch(() => {})
+          this.$router.push('/home').catch(() => {})
         }
       } catch (error) {
         // No game found - backend should create one soon, keep polling
