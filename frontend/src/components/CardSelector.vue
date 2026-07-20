@@ -13,7 +13,7 @@
         type="button"
         class="card-option"
         :class="{
-          taken: isTaken(num) && selectedCard !== num,
+          taken: isTaken(num),
           selected: selectedCard === num
         }"
         :disabled="isTaken(num) && selectedCard !== num"
@@ -165,40 +165,36 @@ export default {
   outline-offset: 2px;
 }
 
-/* Taken — faded, never loud (no orange) */
+/* Any selected card — system or real user */
 .card-option.taken {
-  background: var(--picker-busy-bg, #eef2f6);
-  color: var(--picker-busy-text, #a8b4c4);
-  border-color: var(--picker-busy-border, #e2e8f0);
-  font-weight: 400;
-  font-size: 12px;
+  background: linear-gradient(160deg, #22c55e 0%, #16a34a 50%, #15803d 100%);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  border: 2px solid #fff;
+  outline: 2px solid #16a34a;
+  box-shadow:
+    0 0 0 2px rgba(22, 163, 74, 0.3),
+    0 4px 12px rgba(21, 128, 61, 0.3);
+  z-index: 1;
+  opacity: 1;
   cursor: not-allowed;
-  opacity: 0.55;
-  box-shadow: none;
 }
 
-.card-option.taken .card-num {
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
-}
-
-/* Your card — only strong highlight on the page */
+/* Your own card — same green, slightly stronger */
 .card-option.selected {
-  background: linear-gradient(160deg, #14b8a6 0%, var(--picker-mine-bg, #0d9488) 50%, #0f766e 100%);
+  background: linear-gradient(160deg, #22c55e 0%, #16a34a 50%, #15803d 100%);
   color: #fff;
   font-weight: 800;
   font-size: 14px;
   border: 2px solid #fff;
-  outline: 2px solid var(--picker-mine-bg, #0d9488);
+  outline: 2px solid #16a34a;
   transform: scale(1.1);
   box-shadow:
-    0 0 0 3px rgba(13, 148, 136, 0.3),
-    0 8px 18px rgba(15, 118, 110, 0.35);
+    0 0 0 3px rgba(22, 163, 74, 0.35),
+    0 8px 18px rgba(21, 128, 61, 0.35);
   z-index: 2;
   opacity: 1;
-}
-
-.card-option.selected.taken {
   cursor: pointer;
 }
 
@@ -212,7 +208,7 @@ export default {
   height: 13px;
   border-radius: 50%;
   background: #fff;
-  color: #0f766e;
+  color: #15803d;
   display: flex;
   align-items: center;
   justify-content: center;
