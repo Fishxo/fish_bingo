@@ -395,8 +395,24 @@ export default {
           }
           
           // Load user's card
-          try {
-            const card = await getMyCard(game.id)
+          const card = await getMyCard(game.id)
+          if (!card) {
+            if (game.status === 'waiting') {
+              if (this.interval) {
+                clearInterval(this.interval)
+                this.interval = null
+              }
+              this.$router.push('/select-card').catch(() => {})
+              return
+            }
+            const winnerDeclared = this._winnerBannerActive || this.winner || (this.winners && this.winners.length)
+            const hadCard = !!this.userCard
+            const gameAlreadyCompleted = this.game && this.game.status === 'completed'
+            if (!winnerDeclared && !hadCard && !gameAlreadyCompleted) {
+              this.userCard = null
+              this.falseBingoClickCount = 0
+            }
+          } else {
             this.userCard = card
             this.falseBingoClickCount = 0
             
@@ -407,30 +423,6 @@ export default {
             } else {
               // Default to manual if no mode history
               this.gameMode = 'manual'
-            }
-            
-          } catch (error) {
-            console.error('Error loading card:', error)
-            // User doesn't have a card
-            if (error.response?.status === 404) {
-              // If game is waiting, redirect to card selection
-              if (game.status === 'waiting') {
-                if (this.interval) {
-                  clearInterval(this.interval)
-                  this.interval = null
-                }
-                this.$router.push('/select-card').catch(() => {})
-                return
-              }
-              // Don't clear userCard when winner is declared, game already completed, or we had a card.
-              const winnerDeclared = this._winnerBannerActive || this.winner || (this.winners && this.winners.length)
-              const hadCard = !!this.userCard
-              const gameAlreadyCompleted = this.game && this.game.status === 'completed'
-              if (!winnerDeclared && !hadCard && !gameAlreadyCompleted) {
-                // Spectator in active game: no card to show
-                this.userCard = null
-                this.falseBingoClickCount = 0
-              }
             }
           }
           
@@ -1370,11 +1362,13 @@ export default {
           // Refresh user card to get updated layout
           if (this.game) {
             const card = await getMyCard(this.game.id)
-            this.userCard = card
-            this.falseBingoClickCount = 0
-            // Check again if winner was declared during the API call
-            if (card.is_winner || (this.game && this.game.status === 'completed')) {
-              return // Game is over, stop processing
+            if (card) {
+              this.userCard = card
+              this.falseBingoClickCount = 0
+              // Check again if winner was declared during the API call
+              if (card.is_winner || (this.game && this.game.status === 'completed')) {
+                return // Game is over, stop processing
+              }
             }
           }
         } catch (error) {

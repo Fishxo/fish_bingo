@@ -190,8 +190,20 @@ export async function selectCard(gameId, cardNumber) {
 }
 
 export async function getMyCard(gameId) {
-  const response = await api.get(`/games/${gameId}/my_card/`)
-  return response.data
+  try {
+    const response = await api.get(`/games/${gameId}/my_card/`)
+    const data = response.data
+    if (data && data.has_card === false) {
+      return null
+    }
+    return data
+  } catch (error) {
+    // Backward compatibility: older backend returned 404 when user had no card
+    if (error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
 }
 
 export async function getAvailableCards(gameId) {
@@ -450,6 +462,15 @@ export async function secondAdminLogin(username, password) {
 
 export async function secondAdminLogout() {
   const response = await adminApi.post('/secondadmin/logout/')
+  return response.data
+}
+
+export async function secondAdminChangePassword(currentPassword, newPassword, confirmPassword) {
+  const response = await adminApi.post('/secondadmin/change-password/', {
+    current_password: currentPassword,
+    new_password: newPassword,
+    confirm_password: confirmPassword
+  })
   return response.data
 }
 

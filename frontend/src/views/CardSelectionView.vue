@@ -152,7 +152,9 @@ export default {
       /** Tracks last game id we bound UI/timer/WS to — new id resets phase state */
       _loadedGameId: null,
       /** Last WebSocket role (player vs watcher) we connected with */
-      _wsBoundRole: null
+      _wsBoundRole: null,
+      /** Skip redundant my_card API calls during polling when already known empty */
+      _myCardCheckedForGameId: null
     }
   },
   async mounted() {
@@ -291,6 +293,7 @@ export default {
           this.isCurrentUserWinner = false
           this.isRedirecting = false
           this._wsBoundRole = null
+          this._myCardCheckedForGameId = null
           if (this.ws) {
             this.ws.disconnect()
             this.ws = null
@@ -308,33 +311,44 @@ export default {
         }
         
         if (game) {
-          // Check if user already has a card for this game
-          try {
-            const myCard = await getMyCard(game.id)
-            if (myCard) {
-              this.selectedCard = myCard.card_number
-              this.userCard = myCard
-              // User already has a card
-              // If game is active, redirect to game view
-              if (game.status === 'active') {
-                if (this.interval) {
-                  clearInterval(this.interval)
-                  this.interval = null
+          const shouldCheckMyCard =
+            this._myCardCheckedForGameId !== game.id ||
+            this.userCard ||
+            this.selectedCard
+
+          if (shouldCheckMyCard) {
+            try {
+              const myCard = await getMyCard(game.id)
+              this._myCardCheckedForGameId = game.id
+              if (myCard) {
+                this.selectedCard = myCard.card_number
+                this.userCard = myCard
+                // User already has a card
+                // If game is active, redirect to game view
+                if (game.status === 'active') {
+                  if (this.interval) {
+                    clearInterval(this.interval)
+                    this.interval = null
+                  }
+                  if (this.timerInterval) {
+                    clearInterval(this.timerInterval)
+                    this.timerInterval = null
+                  }
+                  this.$router.push('/game')
+                  return
                 }
-                if (this.timerInterval) {
-                  clearInterval(this.timerInterval)
-                  this.timerInterval = null
-                }
-                this.$router.push('/game')
-                return
+              } else {
+                this.userCard = null
+                this.selectedCard = null
               }
-            } else {
+            } catch (error) {
+              // Auth errors or transient failures — treat as no card for selection UI
+              if (error.response?.status === 401 || error.response?.status === 403) {
+                this._myCardCheckedForGameId = game.id
+              }
+              this.selectedCard = null
               this.userCard = null
             }
-          } catch (error) {
-            // User doesn't have a card yet, that's fine
-            this.selectedCard = null
-            this.userCard = null
           }
           
           const available = await getAvailableCards(game.id)
@@ -867,6 +881,7 @@ export default {
             // Card was unselected and refunded
             this.selectedCard = null
             this.userCard = null
+            this._myCardCheckedForGameId = null
             
             // Update balance from response
             if (response.balance !== undefined) {
@@ -894,6 +909,7 @@ export default {
           // Card was selected - update with server response (real layout)
           this.selectedCard = cardNumber
           this.userCard = response // This contains the real card layout from server
+          this._myCardCheckedForGameId = this.game?.id ?? null
           
           // Update balance from response
           if (response.balance !== undefined) {

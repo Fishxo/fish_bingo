@@ -926,10 +926,14 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
         card = GameCard.objects.filter(game=game, user=user).first()
         
         if not card:
-            return Response({'message': 'No card selected for this game'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                'has_card': False,
+                'message': 'No card selected for this game',
+            })
         
         serializer = GameCardDetailSerializer(card)
         card_data = serializer.data
+        card_data['has_card'] = True
         
         # Cache the card data for 2 seconds (short TTL for real-time updates)
         cache.set(cache_key, card_data, 2)
