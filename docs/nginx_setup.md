@@ -81,3 +81,4 @@ sudo journalctl -u nginx -f
 | 404 on `/static/` | Run `collectstatic` and verify `static/` path |
 | WebSocket fails | Confirm `/ws/` location and Redis are running |
 | Connection refused on :80 | Security group + `sudo systemctl status nginx` |
+| `invalid parameter "immutable"` | Use `add_header Cache-Control "public";` (not `"public, immutable"`) in site config, then `sudo nginx -t && sudo systemctl restart nginx` |

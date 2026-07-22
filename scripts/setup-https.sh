@@ -147,7 +147,7 @@ server {
     location /static/ {
         alias ${BACKEND_DIR}/staticfiles/;
         expires 30d;
-        add_header Cache-Control "public, immutable";
+        add_header Cache-Control "public";
     }
 
     # Media files
