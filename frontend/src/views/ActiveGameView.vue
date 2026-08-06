@@ -23,13 +23,22 @@
       :call="game?.current_call_count || 0"
     />
     
-    <!-- Mode Selection Dropdown -->
+    <!-- Mode toggle: ON = automatic, OFF = manual (defaults ON) -->
     <div class="mode-selector" v-if="userCard && game?.automatic_mode_enabled">
-      <label for="game-mode">የጨዋታ አይነት:</label>
-      <select id="game-mode" v-model="gameMode" @change="handleModeChange">
-        <option value="manual">Manual</option>
-        <option value="automatic">Automatic</option>
-      </select>
+      <span class="mode-label">Auto</span>
+      <button
+        type="button"
+        class="mode-toggle"
+        :class="{ on: gameMode === 'automatic' }"
+        :aria-pressed="gameMode === 'automatic'"
+        :aria-label="gameMode === 'automatic' ? 'Automatic on' : 'Automatic off'"
+        @click="toggleGameMode"
+      >
+        <span class="mode-toggle-knob"></span>
+      </button>
+      <span class="mode-state" :class="{ on: gameMode === 'automatic' }">
+        {{ gameMode === 'automatic' ? 'ON' : 'OFF' }}
+      </span>
     </div>
     
     <div class="game-content">
@@ -145,7 +154,7 @@ export default {
       winnerPrize: 0,
       totalPrize: null, // Total prize before split
       showWinnerBanner: false, // Separate flag for banner visibility (independent of winner data)
-      gameMode: 'manual', // 'manual' or 'automatic'
+      gameMode: 'automatic', // 'automatic' (ON) or 'manual' (OFF) — default ON
       automaticallyMarkedNumbers: new Set(), // Track numbers marked automatically
       ws: null,
       wsConnected: false, // Track WebSocket connection state
@@ -416,13 +425,13 @@ export default {
             this.userCard = card
             this.falseBingoClickCount = 0
             
-            // Initialize gameMode from card's mode_history
+            // Initialize gameMode from card's mode_history; default ON (automatic)
             if (card.mode_history && card.mode_history.length > 0) {
               const lastModeEntry = card.mode_history[card.mode_history.length - 1]
-              this.gameMode = lastModeEntry.mode || 'manual'
+              this.gameMode = lastModeEntry.mode || 'automatic'
             } else {
-              // Default to manual if no mode history
-              this.gameMode = 'manual'
+              this.gameMode = 'automatic'
+              updateGameMode(card.id, 'automatic').catch(() => {})
             }
           }
           
@@ -1309,6 +1318,10 @@ export default {
       if (layout.every(row => row.every(cell => isCellMarked(cell)))) return true
       return false
     },
+    toggleGameMode() {
+      this.gameMode = this.gameMode === 'automatic' ? 'manual' : 'automatic'
+      this.handleModeChange()
+    },
     async handleModeChange() {
       // Update mode on backend
       if (this.userCard) {
@@ -1552,24 +1565,53 @@ export default {
   font-size: 14px;
 }
 
-.mode-selector label {
+.mode-label {
   font-weight: bold;
   color: var(--primary-dark);
 }
 
-.mode-selector select {
-  padding: 5px 10px;
-  border: 2px solid var(--primary-light);
-  border-radius: 5px;
-  background: white;
-  color: var(--primary-dark);
-  font-size: 14px;
+.mode-toggle {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: #cbd5e1;
   cursor: pointer;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
 }
 
-.mode-selector select:focus {
-  outline: none;
-  border-color: var(--primary-dark);
+.mode-toggle.on {
+  background: var(--success-green);
+}
+
+.mode-toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s ease;
+}
+
+.mode-toggle.on .mode-toggle-knob {
+  transform: translateX(24px);
+}
+
+.mode-state {
+  font-weight: 700;
+  font-size: 13px;
+  color: #64748b;
+  min-width: 28px;
+}
+
+.mode-state.on {
+  color: var(--success-green);
 }
 
 .game-content {
