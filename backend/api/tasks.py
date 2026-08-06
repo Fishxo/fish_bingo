@@ -8,7 +8,6 @@ from .game_logic import (
     call_number,
     check_bingo,
     claim_bingo,
-    generate_bingo_card,
     create_game_card,
     check_bingo_from_marked,
 )
@@ -1263,10 +1262,7 @@ def task_generate_and_create_card(self, game_id: int, user_id: int, card_number:
         game = Game.objects.get(id=game_id)
         user = User.objects.get(id=user_id)
         
-        # Generate card layout
-        card_data = generate_bingo_card()
-        
-        # Create the card (this handles payment and validation)
+        # Create the card (loads permanent layout + handles payment/validation)
         card = create_game_card(game, user, card_number)
         
         # Broadcast card selection (players + watchers rooms)
@@ -3495,7 +3491,13 @@ def task_adjust_fake_users_before_game_start(self, game_id: int):
         from .models import GameSettings
         settings = GameSettings.get_settings()
         min_system_accounts = getattr(settings, 'system_accounts_min', 15)
-        max_system_accounts = getattr(settings, 'system_accounts_max', 30)
+        max_system_accounts = getattr(settings, 'system_accounts_max', 100)
+        if max_system_accounts is None:
+            max_system_accounts = 100
+        if min_system_accounts is None:
+            min_system_accounts = 15
+        if max_system_accounts < min_system_accounts:
+            max_system_accounts = min_system_accounts
         
         # FIRST: Ensure we have at least the minimum number of fake users
         # If we're below minimum, add more (this handles cases where some selections failed)
@@ -3563,6 +3565,36 @@ def task_adjust_fake_users_before_game_start(self, game_id: int):
                     print(f"Game {game_id}: Not enough available cards ({len(available_cards)}) to add {fake_users_needed} fake users")
             else:
                 print(f"Game {game_id}: Not enough available fake users ({len(all_fake_users)}) to add {fake_users_needed}")
+        
+        # Refresh count after possible additions
+        fake_user_count = get_fake_user_count_for_game(game)
+
+        # ENFORCE MAX: trim fake users above system_accounts_max
+        if fake_user_count > max_system_accounts:
+            excess = fake_user_count - max_system_accounts
+            fake_cards = list(FakeUserGameCard.objects.filter(game=game))
+            import random
+            cards_to_trim = random.sample(fake_cards, min(excess, len(fake_cards)))
+            for card in cards_to_trim:
+                try:
+                    from .game_logic import get_available_card_numbers
+                    name = card.fake_user.name
+                    card.delete()
+                    broadcast_to_game_rooms(game.id, 'card_selected', {
+                        'card_number': None,
+                        'user_id': None,
+                        'username': name,
+                        'is_fake': True,
+                        'available_cards': get_available_card_numbers(game)
+                    })
+                except Exception as e:
+                    print(f"Error trimming fake user to max: {e}")
+            fake_user_count = get_fake_user_count_for_game(game)
+            print(f"Game {game_id}: Trimmed fake users to max {max_system_accounts} (now {fake_user_count})")
+            from django.core.cache import cache
+            if cache:
+                cache.delete('game:current')
+                cache.delete(f'game:{game.id}')
         
         # SECOND: Calculate how many fake users to remove (if we have more than needed)
         # For every real player, remove one fake user, BUT never go below minimum

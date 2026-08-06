@@ -52,6 +52,7 @@ def generate_bingo_card() -> Dict:
     - O column: 61-75 (randomly shuffled)
     
     Numbers are randomly arranged within each column (traditional bingo style).
+    Used only to seed permanent CardTemplate rows — not for every game selection.
     """
     # Sample numbers for each column and shuffle them (don't sort - keep random order)
     card = {
@@ -99,6 +100,32 @@ def generate_bingo_card() -> Dict:
     }
 
 
+def get_permanent_card_layout(card_number: int) -> list:
+    """
+    Return a fresh (unmarked) copy of the permanent layout for this card_number.
+    Creates and stores the template once if it does not exist yet.
+    """
+    import copy
+    from .models import CardTemplate
+
+    template = CardTemplate.objects.filter(card_number=card_number).first()
+    if not template:
+        card_data = generate_bingo_card()
+        template, _ = CardTemplate.objects.get_or_create(
+            card_number=card_number,
+            defaults={'layout': card_data['layout']},
+        )
+
+    layout = copy.deepcopy(template.layout)
+    for row in layout:
+        for cell in row:
+            if cell.get('letter') == 'FREE':
+                cell['marked'] = True
+            else:
+                cell['marked'] = False
+    return layout
+
+
 def create_game_card(game: Game, user: User, card_number: int) -> GameCard:
     """Create a new game card for a user in a game"""
     # Check if user already has a card for this game
@@ -124,8 +151,8 @@ def create_game_card(game: Game, user: User, card_number: int) -> GameCard:
     if GameCard.objects.filter(game=game, card_number=card_number).exists():
         raise ValueError(f"Card {card_number} is already taken for this game")
     
-    # Generate card layout
-    card_data = generate_bingo_card()
+    # Load permanent layout for this card slot (same numbers every game)
+    card_layout = get_permanent_card_layout(card_number)
     
     # Only deduct payment if user hasn't paid yet (first time selecting a card for this game)
     if not user_already_paid:
@@ -184,7 +211,7 @@ def create_game_card(game: Game, user: User, card_number: int) -> GameCard:
         game=game,
         user=user,
         card_number=card_number,
-        card_layout=card_data['layout'],
+        card_layout=card_layout,
         selected_numbers=[]
     )
     
@@ -760,7 +787,7 @@ def start_game(game: Game) -> bool:
         'card_selection_timer': settings.card_selection_timer,
         'total_cards': settings.total_cards,
         'system_accounts_min': getattr(settings, 'system_accounts_min', 15),
-        'system_accounts_max': getattr(settings, 'system_accounts_max', 30),
+        'system_accounts_max': getattr(settings, 'system_accounts_max', 100),
         'winning_patterns': getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']),
         'test_co_win_mode': False,
         'anti_abuse_filter_enabled': getattr(settings, 'anti_abuse_filter_enabled', False),
@@ -791,6 +818,13 @@ def start_game(game: Game) -> bool:
     # Skip minimum fake fill when test co-win next game is armed (need exactly 1 real + 1 fake for QA)
     if allow_system_account and not test_co_win_armed:
         min_system_accounts = getattr(settings, 'system_accounts_min', 15)
+        max_system_accounts = getattr(settings, 'system_accounts_max', 100)
+        if max_system_accounts is None:
+            max_system_accounts = 100
+        if min_system_accounts is None:
+            min_system_accounts = 15
+        if max_system_accounts < min_system_accounts:
+            max_system_accounts = min_system_accounts
         # If we have fewer fake users than minimum, add more immediately
         if fake_player_count < min_system_accounts:
             try:
@@ -861,6 +895,25 @@ def start_game(game: Game) -> bool:
                 print(f"Error in final fake user check for game {game.id}: {e}")
                 import traceback
                 traceback.print_exc()
+
+        # Enforce system_accounts_max before starting
+        try:
+            from .fake_user_manager import get_fake_user_count_for_game
+            from .models import FakeUserGameCard
+            import random
+            fake_player_count = get_fake_user_count_for_game(game)
+            if fake_player_count > max_system_accounts:
+                excess = fake_player_count - max_system_accounts
+                fake_cards = list(FakeUserGameCard.objects.filter(game=game))
+                for card in random.sample(fake_cards, min(excess, len(fake_cards))):
+                    card.delete()
+                fake_player_count = get_fake_user_count_for_game(game)
+                print(f"Game {game.id}: Trimmed fake users to max {max_system_accounts} at start (now {fake_player_count})")
+                from django.core.cache import cache as django_cache
+                if django_cache:
+                    django_cache.delete('game:current')
+        except Exception as e:
+            print(f"Error trimming fake users to max at start for game {game.id}: {e}")
     
     # Require at least 2 total players to start the game
     # BUT: If system accounts are enabled, allow starting with just fake players (even 0 real players)

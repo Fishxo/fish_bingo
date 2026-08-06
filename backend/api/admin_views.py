@@ -328,7 +328,7 @@ def admin_dashboard(request):
     if not hasattr(game_settings, 'system_accounts_min'):
         game_settings.system_accounts_min = 15
     if not hasattr(game_settings, 'system_accounts_max'):
-        game_settings.system_accounts_max = 30
+        game_settings.system_accounts_max = 100
     if not hasattr(game_settings, 'winning_patterns') or not game_settings.winning_patterns:
         game_settings.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
     
@@ -1356,7 +1356,7 @@ def game_settings_api(request):
             'allow_system_account': settings.allow_system_account,
             'free_play': settings.free_play,
             'system_accounts_min': getattr(settings, 'system_accounts_min', 15),
-            'system_accounts_max': getattr(settings, 'system_accounts_max', 30),
+            'system_accounts_max': getattr(settings, 'system_accounts_max', 100),
             'winning_patterns': getattr(settings, 'winning_patterns', ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']),
             'telebirr_verify_api_key': getattr(settings, 'telebirr_verify_api_key', '') or '',
             'cbe_use_fallback_proxy': getattr(settings, 'cbe_use_fallback_proxy', False),
@@ -1432,9 +1432,17 @@ def game_settings_api(request):
                 min_val = int(data['system_accounts_min'])
                 if min_val < 1:
                     min_val = 1
+                # Cap by total_cards (each system account needs a card slot)
+                total_cards = int(getattr(settings_obj, 'total_cards', 100) or 100)
+                min_val = min(min_val, total_cards)
                 settings_obj.system_accounts_min = min_val
             if 'system_accounts_max' in data:
-                max_val = min(100, int(data['system_accounts_max']))  # Cap at 100 (matches FAKE_USER_NAMES count)
+                max_val = int(data['system_accounts_max'])
+                if max_val < 1:
+                    max_val = 1
+                # Cap by total_cards (not a hard 100) so admin can set > 100 when cards allow
+                total_cards = int(getattr(settings_obj, 'total_cards', 100) or 100)
+                max_val = min(max_val, total_cards)
                 if max_val < settings_obj.system_accounts_min:
                     max_val = settings_obj.system_accounts_min
                 settings_obj.system_accounts_max = max_val
@@ -1517,17 +1525,30 @@ def second_admin_credentials_api(request):
                 return JsonResponse({'error': 'Username is required'}, status=400)
             
             try:
-                second_admin, created = SecondAdmin.objects.get_or_create(pk=1)
-                second_admin.username = username
-                
-                if password:
-                    second_admin.password = make_password(password)
+                second_admin = SecondAdmin.objects.order_by('id').first()
+                created = False
+                if not second_admin:
+                    if not password:
+                        return JsonResponse({
+                            'error': 'Password is required when creating second admin credentials'
+                        }, status=400)
+                    second_admin = SecondAdmin(username=username, password=make_password(password))
+                    created = True
+                else:
+                    second_admin.username = username
+                    if password:
+                        second_admin.password = make_password(password)
+                    elif not second_admin.password:
+                        return JsonResponse({
+                            'error': 'Password is required (no password set yet)'
+                        }, status=400)
                 
                 second_admin.save()
                 
                 return JsonResponse({
                     'success': True,
-                    'message': 'Second admin credentials updated successfully'
+                    'message': 'Second admin credentials updated successfully',
+                    'created': created,
                 })
             except Exception as db_error:
                 # Handle case where SecondAdmin table doesn't exist
@@ -1540,30 +1561,81 @@ def second_admin_credentials_api(request):
             return JsonResponse({'error': str(e)}, status=500)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+def second_admin_change_password(request):
+    """Allow the logged-in second admin to change their own password."""
+    if not request.session.get('second_admin_authenticated'):
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    current_password = (data.get('current_password') or '').strip()
+    new_password = (data.get('new_password') or '').strip()
+    confirm_password = (data.get('confirm_password') or '').strip()
+
+    if not current_password or not new_password or not confirm_password:
+        return JsonResponse({'error': 'Current password, new password, and confirmation are required'}, status=400)
+    if new_password != confirm_password:
+        return JsonResponse({'error': 'New password and confirmation do not match'}, status=400)
+    if len(new_password) < 6:
+        return JsonResponse({'error': 'New password must be at least 6 characters'}, status=400)
+    if current_password == new_password:
+        return JsonResponse({'error': 'New password must be different from current password'}, status=400)
+
+    session_username = (request.session.get('second_admin_username') or '').strip()
+    second_admin = None
+    if session_username:
+        second_admin = SecondAdmin.objects.filter(username__iexact=session_username).first()
+    if not second_admin:
+        second_admin = SecondAdmin.objects.order_by('id').first()
+    if not second_admin or not second_admin.password:
+        return JsonResponse({'error': 'Second admin account not found'}, status=404)
+
+    if not check_password(current_password, second_admin.password):
+        return JsonResponse({'error': 'Current password is incorrect'}, status=401)
+
+    second_admin.password = make_password(new_password)
+    second_admin.save(update_fields=['password', 'updated_at'])
+    return JsonResponse({'success': True, 'message': 'Password changed successfully'})
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
 def second_admin_login(request):
     """Login view for second admin"""
     if request.method == 'POST':
         try:
-            data = json.loads(request.body)
-            username = data.get('username', '').strip()
-            password = data.get('password', '').strip()
+            data = json.loads(request.body) if request.body else {}
+            username = (data.get('username') or '').strip()
+            password = data.get('password') or ''
+            if isinstance(password, str):
+                password = password.strip()
             
             if not username or not password:
                 return JsonResponse({'error': 'Username and password are required'}, status=400)
             
             try:
-                second_admin = SecondAdmin.objects.get(username=username)
+                # Case-insensitive username match (users often mistype casing)
+                second_admin = SecondAdmin.objects.filter(username__iexact=username).first()
+                if not second_admin:
+                    return JsonResponse({'error': 'Invalid credentials'}, status=401)
+                if not second_admin.password:
+                    return JsonResponse({
+                        'error': 'Password not set. Ask main admin to save credentials again with a password.'
+                    }, status=401)
                 if check_password(password, second_admin.password):
                     # Set session and save explicitly
                     request.session['second_admin_authenticated'] = True
-                    request.session['second_admin_username'] = username
+                    request.session['second_admin_username'] = second_admin.username
                     request.session.set_expiry(86400)  # 24 hours
                     request.session.save()  # Explicitly save session
                     return JsonResponse({'success': True, 'redirect': '/secondadmin'})
                 else:
                     return JsonResponse({'error': 'Invalid credentials'}, status=401)
-            except SecondAdmin.DoesNotExist:
-                return JsonResponse({'error': 'Invalid credentials'}, status=401)
             except Exception as db_error:
                 # Handle case where SecondAdmin table doesn't exist
                 return JsonResponse({
@@ -1576,6 +1648,8 @@ def second_admin_login(request):
     return render(request, 'admin/second_admin_login.html')
 
 
+@csrf_exempt
+@require_http_methods(["POST", "GET"])
 def second_admin_logout(request):
     """Logout view for second admin"""
     request.session.pop('second_admin_authenticated', None)
@@ -1690,7 +1764,7 @@ def second_admin_dashboard(request):
     if not hasattr(game_settings, 'system_accounts_min'):
         game_settings.system_accounts_min = 15
     if not hasattr(game_settings, 'system_accounts_max'):
-        game_settings.system_accounts_max = 30
+        game_settings.system_accounts_max = 100
     if not hasattr(game_settings, 'winning_patterns') or not game_settings.winning_patterns:
         game_settings.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
     

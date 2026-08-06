@@ -15,7 +15,6 @@ import GameCompletedView from './views/GameCompletedView.vue'
 import CardSelectionView from './views/CardSelectionView.vue'
 import ActiveGameView from './views/ActiveGameView.vue'
 import AdminDashboard from './views/AdminDashboard.vue'
-import SecondAdminDashboard from './views/SecondAdminDashboard.vue'
 import SecondAdminLogin from './views/SecondAdminLogin.vue'
 
 const routes = [
@@ -35,7 +34,7 @@ const routes = [
   { path: '/select-card', name: 'select-card', component: CardSelectionView },
   { path: '/game', name: 'game', component: ActiveGameView },
   { path: '/admin-dashboard', name: 'admin-dashboard', component: AdminDashboard },
-  { path: '/secondadmin', name: 'second-admin-dashboard', component: SecondAdminDashboard },
+  { path: '/secondadmin', name: 'second-admin-dashboard', component: AdminDashboard, meta: { isSecondAdmin: true } },
   { path: '/secondadmin/login', name: 'second-admin-login', component: SecondAdminLogin },
 ]
 

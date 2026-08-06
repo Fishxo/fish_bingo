@@ -188,6 +188,20 @@ class Game(models.Model):
         return self.derash_amount if self.derash_amount > 0 else Decimal('0')
 
 
+class CardTemplate(models.Model):
+    """Permanent bingo layout for a card slot ID (1..N). Generated once, reused forever."""
+    card_number = models.PositiveIntegerField(unique=True, db_index=True)
+    layout = models.JSONField(help_text="5x5 grid layout with numbers (unmarked template)")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'card_templates'
+        ordering = ['card_number']
+
+    def __str__(self):
+        return f"CardTemplate #{self.card_number}"
+
+
 class GameCard(models.Model):
     """Bingo Card model - represents a card purchased by a user for a game"""
     game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name='gamecards')
@@ -555,7 +569,7 @@ class GameSettings(models.Model):
                         if not hasattr(self, 'system_accounts_min'):
                             self.system_accounts_min = 15
                         if not hasattr(self, 'system_accounts_max'):
-                            self.system_accounts_max = 30
+                            self.system_accounts_max = 100
                         if not hasattr(self, 'winning_patterns'):
                             self.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
                         if not hasattr(self, 'fake_win_preference'):
@@ -595,7 +609,7 @@ class GameSettings(models.Model):
             if not hasattr(obj, 'system_accounts_min') or getattr(obj, 'system_accounts_min', None) is None:
                 obj.system_accounts_min = 15
             if not hasattr(obj, 'system_accounts_max') or getattr(obj, 'system_accounts_max', None) is None:
-                obj.system_accounts_max = 30
+                obj.system_accounts_max = 100
             if not hasattr(obj, 'winning_patterns') or not obj.winning_patterns:
                 obj.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
             if not hasattr(obj, 'anti_abuse_filter_enabled'):
@@ -604,7 +618,7 @@ class GameSettings(models.Model):
             # If accessing fields fails (migration not run), set defaults on object
             try:
                 obj.system_accounts_min = 15
-                obj.system_accounts_max = 30
+                obj.system_accounts_max = 100
                 obj.winning_patterns = ['horizontal', 'vertical', 'diagonal', 'corner', 'full_card']
                 obj.anti_abuse_filter_enabled = False
             except:

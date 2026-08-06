@@ -1,14 +1,15 @@
 <template>
   <div class="admin-dashboard">
     <div class="dashboard-header">
-      <h1>Admin Dashboard</h1>
+      <h1>{{ isSecondAdmin ? 'Second Admin Dashboard' : 'Admin Dashboard' }}</h1>
       <span v-if="data && lastUpdated" class="last-updated">Last updated: {{ lastUpdated }}</span>
-      <button type="button" class="admin-login-link" @click="showLoginForm = true" title="Log in with staff account">🔐 Admin Login</button>
+      <button v-if="!isSecondAdmin" type="button" class="admin-login-link" @click="showLoginForm = true" title="Log in with staff account">🔐 Admin Login</button>
       <button class="refresh-btn" @click="refreshData">🔄 Refresh</button>
+      <button v-if="isSecondAdmin" type="button" class="logout-btn" @click="handleSecondAdminLogout">Logout</button>
     </div>
 
     <!-- Inline admin login form -->
-    <div v-if="showLoginForm" class="inline-login-overlay" @click.self="showLoginForm = false">
+    <div v-if="!isSecondAdmin && showLoginForm" class="inline-login-overlay" @click.self="showLoginForm = false">
       <div class="inline-login-box">
         <h3>Staff login</h3>
         <p class="inline-login-hint">Use your Django staff account.</p>
@@ -31,7 +32,7 @@
     </div>
 
     <!-- Unauthorized banner - show when user needs to log in -->
-    <div v-if="unauthorized" class="unauthorized-banner">
+    <div v-if="!isSecondAdmin && unauthorized" class="unauthorized-banner">
       <strong>⚠️ Authentication required</strong>
       <p>Log in with your staff account using the <strong>Admin Login</strong> button above.</p>
     </div>
@@ -469,15 +470,16 @@
                 <td>{{ g.players }}</td>
                 <td>{{ formatCurrency(g.derash_amount) }}</td>
                 <td>
-                  <template v-if="g.status === 'waiting'">
+                  <template v-if="!isSecondAdmin && g.status === 'waiting'">
                     <button class="btn btn-approve" @click="startGameAction(g.id)">Start Game</button>
                   </template>
-                  <template v-else-if="g.status === 'active'">
+                  <template v-else-if="!isSecondAdmin && g.status === 'active'">
                     <input v-model.number="callNumberInput[g.id]" type="number" min="1" max="75" placeholder="#" class="call-number-input" />
                     <button class="btn btn-secondary" @click="callNumberAction(g.id)">Call</button>
                     <button class="btn btn-reject" @click="endGameAction(g.id)">End</button>
                     <button class="btn btn-reject" @click="endGameAction(g.id, true)" title="End game even if not all 75 numbers called (for stuck games)">Force end</button>
                   </template>
+                  <span v-else class="muted">—</span>
                 </td>
               </tr>
               <tr v-if="!(data.active_games && data.active_games.length)">
@@ -528,8 +530,8 @@
             <option value="total_withdrawals">Withdrawals (high first)</option>
             <option value="transfer_in">Transfers in (high first)</option>
           </select>
-          <button type="button" class="btn btn-reject" @click="toggleDeleteMode">{{ deleteMode ? 'Cancel' : 'Delete Users' }}</button>
-          <button v-if="deleteMode" type="button" class="btn btn-reject" @click="deleteSelectedUsers">Delete Selected ({{ selectedUserIds.length }})</button>
+          <button v-if="!isSecondAdmin" type="button" class="btn btn-reject" @click="toggleDeleteMode">{{ deleteMode ? 'Cancel' : 'Delete Users' }}</button>
+          <button v-if="!isSecondAdmin && deleteMode" type="button" class="btn btn-reject" @click="deleteSelectedUsers">Delete Selected ({{ selectedUserIds.length }})</button>
           <template v-else>
             <button v-if="registeredLimit <= 10 && (data.registered_users_count || 0) > 10" type="button" class="btn btn-secondary" @click="seeMoreUsers">See more ({{ data.registered_users_count || 0 }} total)</button>
             <button v-else-if="registeredLimit > 10" type="button" class="btn btn-secondary" @click="seeLessUsers">See less</button>
@@ -673,11 +675,12 @@
             </div>
             <div class="form-group">
               <label>System accounts min</label>
-              <input v-model.number="settings.system_accounts_min" type="number" min="1" max="100" />
+              <input v-model.number="settings.system_accounts_min" type="number" min="1" :max="settings.total_cards || 500" />
             </div>
             <div class="form-group">
               <label>System accounts max</label>
-              <input v-model.number="settings.system_accounts_max" type="number" min="1" max="100" />
+              <input v-model.number="settings.system_accounts_max" type="number" min="1" :max="settings.total_cards || 500" />
+              <small class="form-hint">Max cannot exceed total cards ({{ settings.total_cards }}).</small>
             </div>
             <div class="form-group" v-if="settings.allow_system_account && !settings.free_play">
               <label>Fake win preference</label>
@@ -862,8 +865,8 @@
         </div>
       </section>
 
-      <!-- Second Admin Credentials -->
-      <section class="section">
+      <!-- Second Admin Credentials (main admin only) -->
+      <section class="section" v-if="!isSecondAdmin">
         <h2>👤 Second Admin Credentials</h2>
         <div class="second-admin-box">
           <div class="form-group">
@@ -876,7 +879,39 @@
           </div>
           <button class="btn btn-secondary" :disabled="secondAdminSaving" @click="saveSecondAdmin">{{ secondAdminSaving ? 'Saving…' : '💾 Save Credentials' }}</button>
           <span v-if="secondAdminMessage" class="second-admin-msg">{{ secondAdminMessage }}</span>
-          <p class="form-hint">Used to access dashboard at /secondadmin</p>
+          <p class="form-hint">Used to access dashboard at /secondadmin — enter both username and password when creating or changing login.</p>
+        </div>
+      </section>
+
+      <!-- Change password (second admin only) -->
+      <section class="section" v-if="isSecondAdmin">
+        <h2>🔐 Change Password</h2>
+        <div class="second-admin-box">
+          <div class="form-group">
+            <label>Current password</label>
+            <input v-model="changePasswordForm.current" type="password" autocomplete="current-password" />
+          </div>
+          <div class="form-group">
+            <label>New password</label>
+            <input v-model="changePasswordForm.next" type="password" autocomplete="new-password" placeholder="At least 6 characters" />
+          </div>
+          <div class="form-group">
+            <label>Confirm new password</label>
+            <input v-model="changePasswordForm.confirm" type="password" autocomplete="new-password" />
+          </div>
+          <button
+            type="button"
+            class="btn btn-primary"
+            :disabled="changePasswordSaving"
+            @click="changeSecondAdminPassword"
+          >
+            {{ changePasswordSaving ? 'Saving…' : 'Update Password' }}
+          </button>
+          <span
+            v-if="changePasswordMessage"
+            class="second-admin-msg"
+            :class="{ error: changePasswordError }"
+          >{{ changePasswordMessage }}</span>
         </div>
       </section>
 
@@ -976,6 +1011,10 @@ import {
   deleteBroadcast,
   getSecondAdminCredentials,
   saveSecondAdminCredentials,
+  getSecondAdminDashboardData,
+  refreshSecondAdminDepositsWithdrawals,
+  secondAdminLogout,
+  secondAdminChangePassword,
   adminDashboardLogin,
   getAdminUserDetail,
   editAdminUser,
@@ -1067,6 +1106,14 @@ export default {
       secondAdminPassword: '',
       secondAdminSaving: false,
       secondAdminMessage: '',
+      changePasswordForm: {
+        current: '',
+        next: '',
+        confirm: ''
+      },
+      changePasswordSaving: false,
+      changePasswordMessage: '',
+      changePasswordError: false,
       showGameDetails: false,
       depositAccounts: {
         BOA: { name: '', number: '' },
@@ -1092,6 +1139,9 @@ export default {
     }
   },
   computed: {
+    isSecondAdmin() {
+      return !!(this.$route?.meta?.isSecondAdmin)
+    },
     adminLoginUrl() {
       const base = window.location.origin
       return `${base}/admin/`
@@ -1125,14 +1175,20 @@ export default {
   async mounted() {
     await this.loadData()
     await this.loadSettings()
-    await this.loadSecondAdminCredentials()
+    if (!this.isSecondAdmin) {
+      await this.loadSecondAdminCredentials()
+    }
   },
   methods: {
     async loadData() {
       this.loading = true
       this.error = null
       try {
-        this.data = await getAdminDashboardData({ registered_limit: this.registeredLimit, registered_sort: this.registeredSort })
+        if (this.isSecondAdmin) {
+          this.data = await getSecondAdminDashboardData()
+        } else {
+          this.data = await getAdminDashboardData({ registered_limit: this.registeredLimit, registered_sort: this.registeredSort })
+        }
         this.lastUpdated = new Date().toLocaleString()
         if (this.data?.second_admin_username) {
           this.secondAdminUsername = this.data.second_admin_username
@@ -1141,13 +1197,69 @@ export default {
       } catch (err) {
         console.error('Error loading admin dashboard:', err)
         this.unauthorized = err.response?.status === 401
+        if (this.isSecondAdmin && (err.response?.status === 401 || err.response?.status === 403)) {
+          this.$router.push('/secondadmin/login')
+          return
+        }
         this.error = err.response?.data?.error || err.response?.data?.message || 'Failed to load dashboard'
       } finally {
         this.loading = false
       }
     },
     async refreshData() {
+      if (this.isSecondAdmin) {
+        try {
+          await refreshSecondAdminDepositsWithdrawals()
+        } catch (err) {
+          console.error('Refresh deposits failed:', err)
+        }
+        await this.loadData()
+        await this.loadSettings()
+        return
+      }
       await Promise.all([this.loadData(), this.loadSettings()])
+    },
+    async handleSecondAdminLogout() {
+      try {
+        await secondAdminLogout()
+      } catch (err) {
+        console.error('Second admin logout failed:', err)
+      }
+      this.$router.push('/secondadmin/login')
+    },
+    async changeSecondAdminPassword() {
+      this.changePasswordMessage = ''
+      this.changePasswordError = false
+      const current = (this.changePasswordForm.current || '').trim()
+      const next = (this.changePasswordForm.next || '').trim()
+      const confirm = (this.changePasswordForm.confirm || '').trim()
+      if (!current || !next || !confirm) {
+        this.changePasswordError = true
+        this.changePasswordMessage = 'Fill in all password fields.'
+        return
+      }
+      if (next.length < 6) {
+        this.changePasswordError = true
+        this.changePasswordMessage = 'New password must be at least 6 characters.'
+        return
+      }
+      if (next !== confirm) {
+        this.changePasswordError = true
+        this.changePasswordMessage = 'New password and confirmation do not match.'
+        return
+      }
+      this.changePasswordSaving = true
+      try {
+        const res = await secondAdminChangePassword(current, next, confirm)
+        this.changePasswordError = false
+        this.changePasswordMessage = res?.message || 'Password changed successfully.'
+        this.changePasswordForm = { current: '', next: '', confirm: '' }
+      } catch (err) {
+        this.changePasswordError = true
+        this.changePasswordMessage = err.response?.data?.error || err.message || 'Failed to change password'
+      } finally {
+        this.changePasswordSaving = false
+      }
     },
     async seeMoreUsers() {
       this.registeredLimit = 500
@@ -1485,6 +1597,7 @@ export default {
         }
         await updateGameSettings(payload)
         this.enableFreePlayForAllUsers = false
+        await this.loadSettings()
         this.settingsMessage = 'Settings saved.'
       } catch (err) {
         this.settingsError = true
@@ -1787,6 +1900,20 @@ export default {
 
 .refresh-btn:hover {
   background: #5a2d6e;
+}
+
+.logout-btn {
+  padding: 10px 20px;
+  background: #e74c3c;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.logout-btn:hover {
+  background: #c0392b;
 }
 
 .admin-login-link {
@@ -2160,7 +2287,8 @@ export default {
 }
 .form-group label { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500; }
 .form-group input[type="number"],
-.form-group input[type="text"] {
+.form-group input[type="text"],
+.form-group input[type="password"] {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #ddd;
@@ -2170,6 +2298,15 @@ export default {
 .form-group.checkbox input { width: auto; }
 .settings-msg { margin-left: 12px; font-size: 14px; }
 .settings-msg.error { color: #c0392b; }
+.second-admin-box {
+  background: #fafafa;
+  padding: 16px;
+  border-radius: 8px;
+  max-width: 420px;
+}
+.second-admin-box .form-group { margin-bottom: 12px; }
+.second-admin-msg { display: inline-block; margin-left: 12px; font-size: 14px; color: #27ae60; }
+.second-admin-msg.error { color: #c0392b; }
 
 .stat-link { color: #2e7d32; text-decoration: underline; cursor: pointer; }
 .stat-link:hover { color: #1b5e20; }

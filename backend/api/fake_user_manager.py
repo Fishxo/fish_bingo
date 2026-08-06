@@ -9,7 +9,7 @@ from typing import List, Dict, Tuple
 from django.utils import timezone
 from decimal import Decimal
 from .models import FakeUser, FakeUserGameCard, Game, GameSettings, GameCard
-from .game_logic import generate_bingo_card
+from .game_logic import get_permanent_card_layout
 from .redis_utils import (
     system_player_get_all,
     system_player_add,
@@ -45,14 +45,34 @@ def initialize_fake_users():
         FakeUser.objects.get_or_create(name=name, defaults={'is_active': True})
 
 
+def ensure_fake_user_count(needed: int) -> None:
+    """
+    Ensure at least `needed` active FakeUser rows exist.
+    Uses FAKE_USER_NAMES first, then creates extra sys_N accounts if needed (>100).
+    """
+    if needed < 1:
+        return
+    initialize_fake_users()
+    active_count = FakeUser.objects.filter(is_active=True).count()
+    if active_count >= needed:
+        return
+    i = 1
+    while FakeUser.objects.filter(is_active=True).count() < needed:
+        FakeUser.objects.get_or_create(name=f'sys_{i}', defaults={'is_active': True})
+        i += 1
+        if i > needed + 5000:
+            break
+
+
 def get_random_fake_users(count: int) -> List[FakeUser]:
-    """Get random fake users (up to system_accounts_max, max 100)"""
+    """Get random fake users (creates extra system accounts if count > name list)."""
+    ensure_fake_user_count(count)
     active_users = list(FakeUser.objects.filter(is_active=True))
     if not active_users:
         initialize_fake_users()
         active_users = list(FakeUser.objects.filter(is_active=True))
     
-    # Select random count (between 20-30)
+    # Select random count
     count = min(count, len(active_users))
     return random.sample(active_users, count)
 
@@ -70,15 +90,15 @@ def create_fake_user_card(game: Game, fake_user: FakeUser, card_number: int) -> 
     if FakeUserGameCard.objects.filter(game=game, card_number=card_number).exists():
         raise ValueError(f"Card {card_number} is already taken by fake user")
     
-    # Generate card layout
-    card_data = generate_bingo_card()
+    # Load permanent layout for this card slot (same numbers every game)
+    card_layout = get_permanent_card_layout(card_number)
     
     # Create fake user card (no payment needed - fake users have unlimited balance)
     card = FakeUserGameCard.objects.create(
         game=game,
         fake_user=fake_user,
         card_number=card_number,
-        card_layout=card_data['layout'],
+        card_layout=card_layout,
         selected_numbers=[]
     )
     
@@ -523,8 +543,15 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
     # Count current fake users
     fake_user_count = get_fake_user_count_for_game(game)
     
-    # Get minimum system accounts from settings
+    # Get minimum and maximum system accounts from settings
     min_system_accounts = getattr(settings, 'system_accounts_min', 15)
+    max_system_accounts = getattr(settings, 'system_accounts_max', 100)
+    if max_system_accounts is None:
+        max_system_accounts = 100
+    if min_system_accounts is None:
+        min_system_accounts = 15
+    if max_system_accounts < min_system_accounts:
+        max_system_accounts = min_system_accounts
     
     if is_selection:
         # Real player selected a card - remove one fake user
@@ -579,8 +606,16 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
             }
     else:
         # Real player unselected a card - add one fake user back
-        # Check if we can add a fake user (don't exceed original count)
-        from .auto_game_manager import add_fake_users_to_game_immediately
+        # Do not exceed system_accounts_max
+        if fake_user_count >= max_system_accounts:
+            return {
+                'success': False,
+                'action': 'skipped',
+                'reason': f'Already at system_accounts_max ({max_system_accounts})',
+                'real_players': real_player_count,
+                'current_fake': fake_user_count,
+            }
+
         from .models import FakeUser
         
         # Get available fake users (those not currently in the game)

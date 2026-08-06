@@ -177,31 +177,36 @@ def add_fake_users_to_game_immediately(game):
     from asgiref.sync import async_to_sync
     from .game_logic import get_available_card_numbers
     
-    # Initialize fake users if needed
-    initialize_fake_users()
-    
-    # Get system accounts range from settings
     settings = GameSettings.get_settings()
-    # Use getattr with defaults in case migration hasn't been run yet
-    # Wrap in try-except to handle database-level errors if migration hasn't run
+
+    # Initialize fake users if needed (and expand pool if max > name list)
+    initialize_fake_users()
     try:
         min_count = getattr(settings, 'system_accounts_min', 15)
-        max_count = getattr(settings, 'system_accounts_max', 30)
+        max_count = getattr(settings, 'system_accounts_max', 100)
         # If getattr returns None (field doesn't exist), use defaults
         if min_count is None:
             min_count = 15
         if max_count is None:
-            max_count = 30
+            max_count = 100
     except (AttributeError, Exception):
         # If any error occurs accessing these fields, use defaults
         min_count = 15
-        max_count = 30
+        max_count = 100
     
     # Ensure valid range
     if min_count < 1:
         min_count = 1
     if max_count < min_count:
         max_count = min_count
+
+    # Cap by available cards
+    total_cards = getattr(settings, 'total_cards', 100) or 100
+    max_count = min(max_count, total_cards)
+    min_count = min(min_count, max_count)
+
+    from .fake_user_manager import ensure_fake_user_count
+    ensure_fake_user_count(max_count)
     
     # Randomly select total fake users within the configured range
     fake_user_count = random.randint(min_count, max_count)

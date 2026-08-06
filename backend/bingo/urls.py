@@ -88,6 +88,7 @@ urlpatterns = [
     path('admin-dashboard/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api'),
     path('secondadmin/login/', admin_views.second_admin_login, name='second-admin-login'),
     path('secondadmin/logout/', admin_views.second_admin_logout, name='second-admin-logout'),
+    path('secondadmin/change-password/', admin_views.second_admin_change_password, name='second-admin-change-password'),
     path('secondadmin/api/', admin_views.second_admin_dashboard_api, name='second-admin-dashboard-api'),
     path('secondadmin/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-second'),
     # secondadmin/ page route removed so SPA serves /secondadmin
@@ -117,6 +118,7 @@ urlpatterns = [
     path('api/admin-dashboard/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-alt'),
     path('api/secondadmin/login/', admin_views.second_admin_login, name='second-admin-login-api'),
     path('api/secondadmin/logout/', admin_views.second_admin_logout, name='second-admin-logout-api'),
+    path('api/secondadmin/change-password/', admin_views.second_admin_change_password, name='second-admin-change-password-api'),
     path('api/secondadmin/api/', admin_views.second_admin_dashboard_api, name='second-admin-dashboard-api-alt'),
     path('api/secondadmin/api/refresh-deposits-withdrawals/', admin_views.refresh_deposits_withdrawals_api, name='refresh-deposits-withdrawals-api-second-alt'),
     path('api/', include('api.urls')),
