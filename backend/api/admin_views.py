@@ -217,6 +217,86 @@ def format_large_number(value):
         return f"{value:.0f}"
 
 
+def _compute_live_dashboard_stats(periods):
+    """Live Game/Transaction totals used by both main and second admin dashboards."""
+    today_start = periods['today_start']
+    today_end = periods['today_end']
+    yesterday_start = periods['yesterday_start']
+    yesterday_end = periods['yesterday_end']
+    week_start = periods['week_start']
+    week_end = periods['week_end']
+    last_week_start = periods['last_week_start']
+    last_week_end = periods['last_week_end']
+    month_start = periods['month_start']
+    month_end = periods['month_end']
+    last_month_start = periods['last_month_start']
+    last_month_end = periods['last_month_end']
+
+    games_today = Game.objects.filter(created_at__gte=today_start, created_at__lte=today_end).count()
+    games_yesterday = Game.objects.filter(created_at__gte=yesterday_start, created_at__lt=yesterday_end).count()
+    games_week = Game.objects.filter(created_at__gte=week_start, created_at__lte=week_end).count()
+    games_last_week = Game.objects.filter(created_at__gte=last_week_start, created_at__lte=last_week_end).count()
+    games_month = Game.objects.filter(created_at__gte=month_start, created_at__lte=month_end).count()
+    games_last_month = Game.objects.filter(created_at__gte=last_month_start, created_at__lte=last_month_end).count()
+    games_total = Game.objects.count()
+
+    settings = GameSettings.get_settings()
+    percentage_cut = settings.percentage_cut
+
+    def calculate_revenue(games_queryset):
+        games_with_counts = games_queryset.annotate(
+            real_users_count=Count('gamecards', distinct=True)
+        ).filter(real_users_count__gt=0)
+        total = Decimal('0')
+        for game in games_with_counts:
+            total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
+            cut = (total_collected * percentage_cut) / Decimal('100')
+            total += cut
+        return total
+
+    completed_games = Game.objects.filter(status='completed')
+    from django.core.cache import cache as revenue_cache
+    revenue_cache_key_prefix = 'admin_revenue_'
+
+    def get_cached_revenue(key_suffix, queryset):
+        cache_key = f'{revenue_cache_key_prefix}{key_suffix}'
+        cached = revenue_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = calculate_revenue(queryset)
+        revenue_cache.set(cache_key, result, 300)
+        return result
+
+    all_registered_users = User.objects.filter(telegram_id__isnull=False)
+    return {
+        'games_today': games_today,
+        'games_yesterday': games_yesterday,
+        'games_week': games_week,
+        'games_last_week': games_last_week,
+        'games_month': games_month,
+        'games_last_month': games_last_month,
+        'games_total': games_total,
+        'revenue_today': get_cached_revenue('today', completed_games.filter(completed_at__gte=today_start, completed_at__lte=today_end)),
+        'revenue_yesterday': get_cached_revenue('yesterday', completed_games.filter(completed_at__gte=yesterday_start, completed_at__lt=yesterday_end)),
+        'revenue_week': get_cached_revenue('week', completed_games.filter(completed_at__gte=week_start, completed_at__lte=week_end)),
+        'revenue_last_week': get_cached_revenue('last_week', completed_games.filter(completed_at__gte=last_week_start, completed_at__lte=last_week_end)),
+        'revenue_month': get_cached_revenue('month', completed_games.filter(completed_at__gte=month_start, completed_at__lte=month_end)),
+        'revenue_last_month': get_cached_revenue('last_month', completed_games.filter(completed_at__gte=last_month_start, completed_at__lte=last_month_end)),
+        'revenue_total': get_cached_revenue('total', completed_games),
+        'total_deposits': Transaction.objects.filter(
+            transaction_type='deposit',
+            user__in=all_registered_users
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0'),
+        'total_withdrawals': Transaction.objects.filter(
+            transaction_type='withdraw',
+            user__in=all_registered_users
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0'),
+        'total_balance': User.objects.aggregate(
+            total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance'))
+        )['total'] or Decimal('0'),
+    }
+
+
 @staff_member_required
 def admin_dashboard(request):
     """Admin dashboard view with statistics - PHASE 3 OPTIMIZED with caching"""
@@ -2022,81 +2102,25 @@ def admin_dashboard_api(request):
     last_month_start = periods['last_month_start']
     last_month_end = periods['last_month_end']
     
-    # Prefer aggregate tables (survives prune); fallback to live queries
-    ag = None
-    try:
-        from .stats_utils import get_dashboard_aggregates
-        ag = get_dashboard_aggregates(periods)
-    except Exception:
-        pass
-    if ag is not None:
-        games_today = ag['games_today']
-        games_yesterday = ag['games_yesterday']
-        games_week = ag['games_week']
-        games_last_week = ag['games_last_week']
-        games_month = ag['games_month']
-        games_last_month = ag['games_last_month']
-        games_total = ag['games_total']
-        revenue_today = ag['revenue_today']
-        revenue_yesterday = ag['revenue_yesterday']
-        revenue_week = ag['revenue_week']
-        revenue_last_week = ag['revenue_last_week']
-        revenue_month = ag['revenue_month']
-        revenue_last_month = ag['revenue_last_month']
-        revenue_total = ag['revenue_total']
-        total_deposits = ag['total_deposits']
-        total_withdrawals = ag['total_withdrawals']
-        total_balance = ag['total_balance']
-    else:
-        # Games played statistics (from current records)
-        games_today = Game.objects.filter(created_at__gte=today_start, created_at__lte=today_end).count()
-        games_yesterday = Game.objects.filter(created_at__gte=yesterday_start, created_at__lt=yesterday_end).count()
-        games_week = Game.objects.filter(created_at__gte=week_start, created_at__lte=week_end).count()
-        games_last_week = Game.objects.filter(created_at__gte=last_week_start, created_at__lte=last_week_end).count()
-        games_month = Game.objects.filter(created_at__gte=month_start, created_at__lte=month_end).count()
-        games_last_month = Game.objects.filter(created_at__gte=last_month_start, created_at__lte=last_month_end).count()
-        games_total = Game.objects.count()
-        settings = GameSettings.get_settings()
-        percentage_cut = settings.percentage_cut
-        from .models import GameCard
-        def calculate_revenue(games_queryset):
-            games_with_counts = games_queryset.annotate(
-                real_users_count=Count('gamecards', distinct=True)
-            ).filter(real_users_count__gt=0)
-            total = Decimal('0')
-            for game in games_with_counts:
-                total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
-                cut = (total_collected * percentage_cut) / Decimal('100')
-                total += cut
-            return total
-        completed_games = Game.objects.filter(status='completed')
-        from django.core.cache import cache as revenue_cache
-        revenue_cache_key_prefix = 'admin_revenue_'
-        def get_cached_revenue(key_suffix, queryset):
-            cache_key = f'{revenue_cache_key_prefix}{key_suffix}'
-            cached = revenue_cache.get(cache_key)
-            if cached is not None:
-                return cached
-            result = calculate_revenue(queryset)
-            revenue_cache.set(cache_key, result, 300)
-            return result
-        revenue_today = get_cached_revenue('today', completed_games.filter(completed_at__gte=today_start, completed_at__lte=today_end))
-        revenue_yesterday = get_cached_revenue('yesterday', completed_games.filter(completed_at__gte=yesterday_start, completed_at__lt=yesterday_end))
-        revenue_week = get_cached_revenue('week', completed_games.filter(completed_at__gte=week_start, completed_at__lte=week_end))
-        revenue_last_week = get_cached_revenue('last_week', completed_games.filter(completed_at__gte=last_week_start, completed_at__lte=last_week_end))
-        revenue_month = get_cached_revenue('month', completed_games.filter(completed_at__gte=month_start, completed_at__lte=month_end))
-        revenue_last_month = get_cached_revenue('last_month', completed_games.filter(completed_at__gte=last_month_start, completed_at__lte=last_month_end))
-        revenue_total = get_cached_revenue('total', completed_games)
-        all_registered_users = User.objects.filter(telegram_id__isnull=False)
-        total_deposits = Transaction.objects.filter(
-            transaction_type='deposit',
-            user__in=all_registered_users
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-        total_withdrawals = Transaction.objects.filter(
-            transaction_type='withdraw',
-            user__in=all_registered_users
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-        total_balance = User.objects.aggregate(total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance')))['total'] or Decimal('0')
+    # Same live Game/Transaction queries as second admin so both dashboards stay in sync.
+    live = _compute_live_dashboard_stats(periods)
+    games_today = live['games_today']
+    games_yesterday = live['games_yesterday']
+    games_week = live['games_week']
+    games_last_week = live['games_last_week']
+    games_month = live['games_month']
+    games_last_month = live['games_last_month']
+    games_total = live['games_total']
+    revenue_today = live['revenue_today']
+    revenue_yesterday = live['revenue_yesterday']
+    revenue_week = live['revenue_week']
+    revenue_last_week = live['revenue_last_week']
+    revenue_month = live['revenue_month']
+    revenue_last_month = live['revenue_last_month']
+    revenue_total = live['revenue_total']
+    total_deposits = live['total_deposits']
+    total_withdrawals = live['total_withdrawals']
+    total_balance = live['total_balance']
     
     # Date range strings for display (using calendar periods)
     
@@ -2178,7 +2202,16 @@ def admin_dashboard_api(request):
     if sort_param not in valid_sorts:
         sort_param = 'created_at'
     registered_users_count = User.objects.filter(telegram_id__isnull=False).count()
-    base_qs = User.objects.filter(telegram_id__isnull=False)
+    base_qs = User.objects.filter(telegram_id__isnull=False).annotate(
+        user_total_deposits=Coalesce(
+            Sum('transactions__amount', filter=Q(transactions__transaction_type='deposit')),
+            Decimal('0'),
+        ),
+        user_total_withdrawals=Coalesce(
+            Sum('transactions__amount', filter=Q(transactions__transaction_type='withdraw')),
+            Decimal('0'),
+        ),
+    )
     if sort_param == 'wins':
         registered_users_raw = list(base_qs.order_by('-created_at')[:500])
     else:
@@ -2191,9 +2224,9 @@ def admin_dashboard_api(request):
         elif sort_param == 'games_played':
             registered_users_raw = list(base_qs.order_by('-total_games_played')[:users_limit])
         elif sort_param == 'total_deposits':
-            registered_users_raw = list(base_qs.order_by('-total_deposits_amount')[:users_limit])
+            registered_users_raw = list(base_qs.order_by('-user_total_deposits')[:users_limit])
         elif sort_param == 'total_withdrawals':
-            registered_users_raw = list(base_qs.order_by('-total_withdrawals_amount')[:users_limit])
+            registered_users_raw = list(base_qs.order_by('-user_total_withdrawals')[:users_limit])
         else:
             registered_users_raw = list(base_qs.order_by('-created_at')[:users_limit])
     user_ids = [u.id for u in registered_users_raw]
@@ -2233,15 +2266,15 @@ def admin_dashboard_api(request):
             'withdrawable_balance': float(user.withdrawable_balance or 0),
             'games_played': user.total_games_played or 0,
             'wins': wins,
-            'total_deposits': float(user.total_deposits_amount or 0),
-            'total_withdrawals': float(user.total_withdrawals_amount or 0),
+            'total_deposits': float(user.user_total_deposits),
+            'total_withdrawals': float(user.user_total_withdrawals),
             'transfer_in': float(transfer_in),
             'withdrawal_approved': user.withdrawal_approved,
             'free_play_allowed': user.free_play_allowed,
             'created_at': user.created_at.strftime('%Y-%m-%d %H:%M'),
         })
     
-    # (total_deposits, total_withdrawals, total_balance set above from aggregates or fallback)
+    # total_deposits / total_withdrawals / total_balance already set from live queries
     
     # Game mode statistics - OPTIMIZED with caching
     from .models import GameCard
@@ -2469,60 +2502,22 @@ def second_admin_dashboard_api(request):
     last_month_start = periods['last_month_start']
     last_month_end = periods['last_month_end']
     
-    games_today = Game.objects.filter(created_at__gte=today_start, created_at__lte=today_end).count()
-    games_yesterday = Game.objects.filter(created_at__gte=yesterday_start, created_at__lt=yesterday_end).count()
-    games_week = Game.objects.filter(created_at__gte=week_start, created_at__lte=week_end).count()
-    games_last_week = Game.objects.filter(created_at__gte=last_week_start, created_at__lte=last_week_end).count()
-    games_month = Game.objects.filter(created_at__gte=month_start, created_at__lte=month_end).count()
-    games_last_month = Game.objects.filter(created_at__gte=last_month_start, created_at__lte=last_month_end).count()
-    games_total = Game.objects.count()
+    live = _compute_live_dashboard_stats(periods)
+    games_today = live['games_today']
+    games_yesterday = live['games_yesterday']
+    games_week = live['games_week']
+    games_last_week = live['games_last_week']
+    games_month = live['games_month']
+    games_last_month = live['games_last_month']
+    games_total = live['games_total']
     
-    settings = GameSettings.get_settings()
-    percentage_cut = settings.percentage_cut
-    from .models import GameCard
-    
-    def calculate_revenue(games_queryset):
-        """
-        Calculate revenue from games, excluding fake users.
-        Revenue = (real_users_count * bet_amount) * percentage_cut / 100
-        Only counts real users who paid - fake users don't generate revenue
-        OPTIMIZED: Uses aggregation instead of per-game queries
-        """
-        games_with_counts = games_queryset.annotate(
-            real_users_count=Count('gamecards', distinct=True)
-        ).filter(real_users_count__gt=0)
-        
-        # Calculate total revenue using aggregation
-        # Note: Cannot use .only() with annotations, so we iterate normally
-        total = Decimal('0')
-        for game in games_with_counts:
-            total_collected = Decimal(str(game.real_users_count)) * game.bet_amount
-            cut = (total_collected * percentage_cut) / Decimal('100')
-            total += cut
-        return total
-    
-    completed_games = Game.objects.filter(status='completed')
-    
-    # OPTIMIZED: Cache revenue calculations for 5 minutes
-    from django.core.cache import cache as revenue_cache
-    revenue_cache_key_prefix = 'admin_revenue_'
-    
-    def get_cached_revenue(key_suffix, queryset):
-        cache_key = f'{revenue_cache_key_prefix}{key_suffix}'
-        cached = revenue_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        result = calculate_revenue(queryset)
-        revenue_cache.set(cache_key, result, 300)  # Cache for 5 minutes
-        return result
-    
-    revenue_today = get_cached_revenue('today', completed_games.filter(completed_at__gte=today_start, completed_at__lte=today_end))
-    revenue_yesterday = get_cached_revenue('yesterday', completed_games.filter(completed_at__gte=yesterday_start, completed_at__lt=yesterday_end))
-    revenue_week = get_cached_revenue('week', completed_games.filter(completed_at__gte=week_start, completed_at__lte=week_end))
-    revenue_last_week = get_cached_revenue('last_week', completed_games.filter(completed_at__gte=last_week_start, completed_at__lte=last_week_end))
-    revenue_month = get_cached_revenue('month', completed_games.filter(completed_at__gte=month_start, completed_at__lte=month_end))
-    revenue_last_month = get_cached_revenue('last_month', completed_games.filter(completed_at__gte=last_month_start, completed_at__lte=last_month_end))
-    revenue_total = get_cached_revenue('total', completed_games)
+    revenue_today = live['revenue_today']
+    revenue_yesterday = live['revenue_yesterday']
+    revenue_week = live['revenue_week']
+    revenue_last_week = live['revenue_last_week']
+    revenue_month = live['revenue_month']
+    revenue_last_month = live['revenue_last_month']
+    revenue_total = live['revenue_total']
     
     # Date range strings for display (using calendar periods)
     date_today = f"{today_start.strftime('%Y-%m-%d')} to {today_end.strftime('%Y-%m-%d')}"
@@ -2694,20 +2689,10 @@ def second_admin_dashboard_api(request):
             'created_at': withdraw.created_at.strftime('%Y-%m-%d %H:%M'),
         })
     
-    # Financial statistics - Calculate from ALL registered users (not just the limited display list)
-    # Sum deposits and withdrawals from all registered users' transactions
-    all_registered_users = User.objects.filter(telegram_id__isnull=False)
-    total_deposits = Transaction.objects.filter(
-        transaction_type='deposit',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-    total_withdrawals = Transaction.objects.filter(
-        transaction_type='withdraw',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-    total_balance = User.objects.aggregate(
-        total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance'))
-    )['total'] or Decimal('0')
+    # Financial statistics — same live totals as main admin
+    total_deposits = live['total_deposits']
+    total_withdrawals = live['total_withdrawals']
+    total_balance = live['total_balance']
     
     # Calculate total automatic and manual games - OPTIMIZED with caching
     from .models import GameCard

@@ -326,7 +326,7 @@ def task_process_bingo_winners(self, game_id: int):
         # Refresh game to get latest derash
         game.refresh_from_db()
 
-        # Free play policy (unified claim path): record_game_completed is not called here; apply the same rule as stats_utils.
+        # Free play policy (unified claim path): also applied inside record_game_completed_once.
         # When allow_free_play_after_real_win is False, real winners get free_play_allowed=False after the win is finalized.
         if real_winner_cards:
             from .models import GameSettings
@@ -339,6 +339,19 @@ def task_process_bingo_winners(self, game_id: int):
                         f"Game {game_id}: allow_free_play_after_real_win=False → "
                         f"free_play_allowed=False for real winner user id(s) {_wids}"
                     )
+
+        # Update aggregate stats so win cards and user caches stay current (idempotent with task_finalize_game)
+        try:
+            from .models import GameCard, GameSettings
+            from .stats_utils import record_game_completed_once
+            real_count = GameCard.objects.filter(game=game).count()
+            settings = GameSettings.get_settings()
+            pct = getattr(settings, 'percentage_cut', Decimal('10')) or Decimal('10')
+            revenue = (Decimal(str(real_count)) * game.bet_amount * pct) / Decimal('100')
+            winner_type = 'real' if real_winner_cards else 'fake'
+            record_game_completed_once(game, revenue, winner_type=winner_type)
+        except Exception as e:
+            print(f"Stats update failed for game {game_id}: {e}")
         
         # Calculate prize split (split by ALL winners for realism, but only real users receive prizes)
         total_prize = game.total_derash
@@ -3159,13 +3172,13 @@ def task_finalize_game(self, game_id: int):
         # Update aggregate stats (survives prune) so dashboard and user search stay correct
         try:
             from .models import GameCard, GameSettings
-            from .stats_utils import record_game_completed
+            from .stats_utils import record_game_completed_once
             from decimal import Decimal
             real_count = GameCard.objects.filter(game=game).count()
             settings = GameSettings.get_settings()
             pct = getattr(settings, 'percentage_cut', Decimal('10')) or Decimal('10')
             revenue = (Decimal(str(real_count)) * game.bet_amount * pct) / Decimal('100')
-            record_game_completed(game, revenue)
+            record_game_completed_once(game, revenue)
         except Exception as e:
             logger.warning(f"Stats update failed for game {game_id}: {e}")
             print(f"Stats update failed for game {game_id}: {e}")
@@ -3268,13 +3281,13 @@ def task_finalize_redis_system_winner(game_id: int, winner_dict: dict):
         # Update aggregate stats (survives prune); Redis-only winner = fake
         try:
             from .models import GameCard, GameSettings
-            from .stats_utils import record_game_completed
+            from .stats_utils import record_game_completed_once
             from decimal import Decimal
             real_count = GameCard.objects.filter(game=game).count()
             settings = GameSettings.get_settings()
             pct = getattr(settings, 'percentage_cut', Decimal('10')) or Decimal('10')
             revenue = (Decimal(str(real_count)) * game.bet_amount * pct) / Decimal('100')
-            record_game_completed(game, revenue, winner_type='fake')
+            record_game_completed_once(game, revenue, winner_type='fake')
         except Exception as e:
             logger.warning(f"Stats update failed for game {game_id}: {e}")
         cleanup_game_live_state(game_id)

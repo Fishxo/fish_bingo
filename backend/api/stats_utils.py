@@ -93,6 +93,33 @@ def record_game_completed(game, revenue_amount, winner_type=None):
             User.objects.filter(id__in=winner_ids).update(free_play_allowed=False)
         if first_win_user_ids:
             User.objects.filter(id__in=first_win_user_ids).update(first_win=True)
+    _invalidate_admin_dashboard_caches()
+
+
+def record_game_completed_once(game, revenue_amount, winner_type=None):
+    """Record stats for a completed game at most once (claim path and finalize path can both run)."""
+    from django.core.cache import cache
+    game_id = getattr(game, 'id', None)
+    if game_id is not None:
+        try:
+            if not cache.add(f'stats:game:{game_id}:recorded', 1, timeout=60 * 60 * 24 * 14):
+                return False
+        except Exception:
+            pass
+    record_game_completed(game, revenue_amount, winner_type)
+    return True
+
+
+def _invalidate_admin_dashboard_caches():
+    """Drop cached dashboard cards so main and second admin refresh together."""
+    try:
+        from django.core.cache import cache
+        cache.delete('admin_total_automatic_manual_games')
+        cache.delete('admin:dashboard:data')
+        for suffix in ('today', 'yesterday', 'week', 'last_week', 'month', 'last_month', 'total'):
+            cache.delete(f'admin_revenue_{suffix}')
+    except Exception:
+        pass
 
 
 def record_deposit(amount, user, at_date=None):
@@ -116,6 +143,7 @@ def record_deposit(amount, user, at_date=None):
         if u:
             next_count = int(getattr(u, 'number_of_deposits', 0) or 0) + 1
             User.objects.filter(id=user_id).update(number_of_deposits=next_count, free_play_allowed=False)
+    _invalidate_admin_dashboard_caches()
 
 
 def credit_deposit(amount, user, at_date=None):
@@ -149,6 +177,7 @@ def record_withdrawal(amount, user, at_date=None):
     if user_id := getattr(user, 'id', None):
         from .models import User
         User.objects.filter(id=user_id).update(total_withdrawals_amount=F('total_withdrawals_amount') + amount)
+    _invalidate_admin_dashboard_caches()
 
 
 def sync_total_balance_from_users():
