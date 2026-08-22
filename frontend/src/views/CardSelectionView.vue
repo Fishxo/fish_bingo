@@ -535,7 +535,6 @@ export default {
       })
       
       this.ws.on('game_started', () => {
-        // Clear timer and interval if game starts
         if (this.timerInterval) {
           clearInterval(this.timerInterval)
           this.timerInterval = null
@@ -544,12 +543,9 @@ export default {
           clearInterval(this.interval)
           this.interval = null
         }
-        // Set redirecting flag
+        sessionStorage.setItem('gameStarting', '1')
         this.isRedirecting = true
-        // Redirect immediately
-        this.$router.push('/game').catch(() => {
-          // Ignore navigation errors
-        })
+        this.$router.push('/game').catch(() => {})
       })
       
       this.ws.on('winner_declared', (data) => {
@@ -714,35 +710,30 @@ export default {
     async startGame() {
       if (!this.game) return
       
-      // Prevent multiple calls
       if (this.startingGame) {
         return
       }
       this.startingGame = true
       
+      sessionStorage.setItem('gameStarting', '1')
+      this.isRedirecting = true
+      this.$router.push('/game').catch(() => {})
+      
       try {
-        // Call API to start game (backend starts only when min players reached)
         console.log('Calling start game API for game:', this.game.id)
         const gameData = await startGame(this.game.id)
         
-        // Success: stop updates and redirect (keep WS connected until we leave so game_started can be received if we didn't start)
         if (this.interval) {
           clearInterval(this.interval)
           this.interval = null
         }
         
-        // ATOMIC TRANSITION: Update state atomically before redirect
         this.game = gameData
         this.game.status = 'active'
-        
         console.log('Game started successfully:', gameData)
-        
-        this.isRedirecting = true
-        this.$nextTick(() => {
-          this.$router.push('/game').catch(() => {})
-        })
       } catch (error) {
         console.error('Error starting game:', error)
+        sessionStorage.removeItem('gameStarting')
         console.error('Error details:', error.response?.data || error.message)
         
         // Game may still be waiting (e.g. only 1 player) - refetch and restart timer so countdown restarts
@@ -754,7 +745,9 @@ export default {
             this.isRedirecting = true
             this.$router.push('/game').catch(() => {})
           } else if (game.status === 'waiting') {
-            // Timer hit 0 but game still waiting (e.g. 1 player) - restart timer from full
+            sessionStorage.removeItem('gameStarting')
+            this.isRedirecting = false
+            this.$router.push('/select-card').catch(() => {})
             if (!this.interval) this.startPolling()
             if (!this.timerInterval) {
               this.startTimer({ forceFullRestart: true })

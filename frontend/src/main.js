@@ -50,9 +50,13 @@ router.beforeEach(async (to, from, next) => {
     try {
       const { getCurrentGame } = await import('./services/api')
       const game = await getCurrentGame()
-      if (game.status === 'waiting') {
+      const starting = sessionStorage.getItem('gameStarting') === '1'
+      if (game.status === 'waiting' && !starting) {
         next('/select-card')
         return
+      }
+      if (starting) {
+        sessionStorage.removeItem('gameStarting')
       }
       if (game.status === 'completed') {
         next('/completed')

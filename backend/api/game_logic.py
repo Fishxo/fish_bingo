@@ -307,7 +307,7 @@ def mark_number_on_card(card: GameCard, number: int) -> bool:
     return False
 
 
-def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) -> Tuple[bool, Optional[str]]:
+def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None, enabled_patterns=None) -> Tuple[bool, Optional[str]]:
     """
     Check if a card has bingo using a set of marked cell numbers (ints).
     Same algorithm as Celery task_check_bingo_for_number — single source of truth.
@@ -319,8 +319,9 @@ def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None) ->
         return (False, None)
 
     from .models import GameSettings
-    settings = GameSettings.get_settings(game_id=game_id)
-    enabled_patterns = getattr(settings, "winning_patterns", [])
+    if enabled_patterns is None:
+        settings = GameSettings.get_settings(game_id=game_id)
+        enabled_patterns = getattr(settings, "winning_patterns", [])
     if not enabled_patterns:
         enabled_patterns = ["horizontal", "vertical", "diagonal", "corner", "full_card"]
     enabled_patterns_set = set(enabled_patterns)

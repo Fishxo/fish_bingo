@@ -1168,7 +1168,7 @@ export default {
         clearInterval(this._catchUpInterval)
       }
       // Fast poll after card-selection → active transition (missed WS events during redirect)
-      this._catchUpInterval = setInterval(this.loadGame, 1500)
+      this._catchUpInterval = setInterval(this.loadGame, 800)
       setTimeout(() => {
         if (this._catchUpInterval) {
           clearInterval(this._catchUpInterval)

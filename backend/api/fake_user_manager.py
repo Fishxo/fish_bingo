@@ -39,6 +39,41 @@ FAKE_USER_NAMES = [
 ]
 
 
+def allocate_fake_display_name(seq: int) -> str:
+    """Human-looking name for system account slot seq (1-based). Never returns sys_N."""
+    n = len(FAKE_USER_NAMES)
+    if n == 0:
+        return 'player'
+    base = FAKE_USER_NAMES[(seq - 1) % n]
+    tier = (seq - 1) // n
+    if tier == 0:
+        return base
+    return f"{base}{tier + 1}"
+
+
+def public_fake_user_name(raw: str) -> str:
+    """Map internal sys_N ids to a public display name shown to players."""
+    if not raw:
+        return 'Winner'
+    if raw.startswith('sys_'):
+        try:
+            seq = int(raw.split('_', 1)[1])
+        except (ValueError, IndexError):
+            seq = abs(hash(raw)) % 10000 or 1
+        return allocate_fake_display_name(seq)
+    return raw
+
+
+def fake_winner_identity(fake_user_or_name) -> dict:
+    """Winner payload fragment for fake/system winners (player-visible name)."""
+    if hasattr(fake_user_or_name, 'name'):
+        raw = fake_user_or_name.name
+    else:
+        raw = str(fake_user_or_name or '')
+    name = public_fake_user_name(raw)
+    return {'id': None, 'username': name, 'name': name, 'is_fake': True}
+
+
 def initialize_fake_users():
     """Initialize all fake users in the database"""
     for name in FAKE_USER_NAMES:
@@ -48,31 +83,34 @@ def initialize_fake_users():
 def ensure_fake_user_count(needed: int) -> None:
     """
     Ensure at least `needed` active FakeUser rows exist.
-    Uses FAKE_USER_NAMES first, then creates extra sys_N accounts if needed (>100).
+    Uses FAKE_USER_NAMES first, then human-looking suffixed names (never sys_N).
     """
     if needed < 1:
         return
     initialize_fake_users()
-    active_count = FakeUser.objects.filter(is_active=True).count()
-    if active_count >= needed:
-        return
-    i = 1
+    seq = 0
     while FakeUser.objects.filter(is_active=True).count() < needed:
-        FakeUser.objects.get_or_create(name=f'sys_{i}', defaults={'is_active': True})
-        i += 1
-        if i > needed + 5000:
+        seq += 1
+        if seq > needed + 5000:
             break
+        name = allocate_fake_display_name(seq)
+        FakeUser.objects.get_or_create(name=name, defaults={'is_active': True})
 
 
 def get_random_fake_users(count: int) -> List[FakeUser]:
     """Get random fake users (creates extra system accounts if count > name list)."""
     ensure_fake_user_count(count)
+    human_users = list(
+        FakeUser.objects.filter(is_active=True).exclude(name__startswith='sys_')
+    )
+    if len(human_users) >= count:
+        return random.sample(human_users, count)
+
     active_users = list(FakeUser.objects.filter(is_active=True))
     if not active_users:
         initialize_fake_users()
         active_users = list(FakeUser.objects.filter(is_active=True))
     
-    # Select random count
     count = min(count, len(active_users))
     return random.sample(active_users, count)
 
@@ -700,7 +738,12 @@ def _build_safe_call_context(game_id: int) -> dict:
         get_system_card_marked_numbers,
         system_player_get_all,
     )
-    from .models import GameCard, FakeUserGameCard
+    from .models import GameCard, FakeUserGameCard, GameSettings
+
+    settings = GameSettings.get_settings(game_id=game_id)
+    enabled_patterns = getattr(settings, 'winning_patterns', None) or [
+        'horizontal', 'vertical', 'diagonal', 'corner', 'full_card'
+    ]
 
     real_entries = []
     for card in GameCard.objects.filter(
@@ -744,13 +787,19 @@ def _build_safe_call_context(game_id: int) -> dict:
             'system': True,
         })
 
-    return {'real': real_entries, 'fake': fake_entries, 'game_id': game_id}
+    return {
+        'real': real_entries,
+        'fake': fake_entries,
+        'game_id': game_id,
+        'enabled_patterns': enabled_patterns,
+    }
 
 
 def _score_candidate_with_context(ctx: dict, candidate: int) -> tuple:
     from .game_logic import check_bingo_from_marked
 
     game_id = ctx['game_id']
+    patterns = ctx.get('enabled_patterns')
     real_wins = 0
     fake_wins = 0
 
@@ -759,7 +808,9 @@ def _score_candidate_with_context(ctx: dict, candidate: int) -> tuple:
             continue
         marked = set(entry['marked'])
         marked.add(candidate)
-        has_bingo, _ = check_bingo_from_marked(entry['layout'], marked, game_id)
+        has_bingo, _ = check_bingo_from_marked(
+            entry['layout'], marked, game_id, enabled_patterns=patterns
+        )
         if has_bingo:
             real_wins += 1
 
@@ -771,7 +822,9 @@ def _score_candidate_with_context(ctx: dict, candidate: int) -> tuple:
         if entry.get('system'):
             has_bingo, _ = check_system_player_bingo(entry['layout'], marked, game_id)
         else:
-            has_bingo, _ = check_bingo_from_marked(entry['layout'], marked, game_id)
+            has_bingo, _ = check_bingo_from_marked(
+                entry['layout'], marked, game_id, enabled_patterns=patterns
+            )
         if has_bingo:
             fake_wins += 1
 

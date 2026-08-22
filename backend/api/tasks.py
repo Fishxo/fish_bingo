@@ -486,16 +486,14 @@ def task_process_bingo_winners(self, game_id: int):
                 winning_number = called_numbers[-1] if called_numbers else None
             
             # Create a winner object for fake users (same structure as in claim_bingo_unified)
+            from .fake_user_manager import fake_winner_identity
             fake_winner_obj = {
-                'id': None,
-                'username': fake_card.fake_user.name,
-                'name': fake_card.fake_user.name,
-                'is_fake': True
+                **fake_winner_identity(fake_card.fake_user),
             }
             
             winners_data.append({
-                'winner': fake_winner_obj,  # Include winner object with username for frontend consistency
-                'username': fake_card.fake_user.name,
+                'winner': fake_winner_obj,
+                'username': fake_winner_obj['username'],
                 'is_fake': True,
                 'card_number': fake_card.card_number,
                 'card_id': fake_card.id,
@@ -514,13 +512,8 @@ def task_process_bingo_winners(self, game_id: int):
             if real_winner_cards:
                 primary_winner = UserSerializer(real_winner_cards[0].user).data
             elif fake_winner_cards:
-                # Create winner object for fake user (same structure as in claim_bingo_unified)
-                primary_winner = {
-                    'id': None,
-                    'username': fake_winner_cards[0].fake_user.name,
-                    'name': fake_winner_cards[0].fake_user.name,
-                    'is_fake': True
-                }
+                from .fake_user_manager import fake_winner_identity
+                primary_winner = fake_winner_identity(fake_winner_cards[0].fake_user)
             
             # Show split prize amount for all winners (realistic display)
             # All winners see the same split amount, but only real winners actually receive it
@@ -679,9 +672,11 @@ def task_broadcast_winner_declared_delayed(game_id: int):
                     if num in pattern_numbers:
                         wn = num
                         break
+            from .fake_user_manager import fake_winner_identity
+            identity = fake_winner_identity(c.fake_user)
             winners_data.append({
-                'winner': {'id': None, 'username': c.fake_user.name, 'name': c.fake_user.name, 'is_fake': True},
-                'username': c.fake_user.name,
+                'winner': identity,
+                'username': identity['username'],
                 'is_fake': True,
                 'card_number': c.card_number,
                 'card_id': c.id,
@@ -3034,8 +3029,13 @@ def task_finalize_game(self, game_id: int):
                     # Fake user winner
                     from .models import FakeUserGameCard
                     fake_card = FakeUserGameCard.objects.get(id=winner_card_id)
-                    logger.info(f"🏁 [FINALIZE] Game {game_id}: Loaded fake winner card {winner_card_id}, fake_user: {fake_card.fake_user.name}")
-                    print(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - {fake_card.fake_user.name}")
+                    from .fake_user_manager import fake_winner_identity, public_fake_user_name
+                    fake_identity = fake_winner_identity(fake_card.fake_user)
+                    logger.info(
+                        f"🏁 [FINALIZE] Game {game_id}: Loaded fake winner card {winner_card_id}, "
+                        f"display: {fake_identity['username']}"
+                    )
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake user winner - {fake_identity['username']}")
                     
                     # Get called numbers for winner data
                     called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
@@ -3059,13 +3059,8 @@ def task_finalize_game(self, game_id: int):
                     # Frontend might be looking at 'prize' not 'total_prize'
                     winner_data = {
                         'winners': [{
-                            'winner': {
-                                'id': None,
-                                'username': fake_card.fake_user.name,
-                                'name': fake_card.fake_user.name,
-                                'is_fake': True
-                            },
-                            'username': fake_card.fake_user.name,
+                            'winner': fake_identity,
+                            'username': fake_identity['username'],
                             'is_fake': True,
                             'card_number': fake_card.card_number,
                             'card_id': fake_card.id,
@@ -3074,14 +3069,9 @@ def task_finalize_game(self, game_id: int):
                             'selected_numbers': [],
                             'called_numbers': called_numbers_list,
                             'last_called_number': called_numbers_list[-1] if called_numbers_list else None,
-                            'prize': total_prize_display  # Show total prize for display (fake users don't receive it)
+                            'prize': total_prize_display
                         }],
-                        'winner': {
-                            'id': None,
-                            'username': fake_card.fake_user.name,
-                            'name': fake_card.fake_user.name,
-                            'is_fake': True
-                        },
+                        'winner': fake_identity,
                         'card_number': fake_card.card_number,
                         'card_id': fake_card.id,
                         'card_layout': fake_card.card_layout,
@@ -3095,7 +3085,7 @@ def task_finalize_game(self, game_id: int):
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake winner data - prize={total_prize_display}, total_prize={total_prize_display}")
                     print(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared - prize field: {total_prize_display}")
                     logger.info(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared successfully")
-                    print(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared - {fake_card.fake_user.name}")
+                    print(f"🏁 [FINALIZE] Game {game_id}: Fake winner data prepared - {fake_identity['username']}")
                 else:
                     # Real user winner
                     from .serializers import UserSerializer
@@ -3211,14 +3201,16 @@ def task_finalize_game(self, game_id: int):
                         total_prize_display = float(game.derash_amount) if game.derash_amount and game.derash_amount > 0 else 0.0
                         logger.info(f"🏁 [FINALIZE] Game {game_id}: Error recovery (fake) - derash={game.derash_amount}, total_prize={total_prize_display}")
                         called_numbers_list = list(CalledNumber.objects.filter(game=game).order_by('called_at').values_list('number', flat=True))
+                        from .fake_user_manager import fake_winner_identity
+                        recovery_identity = fake_winner_identity(fake_card.fake_user)
                         winner_data = {
                             'winners': [{
-                                'winner': {'id': None, 'username': fake_card.fake_user.name, 'is_fake': True},
-                                'username': fake_card.fake_user.name,
+                                'winner': recovery_identity,
+                                'username': recovery_identity['username'],
                                 'is_fake': True,
-                                'prize': total_prize_display  # Show total prize for display
+                                'prize': total_prize_display
                             }],
-                            'winner': {'id': None, 'username': fake_card.fake_user.name, 'is_fake': True},
+                            'winner': recovery_identity,
                             'prize': total_prize_display,  # Show total prize for display
                             'total_prize': total_prize_display,
                             'called_numbers': called_numbers_list
@@ -3380,7 +3372,8 @@ def task_finalize_redis_system_winner(game_id: int, winner_dict: dict):
         except Exception as e:
             logger.warning(f"Stats update failed for game {game_id}: {e}")
         cleanup_game_live_state(game_id)
-        name = winner_dict.get('name', 'System')
+        from .fake_user_manager import public_fake_user_name
+        name = public_fake_user_name(winner_dict.get('name', 'System'))
         card_number = winner_dict.get('card_number')
         card_layout = winner_dict.get('card_layout', [])
         pattern = winner_dict.get('pattern')

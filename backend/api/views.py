@@ -1219,9 +1219,11 @@ class GameCardViewSet(viewsets.ReadOnlyModelViewSet):
                             break
                 if not wn:
                     wn = called_numbers_list[-1] if called_numbers_list else None
+                from .fake_user_manager import fake_winner_identity
+                identity = fake_winner_identity(fake_card.fake_user)
                 winners_data.append({
-                    'winner': {'id': None, 'username': fake_card.fake_user.name, 'name': fake_card.fake_user.name, 'is_fake': True},
-                    'username': fake_card.fake_user.name,
+                    'winner': identity,
+                    'username': identity['username'],
                     'is_fake': True,
                     'card_number': fake_card.card_number,
                     'card_id': fake_card.id,
