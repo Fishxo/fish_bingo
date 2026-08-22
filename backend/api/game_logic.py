@@ -367,6 +367,80 @@ def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None, en
     return (False, None)
 
 
+def near_bingo_completion_numbers(
+    layout,
+    marked_numbers: set,
+    enabled_patterns=None,
+) -> set:
+    """
+    Numbers that would complete an enabled winning pattern if called next.
+    Used to avoid calling them while system accounts should win (lightweight vs full simulation).
+    """
+    result = set()
+    if not layout or not marked_numbers:
+        return result
+
+    if enabled_patterns is None:
+        enabled_patterns = ["horizontal", "vertical", "diagonal", "corner", "full_card"]
+    if not enabled_patterns:
+        enabled_patterns = ["horizontal", "vertical", "diagonal", "corner", "full_card"]
+    enabled_patterns_set = set(enabled_patterns)
+    only_full_card = enabled_patterns_set == {"full_card"}
+
+    def unmarked_in_cells(cells) -> list:
+        need = []
+        for cell in cells:
+            if cell.get("letter") == "FREE":
+                continue
+            cell_number = cell.get("number")
+            if cell_number is None:
+                continue
+            try:
+                num = int(cell_number)
+            except (ValueError, TypeError):
+                continue
+            if num not in marked_numbers:
+                need.append(num)
+        return need
+
+    if not only_full_card and "horizontal" in enabled_patterns_set:
+        for row in layout:
+            need = unmarked_in_cells(row)
+            if len(need) == 1:
+                result.add(need[0])
+
+    if not only_full_card and "vertical" in enabled_patterns_set:
+        for col_idx in range(5):
+            col_cells = [layout[row_idx][col_idx] for row_idx in range(5)]
+            need = unmarked_in_cells(col_cells)
+            if len(need) == 1:
+                result.add(need[0])
+
+    if not only_full_card and "diagonal" in enabled_patterns_set:
+        diag1 = [layout[i][i] for i in range(5)]
+        need = unmarked_in_cells(diag1)
+        if len(need) == 1:
+            result.add(need[0])
+        diag2 = [layout[i][4 - i] for i in range(5)]
+        need = unmarked_in_cells(diag2)
+        if len(need) == 1:
+            result.add(need[0])
+
+    if not only_full_card and "corner" in enabled_patterns_set:
+        corners = [layout[0][0], layout[0][4], layout[4][0], layout[4][4], layout[2][2]]
+        need = unmarked_in_cells(corners)
+        if len(need) == 1:
+            result.add(need[0])
+
+    if "full_card" in enabled_patterns_set:
+        all_cells = [cell for row in layout for cell in row]
+        need = unmarked_in_cells(all_cells)
+        if len(need) == 1:
+            result.add(need[0])
+
+    return result
+
+
 def check_bingo(card: GameCard, game: Game) -> Tuple[bool, Optional[str]]:
     """Check if a card has a winning BINGO using effective marks (Redis + DB), not layout flags alone."""
     from .redis_utils import get_effective_marked_numbers_for_card
@@ -770,8 +844,8 @@ def start_game(game: Game) -> bool:
     # State transitions are handled atomically with locks
     
     # CRITICAL: Cache game settings at game start to prevent mid-game changes.
-    # free_play: when True, number calling is random. When False, calls are still random
-    # (system-win biasing disabled for responsiveness — fake_win_preference not applied live).
+    # free_play: when True, number calling is random. When False, skip numbers that
+    # would complete a real player's row/line on the next call (fast avoid-list).
     settings = GameSettings.get_settings()
     test_co_win_armed = getattr(settings, 'test_co_win_next_game', False)
     game_settings_cache_key = f'game:{game.id}:settings'

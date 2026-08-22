@@ -837,6 +837,65 @@ def _simulate_bingo_if_called(game_id: int, candidate: int, called_numbers: set)
     return _score_candidate_with_context(ctx, candidate)
 
 
+def collect_real_near_bingo_numbers(game_id: int, game_settings: dict = None) -> set:
+    """
+    Collect numbers that would give any real player bingo on the next call.
+    Fast: one pass over real cards only (no per-candidate simulation).
+    """
+    from django.core.cache import cache
+    from .redis_utils import get_effective_marked_numbers_for_card
+    from .game_logic import near_bingo_completion_numbers
+    from .models import GameCard
+
+    if game_settings is None:
+        game_settings = cache.get(f'game:{game_id}:settings') or {}
+
+    enabled_patterns = game_settings.get('winning_patterns') or [
+        'horizontal', 'vertical', 'diagonal', 'corner', 'full_card'
+    ]
+
+    avoid = set()
+    for card in GameCard.objects.filter(game_id=game_id, is_winner=False).only(
+        'id', 'card_layout', 'selected_numbers'
+    ):
+        if not card.card_layout:
+            continue
+        marked = get_effective_marked_numbers_for_card(
+            game_id, card.id, card.card_layout, card.selected_numbers
+        )
+        avoid.update(
+            near_bingo_completion_numbers(
+                card.card_layout, marked, enabled_patterns=enabled_patterns
+            )
+        )
+    return avoid
+
+
+def pick_number_avoiding_real_wins(game_id: int, pool, game_settings: dict = None):
+    """
+    Random pick from pool, skipping numbers that would complete a real card's line.
+    Falls back to full pool when every remaining number would let a real user win.
+    """
+    import random
+
+    pool = list(pool)
+    if not pool:
+        return None
+
+    if game_settings is None:
+        from django.core.cache import cache
+        game_settings = cache.get(f'game:{game_id}:settings') or {}
+
+    free_play = bool(game_settings.get('free_play', False))
+    allow_system = bool(game_settings.get('allow_system_account', True))
+    if free_play or not allow_system:
+        return random.choice(pool)
+
+    avoid = collect_real_near_bingo_numbers(game_id, game_settings)
+    safe = [n for n in pool if n not in avoid]
+    return random.choice(safe if safe else pool)
+
+
 def get_safe_number_to_call(
     game_id: int,
     available,

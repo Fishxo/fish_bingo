@@ -2423,7 +2423,10 @@ def task_call_next_number(self, game_id: int):
                 if allowed_numbers:
                     pool = allowed_numbers
 
-            number = random.choice(pool)
+            from .fake_user_manager import pick_number_avoiding_real_wins
+            number = pick_number_avoiding_real_wins(game_id, pool, gs)
+            if number is None:
+                number = random.choice(pool)
         
         # REDIS-FIRST: Add to Redis only (fast, no DB hit during gameplay)
         # DB records will be created at game end for history
