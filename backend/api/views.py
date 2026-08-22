@@ -570,7 +570,8 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                         task = task_call_next_number
                                         print(f"⚠️ Auto-started Game {game.id}: Task not found by name, using direct import")
                                     
-                                    first_delay = max(1, int(call_interval))
+                                    from .game_logic import compute_first_call_delay
+                                    first_delay = compute_first_call_delay(call_interval)
                                     result = task.apply_async(args=[game.id], countdown=first_delay)
                                     print(f"✅ Auto-started Game {game.id}: Scheduled first number call in {first_delay} seconds (task_id: {result.id}, task_name: {result.name})")
                                     success = True
@@ -1503,7 +1504,8 @@ def start_game(request, game_id):
                     task = task_call_next_number
                     print(f"⚠️ Game {game.id}: Task not found by name, using direct import")
                 
-                first_delay = max(1, int(call_interval))
+                from .game_logic import compute_first_call_delay
+                first_delay = compute_first_call_delay(call_interval)
                 result = task.apply_async(args=[game.id], countdown=first_delay)
                 print(f"✅ Game {game.id}: Scheduled first number call in {first_delay} seconds (task_id: {result.id}, task_name: {result.name})")
                 import logging

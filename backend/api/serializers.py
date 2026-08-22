@@ -37,6 +37,7 @@ class GameSerializer(serializers.ModelSerializer):
     total_cards = serializers.SerializerMethodField()
     card_selection_timer = serializers.SerializerMethodField()
     time_between_calls = serializers.SerializerMethodField()
+    first_call_delay = serializers.SerializerMethodField()
     automatic_mode_enabled = serializers.SerializerMethodField()
     selection_remaining_seconds = serializers.SerializerMethodField()
     
@@ -48,6 +49,7 @@ class GameSerializer(serializers.ModelSerializer):
             'gamecards', 'called_numbers', 'total_players', 'total_derash', 'total_cards',
             'card_selection_timer', 'automatic_mode_enabled', 'selection_remaining_seconds',
             'time_between_calls',
+            'first_call_delay',
             'avoid_list_numbers',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -129,6 +131,17 @@ class GameSerializer(serializers.ModelSerializer):
             return int(gs['time_between_calls'])
         from .models import GameSettings
         return int(GameSettings.get_settings().time_between_calls or 3)
+
+    def get_first_call_delay(self, obj):
+        """Seconds after start before first number (includes transition grace for UI)."""
+        from django.core.cache import cache
+        from .game_logic import compute_first_call_delay
+
+        gs = cache.get(f'game:{obj.id}:settings')
+        if gs and gs.get('first_call_delay') is not None:
+            return int(gs['first_call_delay'])
+        interval = self.get_time_between_calls(obj)
+        return compute_first_call_delay(interval)
     
     def get_selection_remaining_seconds(self, obj):
         """

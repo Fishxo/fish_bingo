@@ -307,6 +307,19 @@ def mark_number_on_card(card: GameCard, number: int) -> bool:
     return False
 
 
+TRANSITION_GRACE_BEFORE_FIRST_CALL = 10
+
+
+def compute_first_call_delay(time_between_calls) -> int:
+    """
+    Seconds after game goes active before the first number is called.
+    Longer than time_between_calls so players can finish card-selection → active UI transition.
+    Subsequent calls still use time_between_calls only.
+    """
+    interval = max(1, int(time_between_calls or 3))
+    return max(12, interval + TRANSITION_GRACE_BEFORE_FIRST_CALL)
+
+
 def check_bingo_from_marked(layout, marked_numbers: set, game_id: int = None, enabled_patterns=None) -> Tuple[bool, Optional[str]]:
     """
     Check if a card has bingo using a set of marked cell numbers (ints).
@@ -850,8 +863,11 @@ def start_game(game: Game) -> bool:
     test_co_win_armed = getattr(settings, 'test_co_win_next_game', False)
     game_settings_cache_key = f'game:{game.id}:settings'
     pref = getattr(settings, 'fake_win_preference', 0)
+    call_interval = max(1, int(settings.time_between_calls or 3))
+    first_call_delay = compute_first_call_delay(call_interval)
     cache.set(game_settings_cache_key, {
         'time_between_calls': settings.time_between_calls,
+        'first_call_delay': first_call_delay,
         'allow_system_account': settings.allow_system_account,
         'free_play': settings.free_play,
         'fake_win_preference': pref,

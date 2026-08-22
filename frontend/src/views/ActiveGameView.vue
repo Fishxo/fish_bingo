@@ -452,7 +452,12 @@ export default {
           if (game.started_at) {
             secondsSinceStart = (Date.now() - new Date(game.started_at).getTime()) / 1000
           }
-          const joinIsLate = hasCalledNumbers || callCount > 0 || secondsSinceStart > 2
+          const firstCallDelay = Math.max(
+            12,
+            Number(game.first_call_delay) ||
+              (Number(game.time_between_calls) || 3) + 10
+          )
+          const joinIsLate = hasCalledNumbers || callCount > 0 || secondsSinceStart >= firstCallDelay
 
           if (
             game.status === 'active' &&
@@ -462,7 +467,10 @@ export default {
             !this._countdownInitialized
           ) {
             this._countdownInitialized = true
-            const readySeconds = Math.max(1, Number(this.game?.time_between_calls) || 3)
+            const readySeconds = Math.max(
+              1,
+              Math.ceil(firstCallDelay - secondsSinceStart)
+            )
             this.showStartCountdown = true
             this.startCountdownSeconds = readySeconds
             this.startCountdownText = 'ጨዋታውን ለመጀመር ...'
