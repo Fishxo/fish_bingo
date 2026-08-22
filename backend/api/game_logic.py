@@ -925,14 +925,6 @@ def start_game(game: Game) -> bool:
     # Refresh game from DB to get latest fake user count before recalculating derash
     game.refresh_from_db()
     
-    # Ensure all fake user cards are committed to DB before recalculating
-    # Add a small delay to ensure all pending fake user card selections are complete
-    import time
-    time.sleep(0.5)  # Small delay to ensure all fake user selections are committed
-    
-    # Refresh again to get the latest count after delay
-    game.refresh_from_db()
-    
     # Recalculate derash to include fake users (MUST be done BEFORE setting status to active)
     # This ensures derash is correct when the game starts and countdown begins
     game.recalculate_derash()

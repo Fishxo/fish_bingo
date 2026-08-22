@@ -386,12 +386,7 @@ export default {
               clearInterval(this.interval)
               this.interval = null
             }
-            // Stop WebSocket updates
-            if (this.ws) {
-              this.ws.disconnect()
-              this.ws = null
-            }
-            // Set redirecting flag BEFORE navigation to prevent any state updates
+            // Keep WebSocket alive through redirect so early number_called events aren't dropped
             this.isRedirecting = true
             // Update game state atomically before redirect
             this.game = game
@@ -734,10 +729,6 @@ export default {
         if (this.interval) {
           clearInterval(this.interval)
           this.interval = null
-        }
-        if (this.ws) {
-          this.ws.disconnect()
-          this.ws = null
         }
         
         // ATOMIC TRANSITION: Update state atomically before redirect

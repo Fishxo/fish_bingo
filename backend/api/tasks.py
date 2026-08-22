@@ -2477,6 +2477,12 @@ def task_call_next_number(self, game_id: int):
             })
         except Exception as e:
             print(f"WebSocket broadcast error: {e}")
+
+        try:
+            cache.delete('game:current')
+            cache.delete('game:current:state:game:current')
+        except Exception:
+            pass
         
         # CRITICAL FIX: Mark cards FIRST, then check bingo (add delay to avoid race condition)
         # Marking must complete before bingo check, otherwise bingo check sees unmarked cards

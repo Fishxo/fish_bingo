@@ -562,7 +562,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                 logger.info(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified: {verify_state}")
                                 print(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified")
                                 
-                                # Schedule first call with 8-second delay (5s ready + 3s countdown)
+                                # Schedule first call — 5s matches ActiveGameView ready countdown
                                 try:
                                     # Get task by explicit name
                                     task = current_app.tasks.get('api.tasks.task_call_next_number')
@@ -572,9 +572,8 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                         task = task_call_next_number
                                         print(f"⚠️ Auto-started Game {game.id}: Task not found by name, using direct import")
                                     
-                                    # 5s ready phase + 3s countdown before first number
-                                    result = task.apply_async(args=[game.id], countdown=8)
-                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 8 seconds (task_id: {result.id}, task_name: {result.name})")
+                                    result = task.apply_async(args=[game.id], countdown=5)
+                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 5 seconds (task_id: {result.id}, task_name: {result.name})")
                                     success = True
                                 except Exception as e:
                                     print(f"❌ ERROR: Failed to schedule task_call_next_number for auto-started game {game.id}: {e}")
@@ -1496,7 +1495,7 @@ def start_game(request, game_id):
             
             # Start automatic number calling via NEW Redis-first task
             # This is freeze-proof: fast, no locks, no DB queries during gameplay
-            # CRITICAL: Schedule first call with 8-second delay (5s ready + 3s countdown)
+            # Schedule first call — 5s matches ActiveGameView ready countdown
             # CRITICAL: Use explicit task name to ensure Celery can find and route it
             from celery import current_app
             try:
@@ -1508,13 +1507,12 @@ def start_game(request, game_id):
                     task = task_call_next_number
                     print(f"⚠️ Game {game.id}: Task not found by name, using direct import")
                 
-                # 5s ready phase + 3s countdown before first number
-                result = task.apply_async(args=[game.id], countdown=8)
-                print(f"✅ Game {game.id}: Scheduled first number call in 8 seconds (task_id: {result.id}, task_name: {result.name})")
+                result = task.apply_async(args=[game.id], countdown=5)
+                print(f"✅ Game {game.id}: Scheduled first number call in 5 seconds (task_id: {result.id}, task_name: {result.name})")
                 # Also log to Django logger for better visibility
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=8, task_name={result.name}")
+                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=5, task_name={result.name}")
             except Exception as e:
                 print(f"❌ ERROR: Failed to schedule task_call_next_number for game {game.id}: {e}")
                 import traceback

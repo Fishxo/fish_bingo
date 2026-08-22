@@ -159,6 +159,7 @@ export default {
       ws: null,
       wsConnected: false, // Track WebSocket connection state
       interval: null,
+      _catchUpInterval: null,
       redirectingToCardSelection: false,
       noWinner: false,
       winnerCard: null,
@@ -203,11 +204,9 @@ export default {
     }
   },
   async mounted() {
-    // Load game (router guard ensures we only mount when game exists)
     await this.loadGame()
     this.setupWebSocket()
-    // Only start polling if WebSocket is not connected (fallback)
-    // Polling will be stopped when WebSocket connects
+    this.startCatchUpPolling()
     if (!this.wsConnected) {
       this.startPolling()
     }
@@ -223,6 +222,10 @@ export default {
   beforeUnmount() {
     if (this.interval) {
       clearInterval(this.interval)
+    }
+    if (this._catchUpInterval) {
+      clearInterval(this._catchUpInterval)
+      this._catchUpInterval = null
     }
     if (this.currentCallTimeout) {
       clearTimeout(this.currentCallTimeout)
@@ -442,10 +445,22 @@ export default {
             }
           }
           
-          // Check if game just started and no numbers called yet - show ready(5s) + countdown(3s)
-          // Use _countdownInitialized flag to prevent multiple countdown starts
-          if (game.status === 'active' && (!game.called_numbers || game.called_numbers.length === 0) && !this.showStartCountdown && !this.countdownInterval && !this._countdownInitialized) {
-            // Game just started: first "be ready" for 5s, then countdown 3s
+          // Show ready countdown only when joining right at game start (not after redirect lag).
+          const hasCalledNumbers = game.called_numbers && game.called_numbers.length > 0
+          const callCount = game.current_call_count || 0
+          let secondsSinceStart = 0
+          if (game.started_at) {
+            secondsSinceStart = (Date.now() - new Date(game.started_at).getTime()) / 1000
+          }
+          const joinIsLate = hasCalledNumbers || callCount > 0 || secondsSinceStart > 2
+
+          if (
+            game.status === 'active' &&
+            !joinIsLate &&
+            !this.showStartCountdown &&
+            !this.countdownInterval &&
+            !this._countdownInitialized
+          ) {
             this._countdownInitialized = true // Mark as initialized to prevent duplicate starts
             this.showStartCountdown = true
             this.startCountdownSeconds = 5
@@ -499,92 +514,104 @@ export default {
               if (this.game) this.game.current_call_count = this.calledNumbers.length
             }
 
-            // FIX: Only hide countdown if it has finished (8 seconds passed)
-            if (game.called_numbers.length > 0 && this.showStartCountdown && this.startCountdownSeconds <= 0) {
+            // End countdown early when numbers are already being called
+            if (game.called_numbers.length > 0 && this.showStartCountdown) {
               this.showStartCountdown = false
               if (this.countdownInterval) {
                 clearInterval(this.countdownInterval)
                 this.countdownInterval = null
               }
-              // Restore normal polling interval if it was changed (only if WS not connected)
               if (!this.wsConnected) {
                 if (this.interval) {
                   clearInterval(this.interval)
                 }
-                this.interval = setInterval(this.loadGame, 10000) // Normal 10 second polling (reduced from 2s)
+                this.interval = setInterval(this.loadGame, 10000)
               }
-            } else if (game.called_numbers.length > 0 && this.showStartCountdown && this.startCountdownSeconds > 0) {
-              // Countdown still running - don't process called numbers yet
-              console.log('Countdown still running, ignoring called numbers until countdown finishes')
             }
 
-            // Only process called numbers if countdown has finished
+            // Always merge called numbers (never ignore during countdown — WS/poll may arrive mid-countdown)
             if (!this.showStartCountdown || this.startCountdownSeconds <= 0) {
               if (hasNewNumbers) {
                 mergeCalledNumbers()
                 console.log(`✅ [SYNC] Merged called numbers, count: ${this.calledNumbers.length}`)
               } else if (clientHasMore || this.calledNumbers.length !== game.called_numbers.length) {
-                // Client has more (e.g. from WebSocket) or count mismatch: merge instead of overwrite so we never drop the last number
                 mergeCalledNumbers()
                 if (clientHasMore) console.log(`✅ [SYNC] Preserved client numbers (merge), count: ${this.calledNumbers.length}`)
               }
+            } else if (hasNewNumbers || clientHasMore) {
+              this.showStartCountdown = false
+              if (this.countdownInterval) {
+                clearInterval(this.countdownInterval)
+                this.countdownInterval = null
+              }
+              mergeCalledNumbers()
+              console.log(`✅ [SYNC] Countdown skipped — merged called numbers, count: ${this.calledNumbers.length}`)
             }
 
-            if (!hasNewNumbers && game.called_numbers && game.called_numbers.length > 0) {
-              
-              if (game.called_numbers.length > 0) {
-                const lastCall = game.called_numbers[game.called_numbers.length - 1]
+            if (this.calledNumbers.length > 0 && game.called_numbers.length > 0) {
+              const lastCall = game.called_numbers[game.called_numbers.length - 1]
+              if (!this.currentCall || this.currentCall.number !== lastCall.number) {
                 const callKey = `${lastCall.letter}-${lastCall.number}`
-                
-                // CRITICAL: During active game, drive the big display (currentCall) from WebSocket only,
-                // so numbers appear one-by-one at the right interval. Only set currentCall from polling when:
-                // we don't have one yet (initial load / catch-up) or game is not active.
-                const shouldUpdateCurrentCallFromPolling =
-                  (!this.processedCalls || !this.processedCalls.has(callKey) || !this.currentCall) &&
-                  (!this.currentCall || game.status !== 'active')
-                if (shouldUpdateCurrentCallFromPolling) {
-                  if (!this.currentCall || this.currentCall.number !== lastCall.number) {
-                    if (this.currentCall) {
-                      const existsInRecent = this.recentCalls.some(call => 
-                        call.number === this.currentCall.number && call.letter === this.currentCall.letter
-                      )
-                      if (!existsInRecent) {
-                        this.recentCalls.push({
-                          number: this.currentCall.number,
-                          letter: this.currentCall.letter
-                        })
-                        if (this.recentCalls.length > 3) {
-                          this.recentCalls = this.recentCalls.slice(-3)
-                        }
+                const wsHasNotShownYet = !this.processedCalls || !this.processedCalls.has(callKey)
+                if (wsHasNotShownYet || this.calledNumbers.length > 1) {
+                  this.currentCall = { number: lastCall.number, letter: lastCall.letter }
+                  if (!this.processedCalls) this.processedCalls = new Set()
+                  this.processedCalls.add(callKey)
+                }
+              }
+            }
+
+            if (!hasNewNumbers && game.called_numbers.length > 0) {
+              const lastCall = game.called_numbers[game.called_numbers.length - 1]
+              const callKey = `${lastCall.letter}-${lastCall.number}`
+              
+              // During active game, drive the big display from WebSocket when possible.
+              // Set currentCall from polling only for initial load / catch-up after transition.
+              const shouldUpdateCurrentCallFromPolling =
+                (!this.processedCalls || !this.processedCalls.has(callKey) || !this.currentCall) &&
+                (!this.currentCall || game.status !== 'active')
+              if (shouldUpdateCurrentCallFromPolling) {
+                if (!this.currentCall || this.currentCall.number !== lastCall.number) {
+                  if (this.currentCall) {
+                    const existsInRecent = this.recentCalls.some(call => 
+                      call.number === this.currentCall.number && call.letter === this.currentCall.letter
+                    )
+                    if (!existsInRecent) {
+                      this.recentCalls.push({
+                        number: this.currentCall.number,
+                        letter: this.currentCall.letter
+                      })
+                      if (this.recentCalls.length > 3) {
+                        this.recentCalls = this.recentCalls.slice(-3)
                       }
                     }
-                    this.currentCall = {
-                      number: lastCall.number,
-                      letter: lastCall.letter
-                    }
-                    if (!this.processedCalls) {
-                      this.processedCalls = new Set()
-                    }
-                    this.processedCalls.add(callKey)
                   }
-                }
-                
-                // Update recent calls from game data (last 3 unique, excluding current)
-                const uniqueRecent = []
-                const seen = new Set()
-                for (let i = game.called_numbers.length - 2; i >= 0 && uniqueRecent.length < 3; i--) {
-                  const call = game.called_numbers[i]
-                  const key = `${call.letter}-${call.number}`
-                  if (!seen.has(key) && call.number !== this.currentCall?.number) {
-                    seen.add(key)
-                    uniqueRecent.unshift({
-                      number: call.number,
-                      letter: call.letter
-                    })
+                  this.currentCall = {
+                    number: lastCall.number,
+                    letter: lastCall.letter
                   }
+                  if (!this.processedCalls) {
+                    this.processedCalls = new Set()
+                  }
+                  this.processedCalls.add(callKey)
                 }
-                this.recentCalls = uniqueRecent
               }
+              
+              // Update recent calls from game data (last 3 unique, excluding current)
+              const uniqueRecent = []
+              const seen = new Set()
+              for (let i = game.called_numbers.length - 2; i >= 0 && uniqueRecent.length < 3; i--) {
+                const call = game.called_numbers[i]
+                const key = `${call.letter}-${call.number}`
+                if (!seen.has(key) && call.number !== this.currentCall?.number) {
+                  seen.add(key)
+                  uniqueRecent.unshift({
+                    number: call.number,
+                    letter: call.letter
+                  })
+                }
+              }
+              this.recentCalls = uniqueRecent
             }
             
             // In automatic mode, mark any new numbers that were called (only if no winner yet)
@@ -1130,12 +1157,26 @@ export default {
       this.ws.connect()
     },
     startPolling() {
-      // PHASE 2 OPTIMIZATION #4: Reduced polling frequency from 2s to 10s
-      // Only start polling if WebSocket is not connected and interval is not already running
       if (!this.wsConnected && !this.interval) {
         console.log('Starting HTTP polling (WebSocket not connected)')
-        this.interval = setInterval(this.loadGame, 10000) // Poll every 10 seconds (reduced from 2s)
+        this.interval = setInterval(this.loadGame, 10000)
       }
+    },
+    startCatchUpPolling() {
+      if (this._catchUpInterval) {
+        clearInterval(this._catchUpInterval)
+      }
+      // Fast poll after card-selection → active transition (missed WS events during redirect)
+      this._catchUpInterval = setInterval(this.loadGame, 1500)
+      setTimeout(() => {
+        if (this._catchUpInterval) {
+          clearInterval(this._catchUpInterval)
+          this._catchUpInterval = null
+        }
+        if (!this.wsConnected && !this.interval) {
+          this.startPolling()
+        }
+      }, 20000)
     },
     stopPolling() {
       // Stop polling when WebSocket is connected
