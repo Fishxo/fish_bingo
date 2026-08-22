@@ -2516,8 +2516,9 @@ def task_call_next_number(self, game_id: int):
         # Re-check state before scheduling (game might have ended during this task)
         state_after = get_game_live_state(game_id)
         if state_after and state_after.get('status') == 'active' and not state_after.get('winner_card_id'):
-            call_interval = state_after.get('call_interval', 3)
-            # Use explicit task name to ensure routing works
+            gs = cache.get(f'game:{game_id}:settings') or {}
+            call_interval = int(gs.get('time_between_calls') or state_after.get('call_interval') or 3)
+            call_interval = max(1, call_interval)
             from celery import current_app
             task = current_app.tasks['api.tasks.task_call_next_number']
             result = task.apply_async(args=[game_id], countdown=call_interval)

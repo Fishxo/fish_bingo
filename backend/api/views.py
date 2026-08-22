@@ -562,18 +562,17 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                 logger.info(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified: {verify_state}")
                                 print(f"✅ [AUTO-START] Game {game.id}: Redis state initialized and verified")
                                 
-                                # Schedule first call — 5s matches ActiveGameView ready countdown
+                                # Schedule first call using admin time_between_calls
                                 try:
-                                    # Get task by explicit name
                                     task = current_app.tasks.get('api.tasks.task_call_next_number')
                                     if not task:
-                                        # Fallback: try importing directly
                                         from .tasks import task_call_next_number
                                         task = task_call_next_number
                                         print(f"⚠️ Auto-started Game {game.id}: Task not found by name, using direct import")
                                     
-                                    result = task.apply_async(args=[game.id], countdown=5)
-                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in 5 seconds (task_id: {result.id}, task_name: {result.name})")
+                                    first_delay = max(1, int(call_interval))
+                                    result = task.apply_async(args=[game.id], countdown=first_delay)
+                                    print(f"✅ Auto-started Game {game.id}: Scheduled first number call in {first_delay} seconds (task_id: {result.id}, task_name: {result.name})")
                                     success = True
                                 except Exception as e:
                                     print(f"❌ ERROR: Failed to schedule task_call_next_number for auto-started game {game.id}: {e}")
@@ -1493,26 +1492,24 @@ def start_game(request, game_id):
             logger.info(f"✅ [START GAME] Game {game.id}: Redis state initialized and verified: {verify_state}")
             print(f"✅ [START GAME] Game {game.id}: Redis state initialized and verified")
             
-            # Start automatic number calling via NEW Redis-first task
-            # This is freeze-proof: fast, no locks, no DB queries during gameplay
-            # Schedule first call — 5s matches ActiveGameView ready countdown
-            # CRITICAL: Use explicit task name to ensure Celery can find and route it
+            # Schedule first call using admin time_between_calls (cached at game start)
             from celery import current_app
             try:
-                # Get task by explicit name
                 task = current_app.tasks.get('api.tasks.task_call_next_number')
                 if not task:
-                    # Fallback: try importing directly
                     from .tasks import task_call_next_number
                     task = task_call_next_number
                     print(f"⚠️ Game {game.id}: Task not found by name, using direct import")
                 
-                result = task.apply_async(args=[game.id], countdown=5)
-                print(f"✅ Game {game.id}: Scheduled first number call in 5 seconds (task_id: {result.id}, task_name: {result.name})")
-                # Also log to Django logger for better visibility
+                first_delay = max(1, int(call_interval))
+                result = task.apply_async(args=[game.id], countdown=first_delay)
+                print(f"✅ Game {game.id}: Scheduled first number call in {first_delay} seconds (task_id: {result.id}, task_name: {result.name})")
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, countdown=5, task_name={result.name}")
+                logger.info(
+                    f"Game {game.id}: Scheduled task_call_next_number with task_id {result.id}, "
+                    f"countdown={first_delay}, task_name={result.name}"
+                )
             except Exception as e:
                 print(f"❌ ERROR: Failed to schedule task_call_next_number for game {game.id}: {e}")
                 import traceback

@@ -461,9 +461,10 @@ export default {
             !this.countdownInterval &&
             !this._countdownInitialized
           ) {
-            this._countdownInitialized = true // Mark as initialized to prevent duplicate starts
+            this._countdownInitialized = true
+            const readySeconds = Math.max(1, Number(this.game?.time_between_calls) || 3)
             this.showStartCountdown = true
-            this.startCountdownSeconds = 5
+            this.startCountdownSeconds = readySeconds
             this.startCountdownText = 'ጨዋታውን ለመጀመር ...'
             this.countdownInterval = setInterval(() => {
               if (this.startCountdownSeconds > 1) {

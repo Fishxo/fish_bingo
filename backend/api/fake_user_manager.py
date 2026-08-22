@@ -682,67 +682,106 @@ def _number_on_layout(layout: list, number: int) -> bool:
     )
 
 
-def _simulate_bingo_if_called(game_id: int, candidate: int, called_numbers: set) -> tuple:
-    """
-    Return (real_bingo_count, fake_bingo_count) if candidate were called next.
-    Includes DB fake cards and Redis-only system players.
-    """
+def _layout_numbers(layout: list) -> set:
+    if not layout:
+        return set()
+    return {
+        cell.get('number')
+        for row in layout
+        for cell in row
+        if cell.get('number') is not None
+    }
+
+
+def _build_safe_call_context(game_id: int) -> dict:
+    """Load card state once per pick (not once per candidate number)."""
     from .redis_utils import (
         get_effective_marked_numbers_for_card,
         get_system_card_marked_numbers,
         system_player_get_all,
     )
-    from .game_logic import check_bingo_from_marked
     from .models import GameCard, FakeUserGameCard
 
-    real_wins = 0
-    fake_wins = 0
-
-    real_cards = GameCard.objects.filter(
+    real_entries = []
+    for card in GameCard.objects.filter(
         game_id=game_id, is_winner=False
-    ).only('id', 'card_layout', 'selected_numbers')
-    for card in real_cards:
-        if not _number_on_layout(card.card_layout, candidate):
+    ).only('id', 'card_layout', 'selected_numbers'):
+        if not card.card_layout:
             continue
-        marked = get_effective_marked_numbers_for_card(
-            game_id, card.id, card.card_layout, card.selected_numbers
-        )
-        if candidate not in marked:
-            marked = set(marked) | {candidate}
-        has_bingo, _ = check_bingo_from_marked(card.card_layout, marked, game_id)
-        if has_bingo:
-            real_wins += 1
+        real_entries.append({
+            'layout': card.card_layout,
+            'numbers': _layout_numbers(card.card_layout),
+            'marked': set(get_effective_marked_numbers_for_card(
+                game_id, card.id, card.card_layout, card.selected_numbers
+            )),
+            'system': False,
+        })
 
-    fake_cards = FakeUserGameCard.objects.filter(
+    fake_entries = []
+    for card in FakeUserGameCard.objects.filter(
         game_id=game_id, is_winner=False
-    ).only('id', 'card_layout', 'selected_numbers')
-    for card in fake_cards:
-        if not _number_on_layout(card.card_layout, candidate):
+    ).only('id', 'card_layout', 'selected_numbers'):
+        if not card.card_layout:
             continue
-        marked = get_effective_marked_numbers_for_card(
-            game_id, card.id, card.card_layout, card.selected_numbers
-        )
-        if candidate not in marked:
-            marked = set(marked) | {candidate}
-        has_bingo, _ = check_bingo_from_marked(card.card_layout, marked, game_id)
-        if has_bingo:
-            fake_wins += 1
+        fake_entries.append({
+            'layout': card.card_layout,
+            'numbers': _layout_numbers(card.card_layout),
+            'marked': set(get_effective_marked_numbers_for_card(
+                game_id, card.id, card.card_layout, card.selected_numbers
+            )),
+            'system': False,
+        })
 
     for player in system_player_get_all(game_id) or []:
         layout = player.get('card_layout')
         card_number = player.get('card_number')
         if not layout or card_number is None:
             continue
-        if not _number_on_layout(layout, candidate):
+        fake_entries.append({
+            'layout': layout,
+            'numbers': _layout_numbers(layout),
+            'marked': set(get_system_card_marked_numbers(game_id, card_number)),
+            'system': True,
+        })
+
+    return {'real': real_entries, 'fake': fake_entries, 'game_id': game_id}
+
+
+def _score_candidate_with_context(ctx: dict, candidate: int) -> tuple:
+    from .game_logic import check_bingo_from_marked
+
+    game_id = ctx['game_id']
+    real_wins = 0
+    fake_wins = 0
+
+    for entry in ctx['real']:
+        if candidate not in entry['numbers']:
             continue
-        marked = get_system_card_marked_numbers(game_id, card_number)
-        if candidate not in marked:
-            marked = set(marked) | {candidate}
-        has_bingo, _ = check_system_player_bingo(layout, marked, game_id)
+        marked = set(entry['marked'])
+        marked.add(candidate)
+        has_bingo, _ = check_bingo_from_marked(entry['layout'], marked, game_id)
+        if has_bingo:
+            real_wins += 1
+
+    for entry in ctx['fake']:
+        if candidate not in entry['numbers']:
+            continue
+        marked = set(entry['marked'])
+        marked.add(candidate)
+        if entry.get('system'):
+            has_bingo, _ = check_system_player_bingo(entry['layout'], marked, game_id)
+        else:
+            has_bingo, _ = check_bingo_from_marked(entry['layout'], marked, game_id)
         if has_bingo:
             fake_wins += 1
 
     return (real_wins, fake_wins)
+
+
+def _simulate_bingo_if_called(game_id: int, candidate: int, called_numbers: set) -> tuple:
+    """Legacy wrapper — prefer get_safe_number_to_call with shared context."""
+    ctx = _build_safe_call_context(game_id)
+    return _score_candidate_with_context(ctx, candidate)
 
 
 def get_safe_number_to_call(
@@ -768,9 +807,17 @@ def get_safe_number_to_call(
     pref = max(0, min(2, int(fake_win_preference or 0)))
     called_numbers = set(called_numbers or [])
 
+    ctx = _build_safe_call_context(game_id)
+    all_card_numbers = set()
+    for entry in ctx['real'] + ctx['fake']:
+        all_card_numbers.update(entry['numbers'])
+
     scored = []
     for number in available:
-        real_wins, fake_wins = _simulate_bingo_if_called(game_id, number, called_numbers)
+        if number not in all_card_numbers:
+            scored.append((number, 0, 0))
+            continue
+        real_wins, fake_wins = _score_candidate_with_context(ctx, number)
         scored.append((number, real_wins, fake_wins))
 
     safe = [entry for entry in scored if entry[1] == 0]

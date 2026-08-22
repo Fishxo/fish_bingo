@@ -36,6 +36,7 @@ class GameSerializer(serializers.ModelSerializer):
     total_derash = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     total_cards = serializers.SerializerMethodField()
     card_selection_timer = serializers.SerializerMethodField()
+    time_between_calls = serializers.SerializerMethodField()
     automatic_mode_enabled = serializers.SerializerMethodField()
     selection_remaining_seconds = serializers.SerializerMethodField()
     
@@ -46,6 +47,7 @@ class GameSerializer(serializers.ModelSerializer):
             'started_at', 'completed_at', 'winner', 'created_at', 'updated_at',
             'gamecards', 'called_numbers', 'total_players', 'total_derash', 'total_cards',
             'card_selection_timer', 'automatic_mode_enabled', 'selection_remaining_seconds',
+            'time_between_calls',
             'avoid_list_numbers',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -118,6 +120,15 @@ class GameSerializer(serializers.ModelSerializer):
         from .models import GameSettings
         settings = GameSettings.get_settings()
         return settings.card_selection_timer
+
+    def get_time_between_calls(self, obj):
+        """Seconds between number calls — use value cached at game start when available."""
+        from django.core.cache import cache
+        gs = cache.get(f'game:{obj.id}:settings')
+        if gs and gs.get('time_between_calls') is not None:
+            return int(gs['time_between_calls'])
+        from .models import GameSettings
+        return int(GameSettings.get_settings().time_between_calls or 3)
     
     def get_selection_remaining_seconds(self, obj):
         """
