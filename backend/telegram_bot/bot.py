@@ -18,10 +18,13 @@ from api.models import Game, Deposit, DepositRequest, TelebirrReceipt, CbeReceip
 from api.telebirr_verify import (
     parse_telebirr_receipt_text,
     verify_telebirr_receipt,
-    amount_from_api_total,
     credited_party_matches,
+    canonical_telebirr_reference,
+    is_telebirr_payment_completed,
+    telebirr_credit_amount,
 )
-from api.cbe_verify import parse_cbe_receipt_text, verify_cbe_receipt
+from api.cbe_verify import parse_cbe_receipt_text, verify_cbe_receipt, cbe_receiver_matches
+from api.deposit_finalize import finalize_telebirr_deposit, finalize_cbe_deposit, parse_api_amount
 from api.auth_utils import generate_jwt_token
 from api.game_logic import get_available_card_numbers
 from api.phone_utils import normalize_phone_number, find_user_by_phone
@@ -1379,6 +1382,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         reference = parsed['reference']
         amount_from_text = parsed['amount']
+        sms_recipient_name = parsed.get('recipient_name') or ''
         # "Wait until verified" message
         await update.message.reply_text(
             "⏳ ጥያቄዎ ተልኳል! እስኪረጋገጥ ትንሽ ይጠብቁ።",
@@ -1410,23 +1414,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና በትክክል ይሞክሩ።"
             )
             return
-        # Check if reference already used (reject duplicate)
-        async def receipt_exists():
-            return await sync_to_async(TelebirrReceipt.objects.filter(reference=reference).exists)()
-        if await db_operation_with_retry(receipt_exists):
-            async def save_failed_dup():
-                from api.models import FailedDepositRequest
-                await sync_to_async(FailedDepositRequest.objects.create)(
-                    user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
-                    failure_reason='transaction_already_used', reference=reference,
-                    amount=amount_from_text
-                )
-            await db_operation_with_retry(save_failed_dup)
-            await update.message.reply_text(
-                "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና በትክክል ይሞክሩ።"
-            )
-            return
-        # Call verify API (sync) in thread
+        # Call verify API first — duplicate check uses canonical ref after API succeeds
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: verify_telebirr_receipt(reference, api_key))
         if not result.get('success') or not result.get('data'):
@@ -1441,14 +1429,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             await db_operation_with_retry(save_failed_telebirr)
             await update.message.reply_text(
-                "⚠️ ሲስተም አይሰራም። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።\n\n"
+                "⚠️ ማረጋገጫ አልተሳካም። እባክዎ ከቴሌብር የተላከውን ሙሉ ቴክስት እንደገና ይላኩ።\n\n"
+                "በጥቂት ደቂቃዎች በኋላ እንደገና መሞከር ይችላሉ።"
             )
             return
         data = result['data']
+        if not is_telebirr_payment_completed(data):
+            async def save_failed_status():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
+                    failure_reason=f"transaction_status:{data.get('transactionStatus') or 'unknown'}",
+                    reference=reference, amount=amount_from_text
+                )
+            await db_operation_with_retry(save_failed_status)
+            await update.message.reply_text(
+                "⚠️ ግብይቱ ገና ተጠናቅቋል ተብሎ አልተረጋገጠም። ትንሽ ቆይተው እንደገና ይሞክሩ።"
+            )
+            return
+        canonical_ref = canonical_telebirr_reference(reference, data)
+        async def receipt_exists():
+            return await sync_to_async(TelebirrReceipt.objects.filter(reference=canonical_ref).exists)()
+        if await db_operation_with_retry(receipt_exists):
+            async def save_failed_dup():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
+                    failure_reason='transaction_already_used', reference=canonical_ref,
+                    amount=amount_from_text
+                )
+            await db_operation_with_retry(save_failed_dup)
+            await update.message.reply_text(
+                "❌ ይህ ግብይት ከዚህ በፊት ተጠቅሷል።\n\nአዲስ የክፍያ SMS ቢሆን እባክዎ ድጋፍ ያግኙ።"
+            )
+            return
         credited_name = (data.get('creditedPartyName') or '').strip()
         credited_account_no = (data.get('creditedPartyAccountNo') or '').strip()
-        total_paid_str = data.get('totalPaidAmount') or ''
-        receipt_no = (data.get('receiptNo') or '').strip()
         account_holder = (settings.deposit_accounts or {}).get('Telebirr', {}) or {}
         expected_name = (account_holder.get('name') or '').strip()
         expected_number = (account_holder.get('number') or '').strip()
@@ -1457,7 +1473,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
-                    failure_reason='telebirr_account_not_configured', reference=reference,
+                    failure_reason='telebirr_account_not_configured', reference=canonical_ref,
                     amount=amount_from_text
                 )
             await db_operation_with_retry(save_failed_account)
@@ -1465,59 +1481,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና በትክክል ይሞክሩ።"
             )
             return
-        if not credited_party_matches(credited_name, credited_account_no, expected_name, expected_number):
+        if not credited_party_matches(
+            credited_name, credited_account_no, expected_name, expected_number, sms_recipient_name
+        ):
+            logger.warning(
+                "Telebirr credited_party_mismatch ref=%s api_name=%r api_acct=%r expected_name=%r expected_number=%r sms_name=%r",
+                canonical_ref, credited_name, credited_account_no, expected_name, expected_number, sms_recipient_name,
+            )
             async def save_failed_mismatch():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
-                    failure_reason='credited_party_mismatch', reference=reference,
+                    failure_reason='credited_party_mismatch', reference=canonical_ref,
                     amount=amount_from_text
                 )
             await db_operation_with_retry(save_failed_mismatch)
             await update.message.reply_text(
-                "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ በትክክል እንደገና ይሞክሩ።"
+                "❌ ክፍያው ወደ ትክክለኛው የቴሌብር ሂሳብ አልተላከም።\n\n"
+                "ከቦቱ ላይ የተሳየለውን ስምና ቁጥር ተመልክተው እንደገና ይላኩ።"
             )
             return
-        # Optional: compare receipt no with reference
-        if receipt_no and reference and receipt_no.upper() != reference.upper():
-            async def save_failed_receipt_mismatch():
+        amount_to_credit = telebirr_credit_amount(amount_from_text, data)
+        if amount_to_credit is None:
+            async def save_failed_amount():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
-                    failure_reason='receipt_reference_mismatch', reference=reference,
+                    failure_reason='invalid_amount', reference=canonical_ref,
                     amount=amount_from_text
                 )
-            await db_operation_with_retry(save_failed_receipt_mismatch)
+            await db_operation_with_retry(save_failed_amount)
             await update.message.reply_text(
-                "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና በትክክል ይሞክሩ።"
+                "❌ የክፍያ መጠን ሊታወቅ አልተቻለም። እባክዎ ሙሉ SMS እንደገና ይላኩ።"
             )
             return
-        # Credit amount from user's receipt text (transfer amount), not API total (includes fees)
-        amount_to_credit = parsed['amount']
-        async def finalize_deposit():
-            await sync_to_async(TelebirrReceipt.objects.create)(
-                user=telegram_user, reference=reference, amount=amount_to_credit
+        try:
+            await db_operation_with_retry(
+                lambda: finalize_telebirr_deposit(telegram_user, canonical_ref, amount_to_credit, text)
             )
-            try:
-                from api.stats_utils import credit_deposit
-                await sync_to_async(credit_deposit)(amount_to_credit, telegram_user)
-            except Exception:
-                pass
-            await sync_to_async(telegram_user.refresh_from_db)()
-            await sync_to_async(Transaction.objects.create)(
-                user=telegram_user,
-                transaction_type='deposit',
-                amount=amount_to_credit,
-                description=f'Telebirr deposit verified - Ref: {reference}'
+        except Exception as e:
+            logger.exception("Telebirr deposit finalize failed for ref %s: %s", canonical_ref, e)
+            async def save_failed_finalize():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
+                    failure_reason='deposit_finalize_failed', reference=canonical_ref,
+                    amount=amount_to_credit
+                )
+            await db_operation_with_retry(save_failed_finalize)
+            await update.message.reply_text(
+                "⚠️ ማረጋገጫ ተሳክቷል ግን ሂሳብ መጨመር አልተሳካም። እባክዎ ድጋፍ ያግኙ።\n\n"
             )
-            await sync_to_async(DepositRequest.objects.create)(
-                user=telegram_user,
-                amount=amount_to_credit,
-                platform='Telebirr',
-                deposit_text=text[:2000],
-                status='approved'
-            )
-        await db_operation_with_retry(finalize_deposit)
+            return
         await update.message.reply_text(
             "✅ ገንዘቡ ገቢ ሆኗል!\n\n"
             f"💰 መጠን: {amount_to_credit} ብር\n"
@@ -1559,6 +1574,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = await db_operation_with_retry(get_settings)
         api_key = (getattr(settings, 'telebirr_verify_api_key', None) or '').strip()
         if not api_key:
+            async def save_failed_no_key():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='CBE', deposit_text=text[:2000],
+                    failure_reason='cbe_api_key_not_configured', reference=reference,
+                    account_suffix=account_suffix, amount=amount_from_text
+                )
+            await db_operation_with_retry(save_failed_no_key)
             await update.message.reply_text(
                 "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና ይሞክሩ።"
             )
@@ -1585,6 +1608,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await loop.run_in_executor(
             None, lambda: verify_cbe_receipt(reference, account_suffix, api_key, use_fallback_proxy=use_fallback)
         )
+        if not result.get('success') and not use_fallback:
+            result = await loop.run_in_executor(
+                None, lambda: verify_cbe_receipt(reference, account_suffix, api_key, use_fallback_proxy=True)
+            )
         if not result.get('success') or not result.get('data'):
             err_raw = result.get('error') or 'verification_failed'
             # Admin dashboard: exact API error so you can see "Verification failed" vs regional/block messages
@@ -1607,13 +1634,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      )
             return
         data = result['data']
+        receiver_name = (data.get('receiver') or '').strip()
+        receiver_account = (data.get('receiverAccount') or '').strip()
+        account_holder = (settings.deposit_accounts or {}).get('CBE', {}) or {}
+        expected_name = (account_holder.get('name') or '').strip()
+        expected_number = (account_holder.get('number') or '').strip()
+        if (expected_name or expected_number) and not cbe_receiver_matches(
+            receiver_name, receiver_account, expected_name, expected_number
+        ):
+            async def save_failed_receiver():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='CBE', deposit_text=text[:2000],
+                    failure_reason='receiver_mismatch', reference=reference,
+                    account_suffix=account_suffix, amount=amount_from_text
+                )
+            await db_operation_with_retry(save_failed_receiver)
+            await update.message.reply_text(
+                "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ በትክክል ወደ የሂሳብ ቁጥራችን ይላኩ እና እንደገና ይሞክሩ።"
+            )
+            return
         # Use ONLY amount from API response (user can edit text; never trust user amount for balance)
-        amount_raw = data.get('amount')
-        try:
-            amount_to_credit = Decimal(str(amount_raw)) if amount_raw is not None else None
-        except Exception:
-            amount_to_credit = None
-        if amount_to_credit is None or amount_to_credit <= 0:
+        amount_to_credit = parse_api_amount(data.get('amount'))
+        if amount_to_credit is None:
             async def save_failed():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
@@ -1626,30 +1669,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ የገንዘብ ማስገቢያ ጥያቄዎ ተቀባይነት አላገኘም።\n\nእባክዎ እንደገና ይሞክሩ።"
             )
             return
-        async def finalize_deposit():
-            await sync_to_async(CbeReceipt.objects.create)(
-                user=telegram_user, reference=reference, account_suffix=account_suffix, amount=amount_to_credit
+        try:
+            await db_operation_with_retry(
+                lambda: finalize_cbe_deposit(
+                    telegram_user, reference, account_suffix, amount_to_credit, text
+                )
             )
-            try:
-                from api.stats_utils import credit_deposit
-                await sync_to_async(credit_deposit)(amount_to_credit, telegram_user)
-            except Exception:
-                pass
-            await sync_to_async(telegram_user.refresh_from_db)()
-            await sync_to_async(Transaction.objects.create)(
-                user=telegram_user,
-                transaction_type='deposit',
-                amount=amount_to_credit,
-                description=f'CBE deposit verified - Ref: {reference}'
+        except Exception as e:
+            logger.exception("CBE deposit finalize failed for ref %s: %s", reference, e)
+            async def save_failed_finalize():
+                from api.models import FailedDepositRequest
+                await sync_to_async(FailedDepositRequest.objects.create)(
+                    user=telegram_user, platform='CBE', deposit_text=text[:2000],
+                    failure_reason='deposit_finalize_failed', reference=reference,
+                    account_suffix=account_suffix, amount=amount_to_credit
+                )
+            await db_operation_with_retry(save_failed_finalize)
+            await update.message.reply_text(
+                "⚠️ ማረጋገጫ ተሳክቷል ግን ሂሳብ መጨመር አልተሳካም። እባክዎ ድጋፍ ያግኙ።\n\n"
             )
-            await sync_to_async(DepositRequest.objects.create)(
-                user=telegram_user,
-                amount=amount_to_credit,
-                platform='CBE',
-                deposit_text=text[:2000],
-                status='approved'
-            )
-        await db_operation_with_retry(finalize_deposit)
+            return
         await update.message.reply_text(
             "✅ ገንዘቡ ገቢ ሆኗል!\n\n"
             f"💰 መጠን: {amount_to_credit} ብር\n"

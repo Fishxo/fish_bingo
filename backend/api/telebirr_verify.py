@@ -35,6 +35,12 @@ _REF_OROMO_RE = re.compile(
     r"maallaqaa\s+keessan\s+([A-Z0-9]{8,})['′'ʼ]?\s*dha",
     re.IGNORECASE,
 )
+# Standalone transaction id lines (newer SMS / copied receipt snippets)
+_REF_STANDALONE_RE = re.compile(r'\b([A-Z0-9]{10,12})\b')
+_REF_TXN_ID_RE = re.compile(
+    r'(?:txn(?:\s*id)?|transaction\s*id|receipt\s*id)\s*[:#]?\s*([A-Z0-9]{8,})',
+    re.IGNORECASE,
+)
 # Recipient: "to Name (number)" (English), "ወደ Name(number)" (Amharic), "Gara NAME (phone)tti" (Oromiffa)
 _TO_RECIPIENT_RE = re.compile(r'\bto\s+([^(]+?)\s*\([0-9*]+\s*\)', re.IGNORECASE)
 _TO_RECIPIENT_AMHARIC_RE = re.compile(r'ወደ\s+([^(]+?)\s*\([0-9*]+', re.UNICODE)
@@ -101,6 +107,10 @@ def parse_telebirr_receipt_text(text: str) -> Optional[dict]:
         ref_match = _REF_URL_RE.search(text)
         if ref_match:
             reference = ref_match.group(1).strip()
+    if not reference:
+        ref_match = _REF_TXN_ID_RE.search(text)
+        if ref_match:
+            reference = ref_match.group(1).strip()
 
     if not reference:
         return None
@@ -164,7 +174,7 @@ def verify_telebirr_receipt(reference: str, api_key: str) -> dict:
         logger.warning("Telebirr verify API HTTP %s for ref %s: %s", resp.status_code, reference, err)
         return {
             'success': False,
-            'data': body.get('data'),
+            'data': normalize_telebirr_api_data(body),
             'error': err,
         }
 
@@ -173,15 +183,88 @@ def verify_telebirr_receipt(reference: str, api_key: str) -> dict:
         logger.warning("Telebirr verify API success=false for ref %s: %s", reference, err)
         return {
             'success': False,
-            'data': body.get('data'),
+            'data': normalize_telebirr_api_data(body),
             'error': err,
+        }
+
+    data = normalize_telebirr_api_data(body)
+    if not data:
+        logger.warning("Telebirr verify API success=true but no usable fields for ref %s body=%s", reference, body)
+        return {
+            'success': False,
+            'data': None,
+            'error': 'Verification returned no receipt data',
         }
 
     return {
         'success': True,
-        'data': body.get('data'),
+        'data': data,
         'error': None,
     }
+
+
+def normalize_telebirr_api_data(body: dict) -> Optional[dict]:
+    """Accept nested {data:{...}} or flat Telebirr verify API payloads."""
+    if not isinstance(body, dict):
+        return None
+
+    data = body.get('data')
+    if isinstance(data, dict) and data:
+        source = data
+    else:
+        source = body
+
+    def pick(*keys):
+        for key in keys:
+            val = source.get(key)
+            if val is not None and str(val).strip() != '':
+                return str(val).strip()
+        return ''
+
+    normalized = {
+        'payerName': pick('payerName', 'payer_name', 'payer'),
+        'creditedPartyName': pick('creditedPartyName', 'credited_party_name', 'creditedParty', 'receiver', 'receiverName'),
+        'creditedPartyAccountNo': pick('creditedPartyAccountNo', 'credited_party_account_no', 'creditedAccount', 'receiverAccount', 'receiver_account'),
+        'totalPaidAmount': pick('totalPaidAmount', 'total_paid_amount', 'totalAmount', 'amount'),
+        'settledAmount': pick('settledAmount', 'settled_amount', 'transferredAmount', 'transferred_amount'),
+        'receiptNo': pick('receiptNo', 'receipt_no', 'reference', 'transactionNumber', 'transaction_number'),
+        'paymentDate': pick('paymentDate', 'payment_date', 'date'),
+        'transactionStatus': pick('transactionStatus', 'transaction_status', 'status'),
+    }
+    if not any(normalized.values()):
+        return None
+    return normalized
+
+
+def canonical_telebirr_reference(parsed_reference: str, api_data: dict) -> str:
+    """Prefer API receipt number; fall back to parsed SMS reference."""
+    api_ref = (api_data.get('receiptNo') or '').strip()
+    parsed = (parsed_reference or '').strip()
+    return (api_ref or parsed).upper()
+
+
+def is_telebirr_payment_completed(api_data: dict) -> bool:
+    """Return False only when API explicitly reports a non-completed status."""
+    status = (api_data.get('transactionStatus') or '').strip().lower()
+    if not status:
+        return True
+    bad = {'failed', 'failure', 'cancelled', 'canceled', 'reversed', 'pending', 'processing'}
+    return status not in bad
+
+
+def telebirr_credit_amount(parsed_amount: Decimal, api_data: dict) -> Optional[Decimal]:
+    """Amount to credit: prefer settled/transfer amount from API, else SMS transfer amount."""
+    from .deposit_finalize import parse_api_amount
+
+    settled = parse_api_amount(api_data.get('settledAmount'))
+    if settled is not None:
+        return settled
+    total = parse_api_amount(api_data.get('totalPaidAmount'))
+    if total is not None:
+        return total
+    if parsed_amount and parsed_amount > 0:
+        return parsed_amount
+    return None
 
 
 def normalize_credited_party_for_comparison(name: str) -> str:
@@ -193,13 +276,8 @@ def normalize_credited_party_for_comparison(name: str) -> str:
 
 def amount_from_api_total(total_paid_str: str) -> Optional[Decimal]:
     """Parse '101.00 Birr' or '101.00' from API totalPaidAmount."""
-    if not total_paid_str:
-        return None
-    s = str(total_paid_str).replace('Birr', '').replace('birr', '').strip()
-    try:
-        return Decimal(s)
-    except Exception:
-        return None
+    from .deposit_finalize import parse_api_amount
+    return parse_api_amount(total_paid_str)
 
 
 def _first_name(full_name: str) -> str:
@@ -215,32 +293,63 @@ def _last4_digits(value: str) -> str:
     return digits[-4:] if len(digits) >= 4 else digits
 
 
+def _names_compatible(expected_name: str, actual_name: str) -> bool:
+    """Lenient name match: first name equal or either normalized name contains the other."""
+    expected = normalize_credited_party_for_comparison(expected_name)
+    actual = normalize_credited_party_for_comparison(actual_name)
+    if not expected or not actual:
+        return False
+    if _first_name(expected_name) == _first_name(actual_name):
+        return True
+    return expected in actual or actual in expected
+
+
 def credited_party_matches(
     api_credited_name: str,
     api_credited_account_no: str,
     expected_holder_name: str,
     expected_account_number: str,
+    sms_recipient_name: str = '',
 ) -> bool:
     """
-    Return True if the API credited party (receiver) matches our Telebirr account in settings.
-    Match rules: (1) first name of credited party equals first name of our account holder,
-    (2) last 4 digits of credited party account number equal last 4 digits of our account number.
-    Both must match when both are provided in settings.
+    Return True if the payment reached our Telebirr account.
+    Uses API credited party first, then SMS recipient name as fallback when API omits fields.
     """
-    credited_name = (api_credited_name or '').strip()
-    credited_account = (api_credited_account_no or '').strip()
     expected_name = (expected_holder_name or '').strip()
     expected_number = (expected_account_number or '').strip()
-
-    # First name match (credited party = our account holder)
-    if expected_name:
-        if _first_name(credited_name) != _first_name(expected_name):
-            return False
-    # Last 4 digits of phone/account number match
-    if expected_number and credited_account:
-        if _last4_digits(expected_number) != _last4_digits(credited_account):
-            return False
-    # If we have no expected name but have number, we already checked number; if we have no number but have name, we already checked name
     if not expected_name and not expected_number:
         return False
-    return True
+
+    credited_name = (api_credited_name or '').strip()
+    credited_account = (api_credited_account_no or '').strip()
+    sms_name = (sms_recipient_name or '').strip()
+
+    # Phone/account last-4 match is the strongest signal that money reached our wallet.
+    if expected_number and credited_account:
+        if _last4_digits(expected_number) == _last4_digits(credited_account):
+            return True
+
+    name_ok = False
+    if expected_name:
+        if credited_name and _names_compatible(expected_name, credited_name):
+            name_ok = True
+        elif sms_name and _names_compatible(expected_name, sms_name):
+            name_ok = True
+    else:
+        name_ok = True
+
+    number_ok = True
+    if expected_number:
+        if credited_account:
+            number_ok = _last4_digits(expected_number) == _last4_digits(credited_account)
+        elif sms_name:
+            # API sometimes omits account; rely on name match from SMS when number unavailable
+            number_ok = name_ok
+        else:
+            number_ok = False
+
+    if expected_name and expected_number:
+        return name_ok and number_ok
+    if expected_name:
+        return name_ok
+    return number_ok

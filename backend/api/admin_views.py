@@ -1085,12 +1085,15 @@ def approve_deposit_request_api(request, deposit_id):
         deposit_request.processed_at = timezone.now()
         deposit_request.processed_by = request.user if request.user.is_staff else None
         deposit_request.save()
-        from django.db.models import F
         try:
             from .stats_utils import credit_deposit
             credit_deposit(deposit_request.amount, deposit_request.user)
-        except Exception:
-            pass
+        except Exception as e:
+            deposit_request.status = 'pending'
+            deposit_request.processed_at = None
+            deposit_request.processed_by = None
+            deposit_request.save(update_fields=['status', 'processed_at', 'processed_by'])
+            return JsonResponse({'error': f'Failed to credit user balance: {e}'}, status=500)
         deposit_request.user.refresh_from_db()
         Transaction.objects.create(
             user=deposit_request.user,
@@ -1241,8 +1244,8 @@ def approve_failed_deposit_api(request, failed_id):
         try:
             from .stats_utils import credit_deposit
             credit_deposit(amount, user)
-        except Exception:
-            pass
+        except Exception as e:
+            return JsonResponse({'error': f'Failed to credit user balance: {e}'}, status=500)
         user.refresh_from_db()
         Transaction.objects.create(
             user=user,
