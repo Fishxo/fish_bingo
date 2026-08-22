@@ -469,7 +469,7 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
     This function:
     - Uses Redis lock to ensure atomic claims
     - Validates ONLY the claiming card (not others)
-    - Implements free_play logic (real priority when free_play is OFF)
+    - Implements system-win mode (system accounts win when free_play is OFF)
     - Ends game and broadcasts winner (single authority)
     """
     from .models import GameSettings, GameCard, FakeUserGameCard
@@ -568,22 +568,15 @@ def claim_bingo_unified(card, game: Game, is_fake_user: bool = False) -> Tuple[b
             if not has_bingo:
                 return (False, None, "ቢንጎ አልሰሩም")
         
-        # CRITICAL: Check free_play setting for priority logic
-        # If free_play is OFF and this is a fake user, check if any real user has bingo
-        # If free_play is ON, it's truly random - first to claim wins
+        # CRITICAL: Check free_play / system-account settings for winner priority
         settings = GameSettings.get_settings(game_id=game.id)
         free_play = getattr(settings, 'free_play', False)
-        
-        if is_fake_user and not free_play:
-            # free_play is OFF: Check if any real user has bingo (give them priority)
-            real_cards = GameCard.objects.filter(game=game, is_winner=False).select_related('user')
-            for real_card in real_cards:
-                real_has_bingo, _ = check_bingo(real_card, game)
-                if real_has_bingo:
-                    # Real user has bingo - reject fake user claim
-                    print(f"CRITICAL: Real user {real_card.user.id} has bingo! Rejecting fake user claim (free_play is OFF).")
-                    return (False, None, "Real user has priority (free_play is OFF)")
-        
+        allow_system = getattr(settings, 'allow_system_account', True)
+        system_win_mode = allow_system and not free_play
+
+        if system_win_mode and not is_fake_user:
+            return (False, None, "በዚህ ጨዋታ ስርዓት ተሳታፊ ብቻ ያሸንፋል")
+
         # Re-check game status only when NOT in tie-window path (co-winner path already knows game is completed)
         if not allow_completed_tie:
             game.refresh_from_db()
@@ -771,8 +764,8 @@ def start_game(game: Game) -> bool:
     # State transitions are handled atomically with locks
     
     # CRITICAL: Cache game settings at game start to prevent mid-game changes.
-    # free_play: when True, number calling is random (no extra processing). When False,
-    # Number calling uses fair random selection (per-user win control may be added separately).
+    # free_play: when True, number calling is random (no system-win bias).
+    # When False and allow_system_account is on, calls bias toward system (fake) wins.
     settings = GameSettings.get_settings()
     test_co_win_armed = getattr(settings, 'test_co_win_next_game', False)
     game_settings_cache_key = f'game:{game.id}:settings'

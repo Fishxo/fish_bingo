@@ -671,3 +671,175 @@ def adjust_fake_users_for_real_player_change(game: Game, is_selection: bool):
     
     return {'skipped': True, 'reason': 'No adjustment needed'}
 
+
+def _number_on_layout(layout: list, number: int) -> bool:
+    if not layout:
+        return False
+    return any(
+        cell.get('number') == number
+        for row in layout
+        for cell in row
+    )
+
+
+def _simulate_bingo_if_called(game_id: int, candidate: int, called_numbers: set) -> tuple:
+    """
+    Return (real_bingo_count, fake_bingo_count) if candidate were called next.
+    Includes DB fake cards and Redis-only system players.
+    """
+    from .redis_utils import (
+        get_effective_marked_numbers_for_card,
+        get_system_card_marked_numbers,
+        system_player_get_all,
+    )
+    from .game_logic import check_bingo_from_marked
+    from .models import GameCard, FakeUserGameCard
+
+    real_wins = 0
+    fake_wins = 0
+
+    real_cards = GameCard.objects.filter(
+        game_id=game_id, is_winner=False
+    ).only('id', 'card_layout', 'selected_numbers')
+    for card in real_cards:
+        if not _number_on_layout(card.card_layout, candidate):
+            continue
+        marked = get_effective_marked_numbers_for_card(
+            game_id, card.id, card.card_layout, card.selected_numbers
+        )
+        if candidate not in marked:
+            marked = set(marked) | {candidate}
+        has_bingo, _ = check_bingo_from_marked(card.card_layout, marked, game_id)
+        if has_bingo:
+            real_wins += 1
+
+    fake_cards = FakeUserGameCard.objects.filter(
+        game_id=game_id, is_winner=False
+    ).only('id', 'card_layout', 'selected_numbers')
+    for card in fake_cards:
+        if not _number_on_layout(card.card_layout, candidate):
+            continue
+        marked = get_effective_marked_numbers_for_card(
+            game_id, card.id, card.card_layout, card.selected_numbers
+        )
+        if candidate not in marked:
+            marked = set(marked) | {candidate}
+        has_bingo, _ = check_bingo_from_marked(card.card_layout, marked, game_id)
+        if has_bingo:
+            fake_wins += 1
+
+    for player in system_player_get_all(game_id) or []:
+        layout = player.get('card_layout')
+        card_number = player.get('card_number')
+        if not layout or card_number is None:
+            continue
+        if not _number_on_layout(layout, candidate):
+            continue
+        marked = get_system_card_marked_numbers(game_id, card_number)
+        if candidate not in marked:
+            marked = set(marked) | {candidate}
+        has_bingo, _ = check_system_player_bingo(layout, marked, game_id)
+        if has_bingo:
+            fake_wins += 1
+
+    return (real_wins, fake_wins)
+
+
+def get_safe_number_to_call(
+    game_id: int,
+    available,
+    called_numbers,
+    free_play: bool = False,
+    fake_win_preference: int = 0,
+    allow_system_account: bool = True,
+) -> int:
+    """
+    Pick the next number to call, biasing toward system (fake) wins when configured.
+    See docs/prune_and_fake_win_preference.md for level 0/1/2 behavior.
+    """
+    import random
+
+    available = list(available)
+    if not available:
+        return None
+    if free_play or not allow_system_account:
+        return random.choice(available)
+
+    pref = max(0, min(2, int(fake_win_preference or 0)))
+    called_numbers = set(called_numbers or [])
+
+    scored = []
+    for number in available:
+        real_wins, fake_wins = _simulate_bingo_if_called(game_id, number, called_numbers)
+        scored.append((number, real_wins, fake_wins))
+
+    safe = [entry for entry in scored if entry[1] == 0]
+
+    def pick_max_fake(candidates):
+        max_fake = max(entry[2] for entry in candidates)
+        best = [entry for entry in candidates if entry[2] == max_fake]
+        return random.choice(best)[0]
+
+    if pref == 0:
+        if safe:
+            with_fake = [entry for entry in safe if entry[2] > 0]
+            if with_fake:
+                return pick_max_fake(with_fake)
+            return random.choice([entry[0] for entry in safe])
+        return random.choice(available)
+
+    if safe:
+        return pick_max_fake(safe)
+
+    best_score = max(entry[2] * 1000 - entry[1] for entry in scored)
+    best = [entry for entry in scored if entry[2] * 1000 - entry[1] == best_score]
+    return random.choice(best)[0]
+
+
+def mark_number_on_system_players_redis(game_id: int, number: int) -> int:
+    """Mark a called number on Redis-only system player cards. Returns count updated."""
+    from .redis_utils import system_player_get_all, add_system_card_marked_number
+
+    updated = 0
+    for player in system_player_get_all(game_id) or []:
+        layout = player.get('card_layout')
+        card_number = player.get('card_number')
+        if not layout or card_number is None:
+            continue
+        if not _number_on_layout(layout, number):
+            continue
+        if add_system_card_marked_number(game_id, card_number, number):
+            updated += 1
+    return updated
+
+
+def get_redis_system_winners_for_number(game_id: int, number: int) -> list:
+    """
+    Return Redis-only system players that have bingo after number was marked.
+    Each winner dict matches batch_mark_number_on_system_players_redis format.
+    """
+    from .redis_utils import system_player_get_all, get_system_card_marked_numbers
+
+    winners = []
+    for player in system_player_get_all(game_id) or []:
+        layout = player.get('card_layout')
+        card_number = player.get('card_number')
+        name = player.get('name', 'System')
+        if not layout or card_number is None:
+            continue
+        if not _number_on_layout(layout, number):
+            continue
+        marked = get_system_card_marked_numbers(game_id, card_number)
+        if number not in marked:
+            continue
+        has_bingo, pattern = check_system_player_bingo(layout, marked, game_id)
+        if has_bingo:
+            winners.append({
+                'card_number': card_number,
+                'name': name,
+                'card_layout': layout,
+                'pattern': pattern,
+                'marked_numbers': list(marked),
+            })
+    return winners
+

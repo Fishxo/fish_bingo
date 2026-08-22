@@ -2420,18 +2420,30 @@ def task_call_next_number(self, game_id: int):
                 number = random.choice(available)
         else:
             anti_abuse_enabled = bool(gs.get('anti_abuse_filter_enabled'))
+            pool = available
             if anti_abuse_enabled:
                 from .redis_utils import get_abuse_avoid_numbers
                 avoid_numbers = get_abuse_avoid_numbers(game_id)
                 allowed_numbers = [n for n in available if n not in avoid_numbers]
                 if allowed_numbers:
-                    # Requirement: calls start from allowed list first.
-                    number = random.choice(allowed_numbers)
-                else:
-                    # After allowed pool ends, continue from avoid numbers.
-                    number = random.choice(available)
+                    pool = allowed_numbers
+
+            free_play = bool(gs.get('free_play', False))
+            allow_system = bool(gs.get('allow_system_account', True))
+            pref = int(gs.get('fake_win_preference', 0))
+            if not free_play and allow_system:
+                from .fake_user_manager import get_safe_number_to_call
+                picked = get_safe_number_to_call(
+                    game_id,
+                    pool,
+                    called_numbers,
+                    free_play=False,
+                    fake_win_preference=pref,
+                    allow_system_account=True,
+                )
+                number = picked if picked is not None else random.choice(pool)
             else:
-                number = random.choice(available)
+                number = random.choice(pool)
         
         # REDIS-FIRST: Add to Redis only (fast, no DB hit during gameplay)
         # DB records will be created at game end for history
@@ -2575,8 +2587,26 @@ def task_mark_cards_for_number(self, game_id: int, number: int):
         logger.info(f"🎯 [MARK] Game {game_id}: Marked number {number} on {fake_marked_count}/{fake_card_count} fake cards")
         logger.info(f"✅ [MARK] Game {game_id}: Total marked: {total_marked} cards (real: {marked_count}, fake: {fake_marked_count})")
         print(f"✅ [MARK] Game {game_id}: Total marked: {total_marked} cards (real: {marked_count}, fake: {fake_marked_count})")
+
+        redis_system_marked = 0
+        try:
+            from .fake_user_manager import mark_number_on_system_players_redis
+            redis_system_marked = mark_number_on_system_players_redis(game_id, number)
+            if redis_system_marked:
+                logger.info(
+                    f"🎯 [MARK] Game {game_id}: Marked number {number} on "
+                    f"{redis_system_marked} Redis system player cards"
+                )
+        except Exception as redis_mark_err:
+            logger.warning(f"🎯 [MARK] Game {game_id}: Redis system mark error: {redis_mark_err}")
         
-        return {'success': True, 'marked_count': total_marked, 'real_marked': marked_count, 'fake_marked': fake_marked_count}
+        return {
+            'success': True,
+            'marked_count': total_marked + redis_system_marked,
+            'real_marked': marked_count,
+            'fake_marked': fake_marked_count,
+            'redis_system_marked': redis_system_marked,
+        }
     except Exception as e:
         logger.error(f"❌ [MARK] Game {game_id}: Error marking number {number}: {e}")
         print(f"❌ [MARK] Game {game_id}: Error marking number {number}: {e}")
@@ -2629,137 +2659,189 @@ def task_check_bingo_for_number(self, game_id: int, number: int):
         called_numbers = get_called_numbers_from_redis(game_id)
         logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
         print(f"🔍 [BINGO CHECK] Game {game_id}: Called numbers count: {len(called_numbers) if called_numbers else 0}")
-        
-        # Get real cards
-        real_cards = GameCard.objects.filter(game_id=game_id, is_winner=False).select_related('user')
-        real_card_count = real_cards.count()
-        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
-        print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
-        
-        # Check each card for bingo (using Redis marked numbers)
-        checked_count = 0
-        for card in real_cards:
-            marked = get_effective_marked_numbers_for_card(
-                game_id, card.id, card.card_layout, card.selected_numbers
-            )
-            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} has {len(marked) if marked else 0} marked numbers")
-            
-            # Only check if card has this number marked
-            if number not in marked:
-                continue
-            
-            checked_count += 1
-            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking card {card.id} (user: {card.user.id if card.user else 'None'}) for bingo")
-            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking card {card.id} for bingo")
-            
-            # Check if card has bingo (using marked numbers from Redis)
-            # Load card layout from DB (one-time per card)
-            if not card.card_layout:
-                logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Card {card.id} has no layout, skipping")
-                continue
-            
-            # Check bingo patterns (pass game_id to check enabled patterns)
-            has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
-            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check result: has_bingo={has_bingo}, pattern={pattern}")
-            print(f"🔍 [BINGO CHECK] Game {game_id}: Card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}")
-            
-            if has_bingo:
-                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! Card {card.id}, User {card.user.id}, Pattern: {pattern}")
-                print(f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! Card {card.id}, User {card.user.id}, Pattern: {pattern}")
-                
-                # Try to set winner atomically
-                winner_set = set_game_winner(game_id, card.id, card.user.id)
-                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner returned: {winner_set}")
-                print(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner returned: {winner_set}")
-                
-                if winner_set:
-                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: Winner set successfully! Triggering finalization...")
-                    print(f"✅ [BINGO CHECK] Game {game_id}: Winner set successfully! Triggering finalization...")
-                    # Winner set - trigger finalization
-                    result = task_finalize_game.delay(game_id)
-                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
-                    print(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
-                    return {'winner': True, 'card_id': card.id, 'pattern': pattern, 'user_id': card.user.id}
-                else:
-                    logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Winner already set by another process")
-                    print(f"⚠️ [BINGO CHECK] Game {game_id}: Winner already set by another process")
-        
-        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checked {checked_count} real cards with number {number}, no winners")
-        print(f"🔍 [BINGO CHECK] Game {game_id}: Checked {checked_count} real cards with number {number}, no winners")
-        
-        # Check fake cards too (same logic)
-        fake_cards = FakeUserGameCard.objects.filter(game_id=game_id, is_winner=False).select_related('fake_user')
-        fake_card_count = fake_cards.count()
-        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
-        print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
-        
-        # CRITICAL FIX: Wait a tiny bit to ensure marking has completed
-        # This is a workaround for the race condition - marking and bingo check run in parallel
+
+        system_win_mode = (
+            not gs.get('free_play', False)
+            and gs.get('allow_system_account', True)
+        )
+
         import time
-        time.sleep(0.2)  # Wait 200ms for marking to complete
-        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Waited for marking to complete, now checking fake cards")
-        
-        fake_checked_count = 0
-        fake_cards_list = list(fake_cards)  # Convert to list to ensure we iterate all
-        logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Converted {len(fake_cards_list)} fake cards to list for iteration")
-        
-        for idx, card in enumerate(fake_cards_list):
-            marked = get_effective_marked_numbers_for_card(
-                game_id, card.id, card.card_layout, card.selected_numbers
-            )
-            marked_count = len(marked) if marked else 0
-            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} ({idx+1}/{len(fake_cards_list)}) has {marked_count} marked numbers")
-            
-            # Only check if card has this number marked
-            if number not in marked:
-                logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} doesn't have number {number} marked, skipping")
-                continue
-            
-            fake_checked_count += 1
-            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking fake card {card.id} ({idx+1}/{len(fake_cards_list)}) for bingo - marked: {marked_count} numbers")
-            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking fake card {card.id} for bingo")
-            
-            if not card.card_layout:
-                logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Fake card {card.id} has no layout, skipping")
-                continue
-            
-            # CRITICAL: Log marked numbers and layout for debugging
-            logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} marked numbers: {sorted(marked) if marked else 'empty'}")
-            if card.card_layout and len(card.card_layout) > 0:
-                first_row_numbers = [cell.get('number') for cell in card.card_layout[0] if cell.get('number') is not None]
-                logger.debug(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} layout first row numbers: {first_row_numbers}")
-            
-            # Check bingo patterns (pass game_id to check enabled patterns)
-            has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
-            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo check: has_bingo={has_bingo}, pattern={pattern}, marked_count={marked_count}, marked={sorted(marked) if marked else 'empty'}")
-            print(f"🔍 [BINGO CHECK] Game {game_id}: Fake card {card.id} bingo: has_bingo={has_bingo}, pattern={pattern}, marked={len(marked)} numbers")
-            
-            if has_bingo:
-                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: FAKE USER BINGO! Card {card.id}, Pattern: {pattern}, Marked: {marked_count} numbers")
+        time.sleep(0.2)
+
+        def _try_fake_card_winners():
+            fake_cards = FakeUserGameCard.objects.filter(
+                game_id=game_id, is_winner=False
+            ).select_related('fake_user')
+            fake_card_count = fake_cards.count()
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {fake_card_count} fake cards")
+
+            fake_checked_count = 0
+            for idx, card in enumerate(list(fake_cards)):
+                marked = get_effective_marked_numbers_for_card(
+                    game_id, card.id, card.card_layout, card.selected_numbers
+                )
+                if number not in marked:
+                    continue
+
+                fake_checked_count += 1
+                if not card.card_layout:
+                    continue
+
+                has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
+                if not has_bingo:
+                    continue
+
+                logger.info(
+                    f"🎉 [BINGO CHECK] Game {game_id}: FAKE USER BINGO! "
+                    f"Card {card.id}, Pattern: {pattern}"
+                )
                 print(f"🎉 [BINGO CHECK] Game {game_id}: FAKE USER BINGO! Card {card.id}, Pattern: {pattern}")
-                
-                # Fake user winner - set winner but no user_id
+
                 winner_set = set_game_winner(game_id, card.id, None)
-                logger.info(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner (fake) returned: {winner_set}")
-                print(f"🎉 [BINGO CHECK] Game {game_id}: set_game_winner (fake) returned: {winner_set}")
-                
                 if winner_set:
-                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: Fake winner set! Triggering finalization...")
-                    print(f"✅ [BINGO CHECK] Game {game_id}: Fake winner set! Triggering finalization...")
                     result = task_finalize_game.delay(game_id)
-                    logger.info(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
-                    print(f"✅ [BINGO CHECK] Game {game_id}: task_finalize_game scheduled with task_id: {result.id}")
-                    return {'winner': True, 'card_id': card.id, 'pattern': pattern, 'is_fake': True, 'marked_count': marked_count}
-                else:
-                    logger.warning(f"⚠️ [BINGO CHECK] Game {game_id}: Failed to set fake winner (already set?)")
-                    print(f"⚠️ [BINGO CHECK] Game {game_id}: Failed to set fake winner")
-        
-        logger.info(f"✅ [BINGO CHECK] Game {game_id}: Checked all {fake_card_count} fake cards, checked {fake_checked_count} that had number {number} marked")
-        print(f"✅ [BINGO CHECK] Game {game_id}: Checked {fake_checked_count}/{fake_card_count} fake cards")
-        
-        logger.info(f"✅ [BINGO CHECK] Game {game_id}: No winners found. Checked {checked_count} real + {fake_checked_count} fake cards")
-        print(f"✅ [BINGO CHECK] Game {game_id}: No winners found. Checked {checked_count} real + {fake_checked_count} fake cards")
-        return {'checked': True, 'no_winners': True, 'real_checked': checked_count, 'fake_checked': fake_checked_count}
+                    logger.info(
+                        f"✅ [BINGO CHECK] Game {game_id}: Fake winner set! "
+                        f"task_finalize_game task_id: {result.id}"
+                    )
+                    return {
+                        'winner': True,
+                        'card_id': card.id,
+                        'pattern': pattern,
+                        'is_fake': True,
+                        'fake_checked': fake_checked_count,
+                    }
+            return {'fake_checked': fake_checked_count, 'fake_card_count': fake_card_count}
+
+        def _try_redis_system_winner():
+            from .fake_user_manager import get_redis_system_winners_for_number
+            from .redis_utils import set_game_winner_system_sentinel
+
+            redis_winners = get_redis_system_winners_for_number(game_id, number)
+            if not redis_winners:
+                return None
+            winner = redis_winners[0]
+            logger.info(
+                f"🎉 [BINGO CHECK] Game {game_id}: Redis system player bingo: {winner.get('name')}"
+            )
+            set_game_winner_system_sentinel(game_id)
+            task_finalize_redis_system_winner.delay(game_id, winner)
+            return {
+                'winner': True,
+                'is_fake': True,
+                'is_redis_system': True,
+                'pattern': winner.get('pattern'),
+            }
+
+        def _check_real_cards(suppress_wins: bool):
+            real_cards = GameCard.objects.filter(game_id=game_id, is_winner=False).select_related('user')
+            real_card_count = real_cards.count()
+            logger.info(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
+            print(f"🔍 [BINGO CHECK] Game {game_id}: Checking {real_card_count} real cards")
+
+            checked_count = 0
+            suppressed_count = 0
+            for card in real_cards:
+                marked = get_effective_marked_numbers_for_card(
+                    game_id, card.id, card.card_layout, card.selected_numbers
+                )
+                if number not in marked:
+                    continue
+
+                checked_count += 1
+                if not card.card_layout:
+                    continue
+
+                has_bingo, pattern = check_bingo_from_marked(card.card_layout, marked, game_id)
+                if not has_bingo:
+                    continue
+
+                if suppress_wins:
+                    suppressed_count += 1
+                    logger.info(
+                        f"🔒 [BINGO CHECK] Game {game_id}: Suppressed real bingo "
+                        f"(card {card.id}, user {card.user_id}, pattern {pattern})"
+                    )
+                    continue
+
+                logger.info(
+                    f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! "
+                    f"Card {card.id}, User {card.user.id}, Pattern: {pattern}"
+                )
+                print(
+                    f"🎉 [BINGO CHECK] Game {game_id}: BINGO FOUND! "
+                    f"Card {card.id}, User {card.user.id}, Pattern: {pattern}"
+                )
+
+                winner_set = set_game_winner(game_id, card.id, card.user.id)
+                if winner_set:
+                    result = task_finalize_game.delay(game_id)
+                    logger.info(
+                        f"✅ [BINGO CHECK] Game {game_id}: Winner set! "
+                        f"task_finalize_game task_id: {result.id}"
+                    )
+                    return {
+                        'winner': True,
+                        'card_id': card.id,
+                        'pattern': pattern,
+                        'user_id': card.user.id,
+                        'real_checked': checked_count,
+                    }
+
+            return {
+                'real_checked': checked_count,
+                'real_suppressed': suppressed_count,
+                'real_card_count': real_card_count,
+            }
+
+        if system_win_mode:
+            fake_result = _try_fake_card_winners()
+            if fake_result.get('winner'):
+                return fake_result
+
+            redis_result = _try_redis_system_winner()
+            if redis_result:
+                return redis_result
+
+            real_result = _check_real_cards(suppress_wins=True)
+            logger.info(
+                f"✅ [BINGO CHECK] Game {game_id}: System-win mode — no system winner yet "
+                f"(real suppressed: {real_result.get('real_suppressed', 0)})"
+            )
+            return {
+                'checked': True,
+                'no_winners': True,
+                'system_win_mode': True,
+                'real_checked': real_result.get('real_checked', 0),
+                'fake_checked': fake_result.get('fake_checked', 0),
+                'real_suppressed': real_result.get('real_suppressed', 0),
+            }
+
+        real_result = _check_real_cards(suppress_wins=False)
+        if real_result.get('winner'):
+            return real_result
+
+        fake_result = _try_fake_card_winners()
+        if fake_result.get('winner'):
+            return fake_result
+
+        logger.info(
+            f"✅ [BINGO CHECK] Game {game_id}: No winners found. "
+            f"Checked {real_result.get('real_checked', 0)} real + "
+            f"{fake_result.get('fake_checked', 0)} fake cards"
+        )
+        print(
+            f"✅ [BINGO CHECK] Game {game_id}: No winners found. "
+            f"Checked {real_result.get('real_checked', 0)} real + "
+            f"{fake_result.get('fake_checked', 0)} fake cards"
+        )
+        return {
+            'checked': True,
+            'no_winners': True,
+            'real_checked': real_result.get('real_checked', 0),
+            'fake_checked': fake_result.get('fake_checked', 0),
+        }
     except Exception as e:
         logger.error(f"❌ [BINGO CHECK] Game {game_id}: Error checking bingo for number {number}: {e}")
         print(f"❌ [BINGO CHECK] Game {game_id}: Error checking bingo for number {number}: {e}")
