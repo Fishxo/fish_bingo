@@ -41,6 +41,50 @@ def _sum_real_deposits(registered_users):
     )['total'] or Decimal('0')
 
 
+def _registration_gift_transaction_filter(prefix='transactions__'):
+    """Q() for deposit rows that are registration gifts (not real money in)."""
+    type_field = f'{prefix}transaction_type' if prefix else 'transaction_type'
+    desc_field = f'{prefix}description' if prefix else 'description'
+    return Q(**{type_field: 'deposit'}) & Q(**{f'{desc_field}__startswith': _REGISTRATION_GIFT_DESCRIPTION_PREFIX})
+
+
+def _sum_registration_gifts(registered_users):
+    """Registration Gifts for admin dashboards: descriptions starting with 'Registration gift'."""
+    return Transaction.objects.filter(
+        user__in=registered_users,
+    ).filter(_registration_gift_transaction_filter(prefix='')).aggregate(
+        total=Sum('amount')
+    )['total'] or Decimal('0')
+
+
+def _sum_real_withdrawals(registered_users):
+    """Total Withdrawals for admin dashboards: withdraw transactions only."""
+    return Transaction.objects.filter(
+        transaction_type='withdraw',
+        user__in=registered_users,
+    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+
+def _dashboard_financial_stats(registered_users=None):
+    """One source of truth for dashboard financial cards.
+
+    Total Deposits = real money deposits (excludes registration gifts and bonuses).
+    Registration Gifts = deposit rows whose description starts with 'Registration gift'.
+    Total Withdrawals = withdraw transactions only.
+    Total Balance = real deposits - real withdrawals (not user wallet / bonus balances).
+    """
+    if registered_users is None:
+        registered_users = User.objects.filter(telegram_id__isnull=False)
+    total_deposits = _sum_real_deposits(registered_users)
+    total_withdrawals = _sum_real_withdrawals(registered_users)
+    return {
+        'total_deposits': total_deposits,
+        'total_registration_gifts': _sum_registration_gifts(registered_users),
+        'total_withdrawals': total_withdrawals,
+        'total_balance': total_deposits - total_withdrawals,
+    }
+
+
 def _get_new_starts_count_for_context():
     """Return current 24h-window register count for dashboard. When Redis has no window or count 0, fall back to users created today (DB) so the admin sees a sensible number."""
     try:
@@ -303,14 +347,7 @@ def _compute_live_dashboard_stats(periods):
         'revenue_month': get_cached_revenue('month', completed_games.filter(completed_at__gte=month_start, completed_at__lte=month_end)),
         'revenue_last_month': get_cached_revenue('last_month', completed_games.filter(completed_at__gte=last_month_start, completed_at__lte=last_month_end)),
         'revenue_total': get_cached_revenue('total', completed_games),
-        'total_deposits': _sum_real_deposits(all_registered_users),
-        'total_withdrawals': Transaction.objects.filter(
-            transaction_type='withdraw',
-            user__in=all_registered_users
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0'),
-        'total_balance': User.objects.aggregate(
-            total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance'))
-        )['total'] or Decimal('0'),
+        **_dashboard_financial_stats(all_registered_users),
     }
 
 
@@ -566,18 +603,12 @@ def admin_dashboard(request):
         })
     
     # Financial statistics - Calculate from ALL registered users (not just the limited display list)
-    # Sum deposits and withdrawals from all registered users' transactions
     all_registered_users = User.objects.filter(telegram_id__isnull=False)
-    total_deposits = _sum_real_deposits(all_registered_users)
-    total_withdrawals = Transaction.objects.filter(
-        transaction_type='withdraw',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-    
-    # Total balance - sum unwithdrawable + withdrawable
-    total_balance = User.objects.aggregate(
-        total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance'))
-    )['total'] or Decimal('0')
+    financial = _dashboard_financial_stats(all_registered_users)
+    total_deposits = financial['total_deposits']
+    total_registration_gifts = financial['total_registration_gifts']
+    total_withdrawals = financial['total_withdrawals']
+    total_balance = financial['total_balance']
     
     # Format revenue values for display
     revenue_today_formatted = format_large_number(revenue_today)
@@ -658,6 +689,7 @@ def admin_dashboard(request):
         'total_automatic_games': total_automatic_games,
         'total_manual_games': total_manual_games,
         'total_deposits': total_deposits,
+        'total_registration_gifts': total_registration_gifts,
         'total_withdrawals': total_withdrawals,
         'total_balance': total_balance,
         'second_admin_username': second_admin_username,
@@ -1995,16 +2027,12 @@ def second_admin_dashboard(request):
         })
     
     # Financial statistics - Calculate from ALL registered users (not just the limited display list)
-    # Sum deposits and withdrawals from all registered users' transactions
     all_registered_users = User.objects.filter(telegram_id__isnull=False)
-    total_deposits = _sum_real_deposits(all_registered_users)
-    total_withdrawals = Transaction.objects.filter(
-        transaction_type='withdraw',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-    total_balance = User.objects.aggregate(
-        total=Sum(F('unwithdrawable_balance') + F('withdrawable_balance'))
-    )['total'] or Decimal('0')
+    financial = _dashboard_financial_stats(all_registered_users)
+    total_deposits = financial['total_deposits']
+    total_registration_gifts = financial['total_registration_gifts']
+    total_withdrawals = financial['total_withdrawals']
+    total_balance = financial['total_balance']
     
     # Format revenue
     revenue_today_formatted = format_large_number(revenue_today)
@@ -2072,6 +2100,7 @@ def second_admin_dashboard(request):
         'games_detail_data': games_detail_data,
         'recent_transfers': recent_transfers,
         'total_deposits': total_deposits,
+        'total_registration_gifts': total_registration_gifts,
         'total_withdrawals': total_withdrawals,
         'total_balance': total_balance,
         'total_automatic_games': total_automatic_games,
@@ -2135,6 +2164,7 @@ def admin_dashboard_api(request):
     revenue_last_month = live['revenue_last_month']
     revenue_total = live['revenue_total']
     total_deposits = live['total_deposits']
+    total_registration_gifts = live['total_registration_gifts']
     total_withdrawals = live['total_withdrawals']
     total_balance = live['total_balance']
     
@@ -2430,6 +2460,7 @@ def admin_dashboard_api(request):
         'date_month': date_month,
         'date_last_month': date_last_month,
         'total_deposits': float(total_deposits),
+        'total_registration_gifts': float(total_registration_gifts),
         'total_withdrawals': float(total_withdrawals),
         'total_balance': float(total_balance),
         'total_automatic_games': total_automatic_games,
@@ -2707,6 +2738,7 @@ def second_admin_dashboard_api(request):
     
     # Financial statistics — same live totals as main admin
     total_deposits = live['total_deposits']
+    total_registration_gifts = live['total_registration_gifts']
     total_withdrawals = live['total_withdrawals']
     total_balance = live['total_balance']
     
@@ -2769,6 +2801,7 @@ def second_admin_dashboard_api(request):
         'date_month': date_month,
         'date_last_month': date_last_month,
         'total_deposits': float(total_deposits),
+        'total_registration_gifts': float(total_registration_gifts),
         'total_withdrawals': float(total_withdrawals),
         'total_balance': float(total_balance),
         'total_automatic_games': total_automatic_games,
