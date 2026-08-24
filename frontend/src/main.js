@@ -55,9 +55,9 @@ router.beforeEach(async (to, from, next) => {
         next('/select-card')
         return
       }
-      if (starting) {
-        sessionStorage.removeItem('gameStarting')
-      }
+      // Keep gameStarting until ActiveGameView confirms the game is active.
+      // Clearing it here allowed a still-waiting (or stale-cached) payload to
+      // bounce the player back to card selection after the countdown.
       if (game.status === 'completed') {
         next('/completed')
         return

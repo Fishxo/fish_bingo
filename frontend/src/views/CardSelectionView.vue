@@ -422,6 +422,10 @@ export default {
             }, 3500)
             return // Stop further execution
           } else if (game.status === 'waiting') {
+            // Don't restart the selection timer while startGame() is in flight
+            if (this.startingGame || this.isRedirecting) {
+              return
+            }
             // Prefer server selection_remaining_seconds; restart on new game id or when no interval
             if (idChanged || !this.timerInterval) {
               if (this.timerInterval) {
@@ -715,11 +719,10 @@ export default {
       }
       this.startingGame = true
       
-      sessionStorage.setItem('gameStarting', '1')
-      this.isRedirecting = true
-      this.$router.push('/game').catch(() => {})
-      
       try {
+        // Wait until the backend actually starts the game, then enter /game.
+        // Navigating first left ActiveGameView on a still-waiting game, which bounced
+        // back to card selection and stuck the UI after the selection countdown.
         console.log('Calling start game API for game:', this.game.id)
         const gameData = await startGame(this.game.id)
         
@@ -727,13 +730,24 @@ export default {
           clearInterval(this.interval)
           this.interval = null
         }
+        if (this.timerInterval) {
+          clearInterval(this.timerInterval)
+          this.timerInterval = null
+        }
         
         this.game = gameData
         this.game.status = 'active'
         console.log('Game started successfully:', gameData)
+
+        sessionStorage.setItem('gameStarting', '1')
+        this.isRedirecting = true
+        this.$nextTick(() => {
+          this.$router.push('/game').catch(() => {})
+        })
       } catch (error) {
         console.error('Error starting game:', error)
         sessionStorage.removeItem('gameStarting')
+        this.isRedirecting = false
         console.error('Error details:', error.response?.data || error.message)
         
         // Game may still be waiting (e.g. only 1 player) - refetch and restart timer so countdown restarts
@@ -742,12 +756,10 @@ export default {
           this.game = game
           if (game.status === 'active') {
             console.log('Game is already active, redirecting')
+            sessionStorage.setItem('gameStarting', '1')
             this.isRedirecting = true
             this.$router.push('/game').catch(() => {})
           } else if (game.status === 'waiting') {
-            sessionStorage.removeItem('gameStarting')
-            this.isRedirecting = false
-            this.$router.push('/select-card').catch(() => {})
             if (!this.interval) this.startPolling()
             if (!this.timerInterval) {
               this.startTimer({ forceFullRestart: true })
@@ -756,6 +768,7 @@ export default {
         } catch (e) {
           console.error('Error reloading game:', e)
           if (this.selectedCard) {
+            sessionStorage.setItem('gameStarting', '1')
             this.isRedirecting = true
             this.$router.push('/game').catch(() => {})
           } else {

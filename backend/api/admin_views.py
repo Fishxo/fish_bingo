@@ -20,6 +20,26 @@ import calendar
 
 channel_layer = get_channel_layer()
 
+# Registration gifts are stored as transaction_type='deposit' but are not real money in.
+# Match exact and "Registration gift (manually fixed)" without excluding Telebirr/admin deposits.
+_REGISTRATION_GIFT_DESCRIPTION_PREFIX = 'Registration gift'
+
+
+def _real_deposit_transaction_filter(prefix='transactions__'):
+    """Q() for deposit rows that are actual deposits, not registration gifts."""
+    type_field = f'{prefix}transaction_type' if prefix else 'transaction_type'
+    desc_field = f'{prefix}description' if prefix else 'description'
+    return Q(**{type_field: 'deposit'}) & ~Q(**{f'{desc_field}__startswith': _REGISTRATION_GIFT_DESCRIPTION_PREFIX})
+
+
+def _sum_real_deposits(registered_users):
+    """Total Deposits for admin dashboards: real deposit transactions only."""
+    return Transaction.objects.filter(
+        user__in=registered_users,
+    ).filter(_real_deposit_transaction_filter(prefix='')).aggregate(
+        total=Sum('amount')
+    )['total'] or Decimal('0')
+
 
 def _get_new_starts_count_for_context():
     """Return current 24h-window register count for dashboard. When Redis has no window or count 0, fall back to users created today (DB) so the admin sees a sensible number."""
@@ -283,10 +303,7 @@ def _compute_live_dashboard_stats(periods):
         'revenue_month': get_cached_revenue('month', completed_games.filter(completed_at__gte=month_start, completed_at__lte=month_end)),
         'revenue_last_month': get_cached_revenue('last_month', completed_games.filter(completed_at__gte=last_month_start, completed_at__lte=last_month_end)),
         'revenue_total': get_cached_revenue('total', completed_games),
-        'total_deposits': Transaction.objects.filter(
-            transaction_type='deposit',
-            user__in=all_registered_users
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0'),
+        'total_deposits': _sum_real_deposits(all_registered_users),
         'total_withdrawals': Transaction.objects.filter(
             transaction_type='withdraw',
             user__in=all_registered_users
@@ -529,7 +546,7 @@ def admin_dashboard(request):
     # Get registered users - OPTIMIZED: Limited to 20 most recent users; use cached total_games_played (survives prune)
     registered_users_raw = User.objects.filter(telegram_id__isnull=False).order_by('-created_at')[:20].annotate(
         wins=Count('won_games', distinct=True),
-        user_total_deposits=Sum('transactions__amount', filter=Q(transactions__transaction_type='deposit')),
+        user_total_deposits=Sum('transactions__amount', filter=_real_deposit_transaction_filter()),
         user_total_withdrawals=Sum('transactions__amount', filter=Q(transactions__transaction_type='withdraw'))
     )
     
@@ -551,10 +568,7 @@ def admin_dashboard(request):
     # Financial statistics - Calculate from ALL registered users (not just the limited display list)
     # Sum deposits and withdrawals from all registered users' transactions
     all_registered_users = User.objects.filter(telegram_id__isnull=False)
-    total_deposits = Transaction.objects.filter(
-        transaction_type='deposit',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+    total_deposits = _sum_real_deposits(all_registered_users)
     total_withdrawals = Transaction.objects.filter(
         transaction_type='withdraw',
         user__in=all_registered_users
@@ -699,7 +713,9 @@ def search_user(request):
         total_deposits = getattr(user, 'total_deposits_amount', None)
         total_withdrawals = getattr(user, 'total_withdrawals_amount', None)
         if total_deposits is None:
-            total_deposits = Transaction.objects.filter(user=user, transaction_type='deposit').aggregate(s=Sum('amount'))['s'] or Decimal('0')
+            total_deposits = Transaction.objects.filter(user=user).filter(
+                _real_deposit_transaction_filter(prefix='')
+            ).aggregate(s=Sum('amount'))['s'] or Decimal('0')
         if total_withdrawals is None:
             total_withdrawals = Transaction.objects.filter(user=user, transaction_type='withdraw').aggregate(s=Sum('amount'))['s'] or Decimal('0')
         total_deposits = total_deposits or Decimal('0')
@@ -1959,7 +1975,7 @@ def second_admin_dashboard(request):
     # Get registered users (can edit but NOT delete) - use cached total_games_played (survives prune)
     registered_users_raw = User.objects.filter(telegram_id__isnull=False).order_by('-created_at')[:20].annotate(
         wins=Count('won_games', distinct=True),
-        user_total_deposits=Sum('transactions__amount', filter=Q(transactions__transaction_type='deposit')),
+        user_total_deposits=Sum('transactions__amount', filter=_real_deposit_transaction_filter()),
         user_total_withdrawals=Sum('transactions__amount', filter=Q(transactions__transaction_type='withdraw'))
     )
     
@@ -1981,10 +1997,7 @@ def second_admin_dashboard(request):
     # Financial statistics - Calculate from ALL registered users (not just the limited display list)
     # Sum deposits and withdrawals from all registered users' transactions
     all_registered_users = User.objects.filter(telegram_id__isnull=False)
-    total_deposits = Transaction.objects.filter(
-        transaction_type='deposit',
-        user__in=all_registered_users
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+    total_deposits = _sum_real_deposits(all_registered_users)
     total_withdrawals = Transaction.objects.filter(
         transaction_type='withdraw',
         user__in=all_registered_users
@@ -2207,7 +2220,7 @@ def admin_dashboard_api(request):
     registered_users_count = User.objects.filter(telegram_id__isnull=False).count()
     base_qs = User.objects.filter(telegram_id__isnull=False).annotate(
         user_total_deposits=Coalesce(
-            Sum('transactions__amount', filter=Q(transactions__transaction_type='deposit')),
+            Sum('transactions__amount', filter=_real_deposit_transaction_filter()),
             Decimal('0'),
         ),
         user_total_withdrawals=Coalesce(
@@ -2599,7 +2612,7 @@ def second_admin_dashboard_api(request):
     
     # Registered users - use cached total_games_played (survives prune); wins from Game (winner + winners M2M)
     registered_users_raw = User.objects.filter(telegram_id__isnull=False).order_by('-created_at')[:20].annotate(
-        user_total_deposits=Sum('transactions__amount', filter=Q(transactions__transaction_type='deposit')),
+        user_total_deposits=Sum('transactions__amount', filter=_real_deposit_transaction_filter()),
         user_total_withdrawals=Sum('transactions__amount', filter=Q(transactions__transaction_type='withdraw'))
     )
     sec_user_ids = [u.id for u in registered_users_raw]

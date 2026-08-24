@@ -390,7 +390,7 @@ def near_bingo_completion_numbers(
     Used to avoid calling them while system accounts should win (lightweight vs full simulation).
     """
     result = set()
-    if not layout or not marked_numbers:
+    if not layout or not marked_numbers or not isinstance(layout, list) or len(layout) < 5:
         return result
 
     if enabled_patterns is None:
@@ -402,7 +402,11 @@ def near_bingo_completion_numbers(
 
     def unmarked_in_cells(cells) -> list:
         need = []
+        if not cells:
+            return need
         for cell in cells:
+            if not isinstance(cell, dict):
+                continue
             if cell.get("letter") == "FREE":
                 continue
             cell_number = cell.get("number")
@@ -1146,6 +1150,7 @@ def start_game(game: Game) -> bool:
     
     # Invalidate game cache when game starts
     cache.delete('game:current')
+    cache.delete('game:current:state:game:current')
     
     return True
 

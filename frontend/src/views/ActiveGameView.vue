@@ -176,6 +176,7 @@ export default {
       startCountdownText: 'ቁጥሮች ለመጥራት በመጀመር ላይ...',
       countdownInterval: null, // Store countdown interval reference
       _countdownInitialized: false, // Flag to prevent countdown from starting multiple times
+      _waitingTransitionAt: null, // When we first saw waiting during a start transition
       isMarkingNumber: false, // Prevent duplicate number marking
       lastMarkedNumber: null, // Track last marked number to prevent duplicates
       lastMarkedTime: 0, // Track when number was last marked
@@ -302,6 +303,10 @@ export default {
         // FIX: Always use calledNumbers.length as the source of truth for current_call_count
         // This prevents the count from being reset to 0 when loadGame() is called with stale server data
         this.game = game
+        if (game.status === 'active') {
+          sessionStorage.removeItem('gameStarting')
+          this._waitingTransitionAt = null
+        }
         
         // CRITICAL: Always sync current_call_count from calledNumbers array (source of truth)
         // This ensures the count never shows 0 when we have called numbers
@@ -371,7 +376,17 @@ export default {
             }, 8000)
             return
           } else if (game.status === 'waiting') {
-            // Game is waiting - redirect to card selection (router guard should have caught this, but handle it anyway)
+            // During the card-selection → active transition, a stale current-game
+            // cache can still say waiting. Stay on this view and keep polling.
+            const starting = sessionStorage.getItem('gameStarting') === '1'
+            if (starting) {
+              if (!this._waitingTransitionAt) this._waitingTransitionAt = Date.now()
+              if (Date.now() - this._waitingTransitionAt < 15000) {
+                return
+              }
+              sessionStorage.removeItem('gameStarting')
+            }
+            this._waitingTransitionAt = null
             if (this.interval) {
               clearInterval(this.interval)
               this.interval = null
@@ -457,6 +472,10 @@ export default {
             Number(game.first_call_delay) ||
               (Number(game.time_between_calls) || 3) + 10
           )
+          // Clock skew / naive timestamps can make secondsSinceStart huge; treat that as just-started.
+          if (!Number.isFinite(secondsSinceStart) || secondsSinceStart < -5 || secondsSinceStart > 600) {
+            secondsSinceStart = 0
+          }
           const joinIsLate = hasCalledNumbers || callCount > 0 || secondsSinceStart >= firstCallDelay
 
           if (

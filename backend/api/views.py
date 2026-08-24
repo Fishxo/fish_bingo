@@ -390,7 +390,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     if game_id and status == 'active':
                         # Active game - try full data cache
                         cached_data = cache.get(cache_key)
-                        if cached_data:
+                        if cached_data and cached_data.get('status') == 'active':
                             return Response(cached_data)
             except Exception as cache_error:
                 # Redis connection failed - log and continue without cache
@@ -412,11 +412,20 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     # Use only() to fetch minimal fields for validation
                     game = Game.objects.filter(id=game_id).only('id', 'status', 'created_at').first()
                     if game and game.status in ['active', 'waiting']:
-                        # For active games, return cached data immediately (5-second cache)
+                        # For active games, return cached data only if it is actually the active payload.
+                        # A waiting payload can sit in the 5s cache after start_game() if a concurrent
+                        # /current/ request serialized before the status flip and wrote after the delete.
                         if game.status == 'active':
-                            # Also cache state for faster future checks
-                            cache.set(cache_key_state, {'id': game_id, 'status': 'active'}, 1)
-                            return Response(cached_data)
+                            if cached_data.get('status') == 'active':
+                                cache.set(cache_key_state, {'id': game_id, 'status': 'active'}, 1)
+                                return Response(cached_data)
+                            try:
+                                cache.delete(cache_key)
+                                cache.delete(cache_key_state)
+                            except Exception:
+                                pass
+                            game = None
+                            cached_data = None
                         # For waiting games, continue to check fake users below
             
             # Cache miss or waiting game - fetch from database with optimized query
@@ -626,6 +635,22 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             serializer = self.get_serializer(game)
             game_data = serializer.data
+
+            # A concurrent start can flip waiting → active while we were serializing.
+            # Never cache (or return) a stale waiting payload for an already-active game.
+            try:
+                latest_status = Game.objects.filter(id=game.id).values_list('status', flat=True).first()
+            except Exception:
+                latest_status = None
+            if latest_status and latest_status != game_data.get('status'):
+                try:
+                    cache.delete(cache_key)
+                    cache.delete(cache_key_state)
+                except Exception:
+                    pass
+                game.refresh_from_db()
+                serializer = self.get_serializer(game)
+                game_data = serializer.data
             
             # PHASE 2 OPTIMIZATION #1: Multi-level caching
             # Cache state (minimal data) for 1 second - for quick status checks
