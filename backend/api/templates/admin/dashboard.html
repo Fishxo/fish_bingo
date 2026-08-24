@@ -522,6 +522,20 @@
                             <input type="number" id="bid_amount" step="0.01" min="0.01" value="{{ game_settings.bid_amount }}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
                         </div>
                         <div>
+                            <label><strong>Give register reward:</strong></label>
+                            <div style="margin-top: 8px;">
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="checkbox" id="give_register_reward" {% if game_settings.give_register_reward %}checked{% endif %} style="width: 20px; height: 20px; margin-right: 8px; cursor: pointer;">
+                                    <span>Give registration gift to new users</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div>
+                            <label><strong>Registration Gift Amount (ETB):</strong></label>
+                            <input type="number" id="registration_gift_amount" step="0.01" min="0" value="{{ game_settings.registration_gift_amount|default_if_none:game_settings.bid_amount }}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
+                            <p style="font-size: 12px; color: #666; margin-top: 4px;">Independent of Bid Amount. Only future new users are affected.</p>
+                        </div>
+                        <div>
                             <label><strong>Card Selection Timer (seconds):</strong></label>
                             <input type="number" id="card_selection_timer" min="10" value="{{ game_settings.card_selection_timer }}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
                         </div>
@@ -1928,6 +1942,8 @@
             
             const settings = {
                 bid_amount: parseFloat(document.getElementById('bid_amount').value),
+                give_register_reward: document.getElementById('give_register_reward').checked,
+                registration_gift_amount: parseFloat(document.getElementById('registration_gift_amount').value),
                 card_selection_timer: parseInt(document.getElementById('card_selection_timer').value),
                 time_between_calls: parseInt(document.getElementById('time_between_calls').value),
                 total_cards: parseInt(document.getElementById('total_cards').value),

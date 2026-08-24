@@ -652,8 +652,13 @@
               <small class="form-hint">Per 24h from approval. 0 or empty = no limit. User can request again after 24h from last approval.</small>
             </div>
             <div class="form-group checkbox">
-              <label><input v-model="settings.give_register_reward" type="checkbox" /> Give register reward (bid amount as bonus)</label>
-              <small class="form-hint">When checked, new users get bid amount to unwithdrawable balance. When unchecked, they get 0.</small>
+              <label><input v-model="settings.give_register_reward" type="checkbox" /> Give register reward</label>
+              <small class="form-hint">When checked, new users get the Registration Gift Amount in unwithdrawable balance. When unchecked, they get 0.</small>
+            </div>
+            <div class="form-group">
+              <label>Registration Gift Amount (ETB)</label>
+              <input v-model.number="settings.registration_gift_amount" type="number" step="0.01" min="0" />
+              <small class="form-hint">Independent of Bid Amount. Changing bid does not change this gift, and changing this gift does not change the bid.</small>
             </div>
             <div class="form-group">
               <label>Deposit bonus (%)</label>
@@ -1053,6 +1058,7 @@ export default {
         min_withdraw: 10,
         max_withdrawal: null,
         give_register_reward: true,
+        registration_gift_amount: 10,
         deposit_bonus_percent: 0,
         percentage_cut: 10,
         automatic_mode_enabled: true,

@@ -1478,6 +1478,7 @@ def game_settings_api(request):
             'min_withdraw': float(settings.min_withdraw),
             'max_withdrawal': float(settings.max_withdrawal) if settings.max_withdrawal else None,
             'give_register_reward': getattr(settings, 'give_register_reward', True),
+            'registration_gift_amount': float(getattr(settings, 'registration_gift_amount', settings.bid_amount) or 0),
             'deposit_bonus_percent': getattr(settings, 'deposit_bonus_percent', 0),
             'percentage_cut': float(settings.percentage_cut),
             'automatic_mode_enabled': settings.automatic_mode_enabled,
@@ -1535,6 +1536,8 @@ def game_settings_api(request):
                     settings_obj.max_withdrawal = Decimal(str(val))
             if 'give_register_reward' in data:
                 settings_obj.give_register_reward = bool(data['give_register_reward'])
+            if 'registration_gift_amount' in data:
+                settings_obj.registration_gift_amount = Decimal(str(data['registration_gift_amount']))
             if 'deposit_bonus_percent' in data:
                 pct = data['deposit_bonus_percent']
                 if pct is None or pct == '':

@@ -1031,11 +1031,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return await sync_to_async(GameSettings.get_settings)()
                     game_settings = await db_operation_with_retry(get_settings)
                     give_reward = getattr(game_settings, 'give_register_reward', True)
-                    bid_amount = getattr(game_settings, 'bid_amount', 10) if give_reward else 0
+                    gift_amount = getattr(game_settings, 'registration_gift_amount', getattr(game_settings, 'bid_amount', 10)) if give_reward else 0
                     if give_reward:
                         message_text = (
-                            f"✅ ተመዝግበዋል! ስጦታ {bid_amount} ብር ተበርክቶሎታል፡፡\n\n"
-                            f"ያለዎት ሂሳብ: {bid_amount} ብር"
+                            f"✅ ተመዝግበዋል! ስጦታ {gift_amount} ብር ተበርክቶሎታል፡፡\n\n"
+                            f"ያለዎት ሂሳብ: {gift_amount} ብር"
                         )
                     else:
                         message_text = "✅ ተመዝግበዋል!\n\nያለዎት ሂሳብ: 0 ብር"

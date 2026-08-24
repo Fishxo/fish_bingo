@@ -108,7 +108,7 @@ class GameSettingsAdmin(admin.ModelAdmin):
             'fields': ('time_between_calls', 'card_selection_timer')
         }),
         ('Financial Settings', {
-            'fields': ('bid_amount', 'percentage_cut', 'min_withdraw')
+            'fields': ('bid_amount', 'give_register_reward', 'registration_gift_amount', 'percentage_cut', 'min_withdraw')
         }),
         ('Card Settings', {
             'fields': ('total_cards',)

@@ -141,14 +141,14 @@ def telegram_register(request):
         try:
             game_settings = GameSettings.get_settings()
             if getattr(game_settings, 'give_register_reward', True):
-                bid_amount = Decimal(str(game_settings.bid_amount))
+                gift_amount = Decimal(str(getattr(game_settings, 'registration_gift_amount', game_settings.bid_amount) or 0))
                 # Registration gift → unwithdrawable_balance
-                User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + bid_amount)
+                User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + gift_amount)
                 user.refresh_from_db()
                 Transaction.objects.create(
                     user=user,
                     transaction_type='deposit',
-                    amount=bid_amount,
+                    amount=gift_amount,
                     description='Registration gift'
                 )
             registration_gift_given = True

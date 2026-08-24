@@ -425,7 +425,8 @@ class GameSettings(models.Model):
     percentage_cut = models.DecimalField(max_digits=5, decimal_places=2, default=10.00, help_text="Percentage to cut from total derash (e.g., 10.00 for 10%)")
     min_withdraw = models.DecimalField(max_digits=10, decimal_places=2, default=50.00, help_text="Minimum withdrawal amount")
     max_withdrawal = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="Max withdrawal per 24h (from approval time). Null/0 = no limit.")
-    give_register_reward = models.BooleanField(default=True, help_text="If True, new users get bid_amount as registration bonus (unwithdrawable). If False, no bonus, balance stays 0.")
+    give_register_reward = models.BooleanField(default=True, help_text="If True, new users get registration_gift_amount as registration bonus (unwithdrawable). If False, no bonus, balance stays 0.")
+    registration_gift_amount = models.DecimalField(max_digits=10, decimal_places=2, default=10.00, help_text="Amount credited to unwithdrawable on first registration when give_register_reward is True. Independent of bid_amount.")
     deposit_bonus_percent = models.PositiveSmallIntegerField(default=0, help_text="Percent of deposit to add to unwithdrawable (e.g. 10 = 10%% of deposit also added as bonus). 0 = no bonus.")
     
     # Card settings
@@ -534,6 +535,14 @@ class GameSettings(models.Model):
     
     def __str__(self):
         return "Game Settings"
+
+    def get_registration_gift_amount(self):
+        """Amount credited on first registration. Independent of bid_amount."""
+        from decimal import Decimal
+        amount = getattr(self, 'registration_gift_amount', None)
+        if amount is None:
+            amount = getattr(self, 'bid_amount', 0)
+        return Decimal(str(amount or 0))
     
     def save(self, *args, **kwargs):
         # Ensure only one instance exists

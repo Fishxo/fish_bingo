@@ -33,7 +33,7 @@ class Command(BaseCommand):
         dry_run = options.get('dry_run', False)
 
         game_settings = GameSettings.get_settings()
-        bid_amount = Decimal(str(game_settings.bid_amount))
+        gift_amount = Decimal(str(getattr(game_settings, 'registration_gift_amount', game_settings.bid_amount) or 0))
 
         if user_id:
             users = User.objects.filter(id=user_id)
@@ -76,20 +76,20 @@ class Command(BaseCommand):
 
             self.stdout.write(
                 f'  User {user.telegram_id} (ID: {user.id}, Phone: {user.phone_number}): '
-                f'Current balance: {user.balance}, Will add: {bid_amount}'
+                f'Current balance: {user.balance}, Will add: {gift_amount}'
             )
 
             if not dry_run:
                 try:
                     # Registration gift → unwithdrawable_balance
-                    User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + bid_amount)
+                    User.objects.filter(id=user.id).update(unwithdrawable_balance=F('unwithdrawable_balance') + gift_amount)
                     user.refresh_from_db()
 
                     # Create transaction record
                     Transaction.objects.create(
                         user=user,
                         transaction_type='deposit',
-                        amount=bid_amount,
+                        amount=gift_amount,
                         description='Registration gift (manually fixed)'
                     )
 
