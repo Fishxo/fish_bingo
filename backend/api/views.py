@@ -530,7 +530,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                             broadcast_to_game_rooms(game.id, 'game_started', {
                                 'game_id': game.id,
                                 'started_at': game.started_at.isoformat() if game.started_at else None
-                            })
+                            }, use_legacy=False)
                         except Exception as e:
                             print(f"WebSocket broadcast error: {e}")
                         
@@ -1479,7 +1479,7 @@ def start_game(request, game_id):
                 broadcast_to_game_rooms(game.id, 'game_started', {
                     'game_id': game.id,
                     'started_at': game.started_at.isoformat() if game.started_at else None
-                })
+                }, use_legacy=False)
             except Exception as e:
                 print(f"WebSocket broadcast error: {e}")
             

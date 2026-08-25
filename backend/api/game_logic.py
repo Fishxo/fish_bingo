@@ -1,6 +1,7 @@
 import random
 from typing import List, Dict, Tuple, Optional
 from django.utils import timezone
+from django.db import transaction
 from datetime import timedelta
 from decimal import Decimal
 from .models import Game, GameCard, CalledNumber, User, Transaction, CardUnselectRefund
@@ -846,13 +847,30 @@ def maybe_prepare_test_co_win_when_waiting(game: Game, settings) -> None:
 
 def start_game(game: Game) -> bool:
     """Start a game - requires at least 2 total players (real + fake)
-    Also caches game settings to prevent mid-game changes
+    Also caches game settings to prevent mid-game changes.
+
+    Concurrent callers are serialized on the Game row. Only the request
+    that actually transitions waiting → active returns True. Other
+    in-flight attempts skip the lock immediately instead of waiting
+    (avoids saturating the DB pool at 500–600 clients).
     """
+    with transaction.atomic():
+        locked = (
+            Game.objects.select_for_update(skip_locked=True)
+            .filter(pk=game.pk)
+            .first()
+        )
+        if locked is None:
+            game.refresh_from_db()
+            return False
+        started = _start_game_body(locked)
+        game.refresh_from_db()
+        return started
+
+
+def _start_game_body(game: Game) -> bool:
     from django.core.cache import cache
     from .models import GameSettings
-    
-    # Refresh game from database to get latest status (prevents race conditions)
-    game.refresh_from_db()
     
     if game.status != 'waiting':
         return False
@@ -1108,16 +1126,17 @@ def start_game(game: Game) -> bool:
                 import traceback
                 traceback.print_exc()
     
-    # CRITICAL: Double-check game is still waiting before setting to active
-    # This prevents race conditions where multiple requests try to start the game
-    if game.status != 'waiting':
-        # Game was already started by another process, return False
+    # Atomic waiting → active: only one concurrent caller can win this update.
+    now = timezone.now()
+    updated = Game.objects.filter(pk=game.pk, status='waiting').update(
+        status='active',
+        started_at=now,
+        updated_at=now,
+    )
+    if updated != 1:
+        game.refresh_from_db()
         return False
-    
-    # Now set game to active (after derash is calculated and synced)
-    game.status = 'active'
-    game.started_at = timezone.now()
-    game.save()
+    game.refresh_from_db()
     
     # PHASE 4 OPTIMIZATION: Sync game state to Redis immediately when game starts
     from .redis_utils import sync_game_state_to_redis
