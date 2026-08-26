@@ -1516,16 +1516,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         try:
-            await db_operation_with_retry(
-                lambda: finalize_telebirr_deposit(telegram_user, canonical_ref, amount_to_credit, text)
-            )
+            async def do_finalize():
+                await sync_to_async(finalize_telebirr_deposit)(
+                    telegram_user, canonical_ref, amount_to_credit, text
+                )
+            await db_operation_with_retry(do_finalize)
         except Exception as e:
             logger.exception("Telebirr deposit finalize failed for ref %s: %s", canonical_ref, e)
+            reason = f"deposit_finalize_failed: {type(e).__name__}: {e}"
+            if len(reason) > 255:
+                reason = reason[:252] + '...'
             async def save_failed_finalize():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='Telebirr', deposit_text=text[:2000],
-                    failure_reason='deposit_finalize_failed', reference=canonical_ref,
+                    failure_reason=reason, reference=canonical_ref,
                     amount=amount_to_credit
                 )
             await db_operation_with_retry(save_failed_finalize)
@@ -1670,18 +1675,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         try:
-            await db_operation_with_retry(
-                lambda: finalize_cbe_deposit(
+            async def do_finalize():
+                await sync_to_async(finalize_cbe_deposit)(
                     telegram_user, reference, account_suffix, amount_to_credit, text
                 )
-            )
+            await db_operation_with_retry(do_finalize)
         except Exception as e:
             logger.exception("CBE deposit finalize failed for ref %s: %s", reference, e)
+            reason = f"deposit_finalize_failed: {type(e).__name__}: {e}"
+            if len(reason) > 255:
+                reason = reason[:252] + '...'
             async def save_failed_finalize():
                 from api.models import FailedDepositRequest
                 await sync_to_async(FailedDepositRequest.objects.create)(
                     user=telegram_user, platform='CBE', deposit_text=text[:2000],
-                    failure_reason='deposit_finalize_failed', reference=reference,
+                    failure_reason=reason, reference=reference,
                     account_suffix=account_suffix, amount=amount_to_credit
                 )
             await db_operation_with_retry(save_failed_finalize)

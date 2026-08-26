@@ -4,6 +4,7 @@ Used for automatic deposit verification when user sends full Telebirr SMS text.
 """
 import re
 import logging
+import time
 from decimal import Decimal
 from typing import Optional
 
@@ -141,17 +142,28 @@ def parse_telebirr_receipt_text(text: str) -> Optional[dict]:
     }
 
 
-def verify_telebirr_receipt(reference: str, api_key: str) -> dict:
-    """
-    Call verifyapi.leulzenebe.pro to verify a Telebirr receipt by reference (transaction number).
-    Returns dict:
-      - success: bool
-      - data: None or dict with payerName, creditedPartyName, totalPaidAmount, receiptNo, paymentDate, transactionStatus, etc.
-      - error: str or None
-    """
-    if not api_key or not reference:
-        return {'success': False, 'data': None, 'error': 'Missing API key or reference'}
+_TRANSIENT_VERIFY_MARKERS = (
+    'bad gateway',
+    'gateway timeout',
+    'service unavailable',
+    'too many requests',
+    'timeout',
+    'timed out',
+    'connection',
+    'temporarily',
+    '502',
+    '503',
+    '504',
+    '429',
+)
 
+
+def _is_transient_telebirr_verify_error(error: str) -> bool:
+    err = (error or '').lower()
+    return any(marker in err for marker in _TRANSIENT_VERIFY_MARKERS)
+
+
+def _verify_telebirr_receipt_once(reference: str, api_key: str) -> dict:
     url = 'https://verifyapi.leulzenebe.pro/verify-telebirr'
     headers = {
         'Content-Type': 'application/json',
@@ -201,6 +213,35 @@ def verify_telebirr_receipt(reference: str, api_key: str) -> dict:
         'data': data,
         'error': None,
     }
+
+
+def verify_telebirr_receipt(reference: str, api_key: str, max_retries: int = 3) -> dict:
+    """
+    Call verifyapi.leulzenebe.pro to verify a Telebirr receipt by reference (transaction number).
+    Retries briefly on gateway/timeout errors so a short verifier outage does not fail the deposit.
+    Returns dict:
+      - success: bool
+      - data: None or dict with payerName, creditedPartyName, totalPaidAmount, receiptNo, paymentDate, transactionStatus, etc.
+      - error: str or None
+    """
+    if not api_key or not reference:
+        return {'success': False, 'data': None, 'error': 'Missing API key or reference'}
+
+    last = {'success': False, 'data': None, 'error': 'verification_failed'}
+    for attempt in range(max_retries):
+        last = _verify_telebirr_receipt_once(reference, api_key)
+        if last.get('success') and last.get('data'):
+            return last
+        err = last.get('error') or ''
+        if not _is_transient_telebirr_verify_error(err) or attempt >= max_retries - 1:
+            return last
+        delay = 1.5 * (attempt + 1)
+        logger.warning(
+            "Telebirr verify transient error for ref %s (attempt %s/%s): %s. Retrying in %.1fs",
+            reference, attempt + 1, max_retries, err, delay,
+        )
+        time.sleep(delay)
+    return last
 
 
 def normalize_telebirr_api_data(body: dict) -> Optional[dict]:
