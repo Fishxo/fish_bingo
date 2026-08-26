@@ -426,13 +426,27 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                 pass
                             game = None
                             cached_data = None
-                        # For waiting games, continue to check fake users below
+                        elif game.status == 'waiting':
+                            # Never serve a waiting cache while an active game exists.
+                            # A newer waiting row (next round) would otherwise steal current()
+                            # and kick players out of the live game.
+                            if Game.objects.filter(status='active').exists():
+                                try:
+                                    cache.delete(cache_key)
+                                    cache.delete(cache_key_state)
+                                except Exception:
+                                    pass
+                                game = None
+                                cached_data = None
+                            # else: keep waiting game and continue (fake users / timer / serialize)
             
             # Cache miss or waiting game - fetch from database with optimized query
             if not game:
-                game = Game.objects.filter(
-                    Q(status='active') | Q(status='waiting')
-                ).select_related('winner').prefetch_related('winners').order_by('-created_at').first()
+                # Prefer the live game. order_by('-created_at') on mixed statuses can
+                # return a newer waiting round and hide the still-active one.
+                game = Game.objects.filter(status='active').select_related('winner').prefetch_related('winners').order_by('-created_at').first()
+                if not game:
+                    game = Game.objects.filter(status='waiting').select_related('winner').prefetch_related('winners').order_by('-created_at').first()
             
             # If no active/waiting game, create a new one. Never return a completed game as "current"
             # (returning completed caused card selection to load with old game + stale card state + banner blink).
@@ -682,9 +696,9 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             # Try to return a graceful error response
             # If we can at least get a game, return it even if there was an error
             try:
-                game = Game.objects.filter(
-                    Q(status='active') | Q(status='waiting')
-                ).order_by('-created_at').first()
+                game = Game.objects.filter(status='active').order_by('-created_at').first()
+                if not game:
+                    game = Game.objects.filter(status='waiting').order_by('-created_at').first()
                 if game:
                     serializer = self.get_serializer(game)
                     return Response(serializer.data)

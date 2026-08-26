@@ -48,23 +48,21 @@ router.beforeEach(async (to, from, next) => {
 
   if (to.name === 'game' && from.name !== 'game') {
     try {
-      const { getCurrentGame } = await import('./services/api')
-      const game = await getCurrentGame()
       const starting = sessionStorage.getItem('gameStarting') === '1'
-      if (game.status === 'waiting' && !starting) {
-        next('/select-card')
+      // Do not block the start transition on a possibly stale /current/ payload.
+      if (starting) {
+        next()
         return
       }
-      // Keep gameStarting until ActiveGameView confirms the game is active.
-      // Clearing it here allowed a still-waiting (or stale-cached) payload to
-      // bounce the player back to card selection after the countdown.
-      if (game.status === 'completed') {
-        next('/completed')
+      const { getCurrentGame } = await import('./services/api')
+      const game = await getCurrentGame()
+      if (!game || game.status === 'waiting' || game.status === 'completed') {
+        next('/select-card')
         return
       }
     } catch (error) {
       if (error.response?.status === 404) {
-        next('/home')
+        next('/select-card')
         return
       }
     }

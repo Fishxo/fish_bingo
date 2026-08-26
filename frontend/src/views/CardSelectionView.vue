@@ -154,7 +154,12 @@ export default {
       /** Last WebSocket role (player vs watcher) we connected with */
       _wsBoundRole: null,
       /** Skip redundant my_card API calls during polling when already known empty */
-      _myCardCheckedForGameId: null
+      _myCardCheckedForGameId: null,
+      _isUnmounted: false,
+      _enterRecoverTimeoutId: null,
+      statusPollInterval: null,
+      _statusCheckInFlight: false,
+      _enterAttempts: 0
     }
   },
   async mounted() {
@@ -194,10 +199,12 @@ export default {
     
     await this.loadGame()
     // WebSocket is attached inside loadGame() for the current game id
-    // Only start polling if WebSocket is not connected (fallback)
+    // HTTP polling is a fallback; a lightweight status poll still runs when WS is up
+    // so a missed game_started event cannot freeze this page.
     if (!this.wsConnected) {
       this.startPolling()
     }
+    this.startStatusPoll()
     
     // Start timer after a short delay to ensure game is loaded
     this.$nextTick(() => {
@@ -217,17 +224,28 @@ export default {
     document.addEventListener('visibilitychange', this.visibilityHandler)
   },
   beforeUnmount() {
+    this._isUnmounted = true
+    this.stopPolling()
+    this.stopStatusPoll()
     if (this.interval) {
       clearInterval(this.interval)
+      this.interval = null
     }
     if (this.timerInterval) {
       clearInterval(this.timerInterval)
+      this.timerInterval = null
     }
     if (this._winnerRedirectTimeoutId) {
       clearTimeout(this._winnerRedirectTimeoutId)
+      this._winnerRedirectTimeoutId = null
     }
     if (this._completedRedirectTimeoutId) {
       clearTimeout(this._completedRedirectTimeoutId)
+      this._completedRedirectTimeoutId = null
+    }
+    if (this._enterRecoverTimeoutId) {
+      clearTimeout(this._enterRecoverTimeoutId)
+      this._enterRecoverTimeoutId = null
     }
     if (this.ws) {
       this.ws.disconnect()
@@ -264,8 +282,10 @@ export default {
       }
     },
     async loadGame() {
+      if (this._isUnmounted) return
       try {
         const game = await getCurrentGame()
+        if (this._isUnmounted) return
         
         const idChanged = this._loadedGameId != null && game && game.id !== this._loadedGameId
         if (idChanged) {
@@ -294,6 +314,7 @@ export default {
           this.isRedirecting = false
           this._wsBoundRole = null
           this._myCardCheckedForGameId = null
+          this._enterAttempts = 0
           if (this.ws) {
             this.ws.disconnect()
             this.ws = null
@@ -323,18 +344,8 @@ export default {
               if (myCard) {
                 this.selectedCard = myCard.card_number
                 this.userCard = myCard
-                // User already has a card
-                // If game is active, redirect to game view
                 if (game.status === 'active') {
-                  if (this.interval) {
-                    clearInterval(this.interval)
-                    this.interval = null
-                  }
-                  if (this.timerInterval) {
-                    clearInterval(this.timerInterval)
-                    this.timerInterval = null
-                  }
-                  this.$router.push('/game')
+                  this.enterActiveGame()
                   return
                 }
               } else {
@@ -372,57 +383,31 @@ export default {
             this.setupWebSocket()
           }
           
-          // Redirect if game status changes - but only if user has a card
-          // If game is active and user has a card, redirect to game view
-          // If game is active but user has NO card, allow them to select a card
-          if (game.status === 'active' && !this.isRedirecting && this.selectedCard) {
-            // User has a card and game is active - redirect to game view
-            // ATOMIC TRANSITION: Stop all updates before redirecting to prevent glitches
-            if (this.timerInterval) {
-              clearInterval(this.timerInterval)
-              this.timerInterval = null
+          if (game.status === 'active') {
+            if (this.userHasCard()) {
+              this.enterActiveGame()
+              return
             }
-            if (this.interval) {
-              clearInterval(this.interval)
-              this.interval = null
-            }
-            // Keep WebSocket alive through redirect so early number_called events aren't dropped
-            this.isRedirecting = true
-            // Update game state atomically before redirect
-            this.game = game
-            // Use nextTick to ensure state is updated before navigation
-            this.$nextTick(() => {
-              this.$router.push('/game').catch(() => {
-                // Ignore navigation errors
-              })
-            })
-            return // Stop further execution
+            this.stayOnActiveWithoutCard()
+            return
           }
-          // If game is active but user has no card, stay on card selection page (no timer needed)
-          // Timer should only run when game is waiting
-          else if (game.status === 'completed' && !this.isRedirecting && !this.showWinnerBanner) {
-            // Give winner_declared WebSocket time to arrive so we can show winner banner
+          if (game.status === 'completed' && !this.showWinnerBanner) {
             if (this.timerInterval) {
               clearInterval(this.timerInterval)
               this.timerInterval = null
             }
-            if (this.interval) {
-              clearInterval(this.interval)
-              this.interval = null
+            if (!this._completedRedirectTimeoutId) {
+              this._completedRedirectTimeoutId = setTimeout(() => {
+                this._completedRedirectTimeoutId = null
+                if (this._isUnmounted || this.showWinnerBanner) return
+                this._loadedGameId = null
+                this.loadGame()
+              }, 2500)
             }
-            if (this._completedRedirectTimeoutId) {
-              clearTimeout(this._completedRedirectTimeoutId)
-            }
-            this._completedRedirectTimeoutId = setTimeout(() => {
-              this._completedRedirectTimeoutId = null
-              if (!this.showWinnerBanner) {
-                this.isRedirecting = true
-                this.$router.push('/completed').catch(() => {})
-              }
-            }, 3500)
-            return // Stop further execution
+            if (!this.interval) this.startPolling()
+            this.startStatusPoll()
+            return
           } else if (game.status === 'waiting') {
-            // Don't restart the selection timer while startGame() is in flight
             if (this.startingGame || this.isRedirecting) {
               return
             }
@@ -457,21 +442,137 @@ export default {
                 this.startTimer()
               }
             }
-          } else if (game.status === 'active' && !this.selectedCard) {
-            console.log('🎮 Game is active but user has no card - clearing timer')
-            // Game is active but user has no card - clear timer if running
-            // No timer needed for active games
-            if (this.timerInterval) {
-              console.log('Game is active, clearing timer')
-              clearInterval(this.timerInterval)
-              this.timerInterval = null
-            }
-            // Reset timer display to show no countdown
-            this.timerSeconds = 0
           }
         }
       } catch (error) {
         console.error('Error loading game:', error)
+        if (error.response?.status === 404) {
+          this.game = null
+          if (!this.interval) this.startPolling()
+          this.startStatusPoll()
+        }
+      }
+    },
+    userHasCard() {
+      return !!(this.userCard || this.selectedCard)
+    },
+    stayOnActiveWithoutCard() {
+      if (this.game) {
+        this.game.status = 'active'
+      }
+      this.isRedirecting = false
+      if (this.timerInterval) {
+        clearInterval(this.timerInterval)
+        this.timerInterval = null
+      }
+      this.timerSeconds = 0
+      this.startStatusPoll()
+    },
+    enterActiveGame() {
+      if (this._isUnmounted) return
+      if (this.$route?.path === '/game') return
+      if (!this.userHasCard()) {
+        this.stayOnActiveWithoutCard()
+        return
+      }
+      if (this.isRedirecting) {
+        this.scheduleEnterRecover()
+        return
+      }
+      if (this._enterAttempts >= 3) {
+        this.isRedirecting = false
+        this.startPolling()
+        this.startStatusPoll()
+        setTimeout(() => {
+          if (!this._isUnmounted) this._enterAttempts = 0
+        }, 5000)
+        return
+      }
+      this.isRedirecting = true
+      this._enterAttempts += 1
+      try {
+        sessionStorage.setItem('gameStarting', '1')
+        if (this.game?.id) {
+          sessionStorage.setItem('startingGameId', String(this.game.id))
+        }
+      } catch (e) {
+        // Ignore storage errors (private mode, etc.)
+      }
+      if (this.timerInterval) {
+        clearInterval(this.timerInterval)
+        this.timerInterval = null
+      }
+      this.stopPolling()
+      this.stopStatusPoll()
+      this.$router.push('/game').catch(() => {
+        this.scheduleEnterRecover()
+      })
+      this.scheduleEnterRecover()
+    },
+    scheduleEnterRecover() {
+      if (this._enterRecoverTimeoutId) {
+        clearTimeout(this._enterRecoverTimeoutId)
+      }
+      this._enterRecoverTimeoutId = setTimeout(() => {
+        this._enterRecoverTimeoutId = null
+        if (this._isUnmounted) return
+        if (this.$route?.path === '/select-card' && this.isRedirecting) {
+          this.recoverFromFailedEnter()
+        }
+      }, 700)
+    },
+    recoverFromFailedEnter() {
+      if (this._isUnmounted) return
+      this.isRedirecting = false
+      if (this.game && this.game.status === 'active' && this.userHasCard()) {
+        try {
+          sessionStorage.setItem('gameStarting', '1')
+          if (this.game.id) sessionStorage.setItem('startingGameId', String(this.game.id))
+        } catch (e) {}
+        this.enterActiveGame()
+        return
+      }
+      if (this.game && this.game.status === 'waiting') {
+        if (!this.timerInterval) {
+          if (typeof this.game.selection_remaining_seconds === 'number' && this.game.selection_remaining_seconds > 0) {
+            this.startTimer({ serverRemainingSeconds: this.game.selection_remaining_seconds })
+          } else {
+            this.startTimer({ forceFullRestart: true })
+          }
+        }
+        this.startPolling()
+        this.startStatusPoll()
+      }
+    },
+    startStatusPoll() {
+      if (this._isUnmounted || this.isRedirecting || this.statusPollInterval) return
+      this.statusPollInterval = setInterval(this.checkActiveGameStatus, 2000)
+    },
+    stopStatusPoll() {
+      if (this.statusPollInterval) {
+        clearInterval(this.statusPollInterval)
+        this.statusPollInterval = null
+      }
+    },
+    async checkActiveGameStatus() {
+      if (this._statusCheckInFlight || this.isRedirecting || this._isUnmounted || this.showWinnerBanner) return
+      this._statusCheckInFlight = true
+      try {
+        const game = await getCurrentGame()
+        if (this.isRedirecting || this._isUnmounted) return
+        if (game && game.status === 'active') {
+          if (this.userHasCard()) {
+            this.enterActiveGame()
+          } else {
+            this.stayOnActiveWithoutCard()
+          }
+        } else if (game && this.game && game.id !== this.game.id && game.status === 'waiting') {
+          this.loadGame()
+        }
+      } catch (error) {
+        console.error('Error checking game active status:', error)
+      } finally {
+        this._statusCheckInFlight = false
       }
     },
     setupWebSocket() {
@@ -483,15 +584,15 @@ export default {
       this.ws.on('connected', () => {
         console.log('WebSocket connected successfully in CardSelectionView')
         this.wsConnected = true
-        // Stop polling when WebSocket connects
         this.stopPolling()
+        this.startStatusPoll()
       })
       
       this.ws.on('disconnected', () => {
         console.log('WebSocket disconnected in CardSelectionView')
         this.wsConnected = false
-        // Resume polling when WebSocket disconnects
         this.startPolling()
+        this.startStatusPoll()
       })
       
       this.ws.connect()
@@ -539,17 +640,11 @@ export default {
       })
       
       this.ws.on('game_started', () => {
-        if (this.timerInterval) {
-          clearInterval(this.timerInterval)
-          this.timerInterval = null
+        if (this.userHasCard()) {
+          this.enterActiveGame()
+          return
         }
-        if (this.interval) {
-          clearInterval(this.interval)
-          this.interval = null
-        }
-        sessionStorage.setItem('gameStarting', '1')
-        this.isRedirecting = true
-        this.$router.push('/game').catch(() => {})
+        this.stayOnActiveWithoutCard()
       })
       
       this.ws.on('winner_declared', (data) => {
@@ -621,8 +716,8 @@ export default {
             this._completedRedirectTimeoutId = null
           }
           if (!this.showWinnerBanner) {
-            this.isRedirecting = true
-            this.$router.push('/completed').catch(() => {})
+            this._loadedGameId = null
+            this.loadGame()
           }
         }
       })
@@ -654,8 +749,14 @@ export default {
       this.showWinnerBanner = false
       this.winner = null
       this.winners = null
-      this.isRedirecting = true
-      this.$router.push('/completed').catch(() => {})
+      this.winnerCard = null
+      this.isCurrentUserWinner = false
+      this.isRedirecting = false
+      this._loadedGameId = null
+      this._myCardCheckedForGameId = null
+      this.selectedCard = null
+      this.userCard = null
+      this.loadGame()
     },
     startTimer(opts = {}) {
       const forceFullRestart = opts === true || opts.forceFullRestart === true
@@ -736,14 +837,8 @@ export default {
         }
         
         this.game = gameData
-        this.game.status = 'active'
         console.log('Game started successfully:', gameData)
-
-        sessionStorage.setItem('gameStarting', '1')
-        this.isRedirecting = true
-        this.$nextTick(() => {
-          this.$router.push('/game').catch(() => {})
-        })
+        this.enterActiveGame()
       } catch (error) {
         console.error('Error starting game:', error)
         sessionStorage.removeItem('gameStarting')
@@ -756,9 +851,7 @@ export default {
           this.game = game
           if (game.status === 'active') {
             console.log('Game is already active, redirecting')
-            sessionStorage.setItem('gameStarting', '1')
-            this.isRedirecting = true
-            this.$router.push('/game').catch(() => {})
+            this.enterActiveGame()
           } else if (game.status === 'waiting') {
             if (!this.interval) this.startPolling()
             if (!this.timerInterval) {
@@ -768,9 +861,7 @@ export default {
         } catch (e) {
           console.error('Error reloading game:', e)
           if (this.selectedCard) {
-            sessionStorage.setItem('gameStarting', '1')
-            this.isRedirecting = true
-            this.$router.push('/game').catch(() => {})
+            this.enterActiveGame()
           } else {
             if (!this.interval) this.startPolling()
             if (this.game && this.game.status === 'waiting' && !this.timerInterval) {
@@ -955,20 +1046,8 @@ export default {
           this.showNotification(errorMsg, 'error')
         })
       
-      // If game is active and user just selected a card, redirect to game view
       if (this.game.status === 'active' && !isUnselecting) {
-        // Clear intervals
-        if (this.interval) {
-          clearInterval(this.interval)
-          this.interval = null
-        }
-        if (this.timerInterval) {
-          clearInterval(this.timerInterval)
-          this.timerInterval = null
-        }
-        // Redirect to game view
-        this.isRedirecting = true
-        this.$router.push('/game').catch(() => {})
+        this.enterActiveGame()
       }
     },
     showNotification(message, type = 'info') {

@@ -129,7 +129,7 @@ import BingoGrid from '../components/BingoGrid.vue'
 import UserCard from '../components/UserCard.vue'
 import WinnerBanner from '../components/WinnerBanner.vue'
 import NotificationBanner from '../components/NotificationBanner.vue'
-import { getCurrentGame, getMyCard, markNumber, claimBingo, getCard, updateGameMode } from '../services/api'
+import { getCurrentGame, getGame, getMyCard, markNumber, claimBingo, getCard, updateGameMode } from '../services/api'
 import { WebSocketService } from '../services/websocket'
 
 export default {
@@ -188,7 +188,9 @@ export default {
       _pendingFakeWinnerDeclaration: false,
       blockedFromThisGame: false, // True after false bingo claim: show overlay, user cannot play this game
       claimBingoChecking: false, // True while checking claim (spinner)
-      falseBingoClickCount: 0 // Count of Bingo clicks without a line this game; 2nd = block
+      falseBingoClickCount: 0, // Count of Bingo clicks without a line this game; 2nd = block
+      boundGameId: null,
+      _sawActiveStatus: false
     }
   },
   computed: {
@@ -293,17 +295,62 @@ export default {
           this._winnerBannerActive = false
         }
         
-        const game = await getCurrentGame()
+        let storedStartId = null
+        try {
+          storedStartId = Number(sessionStorage.getItem('startingGameId')) || null
+        } catch (e) {
+          storedStartId = null
+        }
+        const targetId = this.boundGameId || storedStartId
+        let game = null
+        if (targetId) {
+          try {
+            game = await getGame(targetId)
+          } catch (error) {
+            if (error.response?.status === 404) {
+              game = await getCurrentGame()
+            } else {
+              throw error
+            }
+          }
+        } else {
+          game = await getCurrentGame()
+        }
         
         // If winner was declared while we were awaiting (e.g. fake user, 3s delay), don't touch state - preserve user card and UI
         if (this._winnerBannerActive) {
           return
         }
         
+        if (!game) {
+          if (this.interval) {
+            clearInterval(this.interval)
+            this.interval = null
+          }
+          this.$router.push('/select-card').catch(() => {})
+          return
+        }
+        
+        if (!this.boundGameId) {
+          this.boundGameId = game.id
+        }
+        
+        // Next round already exists (or current() returned a different game).
+        // Never treat that as "this game went waiting" and bounce to card selection.
+        if (this.boundGameId && game.id !== this.boundGameId) {
+          if (this._winnerBannerActive || this._pendingFakeWinnerDeclaration || this.showWinnerBanner) {
+            return
+          }
+          if (this._sawActiveStatus) {
+            return
+          }
+        }
+        
         // FIX: Always use calledNumbers.length as the source of truth for current_call_count
         // This prevents the count from being reset to 0 when loadGame() is called with stale server data
         this.game = game
         if (game.status === 'active') {
+          this._sawActiveStatus = true
           sessionStorage.removeItem('gameStarting')
           this._waitingTransitionAt = null
         }
@@ -371,28 +418,40 @@ export default {
               if (timeSinceBannerShown < 8000) return
               if ((!this.winner || this.winner === null) && (!this.winners || this.winners.length === 0)) {
                 console.log('No winner after delay, redirecting')
-                this.$router.push('/completed')
+                this.$router.push('/select-card')
               }
             }, 8000)
             return
           } else if (game.status === 'waiting') {
-            // During the card-selection → active transition, a stale current-game
-            // cache can still say waiting. Stay on this view and keep polling.
+            // During the card-selection → active transition, a stale payload can
+            // still say waiting. If we already played this round as active, a
+            // waiting payload is either cache lag or the NEXT round — stay here.
+            if (this._sawActiveStatus) {
+              return
+            }
             const starting = sessionStorage.getItem('gameStarting') === '1'
             if (starting) {
               if (!this._waitingTransitionAt) this._waitingTransitionAt = Date.now()
-              if (Date.now() - this._waitingTransitionAt < 15000) {
+              if (Date.now() - this._waitingTransitionAt >= 15000) {
+                sessionStorage.removeItem('gameStarting')
+                this._waitingTransitionAt = null
+                if (this.interval) {
+                  clearInterval(this.interval)
+                  this.interval = null
+                }
+                this.$router.push('/select-card')
                 return
               }
-              sessionStorage.removeItem('gameStarting')
+              // Still starting — keep this view and load the card below.
+            } else {
+              this._waitingTransitionAt = null
+              if (this.interval) {
+                clearInterval(this.interval)
+                this.interval = null
+              }
+              this.$router.push('/select-card')
+              return
             }
-            this._waitingTransitionAt = null
-            if (this.interval) {
-              clearInterval(this.interval)
-              this.interval = null
-            }
-            this.$router.push('/select-card')
-            return
           } else if (game.status === 'completed') {
             // Game is completed - wait for winner_declared WebSocket so we can show banner for ALL players (real + fake winner)
             // Only redirect after a delay if winner_declared never arrives
@@ -409,7 +468,7 @@ export default {
               const timeSinceBannerShown = this.winnerBannerShownAt ? Date.now() - this.winnerBannerShownAt : Infinity
               if (timeSinceBannerShown < 8000) return
               if ((!this.winner && (!this.winners || this.winners.length === 0)) || timeSinceBannerShown >= 8000) {
-                this.$router.push('/completed')
+                this.$router.push('/select-card')
               }
             }, 3500)
             return
@@ -425,12 +484,15 @@ export default {
           const card = await getMyCard(game.id)
           if (!card) {
             if (game.status === 'waiting') {
-              if (this.interval) {
-                clearInterval(this.interval)
-                this.interval = null
+              const starting = sessionStorage.getItem('gameStarting') === '1'
+              if (!starting && !this._sawActiveStatus) {
+                if (this.interval) {
+                  clearInterval(this.interval)
+                  this.interval = null
+                }
+                this.$router.push('/select-card').catch(() => {})
+                return
               }
-              this.$router.push('/select-card').catch(() => {})
-              return
             }
             const winnerDeclared = this._winnerBannerActive || this.winner || (this.winners && this.winners.length)
             const hadCard = !!this.userCard
@@ -671,7 +733,7 @@ export default {
             clearInterval(this.interval)
             this.interval = null
           }
-          this.$router.push('/completed')
+          this.$router.push('/select-card')
           return
         }
       } catch (error) {
@@ -682,7 +744,7 @@ export default {
             clearInterval(this.interval)
             this.interval = null
           }
-          this.$router.push('/completed')
+          this.$router.push('/select-card')
           return
         }
         // For other errors, log but don't redirect (might be temporary network issue)
@@ -697,8 +759,8 @@ export default {
       this.ws.on('connected', () => {
         console.log('WebSocket connected successfully')
         this.wsConnected = true
-        // Stop polling when WebSocket connects - we get real-time updates via WS
         this.stopPolling()
+        this.stopCatchUpPolling()
       })
       
       this.ws.on('error', (error) => {
@@ -903,7 +965,7 @@ export default {
             this._gameEndedRedirectTimeoutId = setTimeout(() => {
               this._gameEndedRedirectTimeoutId = null
               if (!this._winnerBannerActive && !this.winner && (!this.winners || this.winners.length === 0)) {
-                this.$router.push('/completed')
+                this.$router.push('/select-card')
               }
             }, 2500)
           }
@@ -957,6 +1019,7 @@ export default {
           clearInterval(this.interval)
           this.interval = null
         }
+        this.stopCatchUpPolling()
         
         // Stop ALL automatic mode behavior immediately when winner is declared
         this.automaticallyMarkedNumbers.clear()
@@ -1197,14 +1260,17 @@ export default {
       // Fast poll after card-selection → active transition (missed WS events during redirect)
       this._catchUpInterval = setInterval(this.loadGame, 800)
       setTimeout(() => {
-        if (this._catchUpInterval) {
-          clearInterval(this._catchUpInterval)
-          this._catchUpInterval = null
-        }
+        this.stopCatchUpPolling()
         if (!this.wsConnected && !this.interval) {
           this.startPolling()
         }
       }, 20000)
+    },
+    stopCatchUpPolling() {
+      if (this._catchUpInterval) {
+        clearInterval(this._catchUpInterval)
+        this._catchUpInterval = null
+      }
     },
     stopPolling() {
       // Stop polling when WebSocket is connected
@@ -1583,27 +1649,26 @@ export default {
       }
     },
     handleWinnerRedirect() {
-      // ATOMIC TRANSITION: Ensure all state is clean before redirecting
-      // Stop all intervals and WebSocket connections
       if (this.interval) {
         clearInterval(this.interval)
         this.interval = null
       }
+      this.stopCatchUpPolling()
       if (this.ws) {
         this.ws.disconnect()
         this.ws = null
       }
       
-      // Reset winner banner flags
       this.showWinnerBanner = false
       this._winnerBannerActive = false
       this._pendingFakeWinnerDeclaration = false
       this.winnerBannerShownAt = null
+      try {
+        sessionStorage.removeItem('gameStarting')
+        sessionStorage.removeItem('startingGameId')
+      } catch (e) {}
       
-      // Redirect to completed view (which will then redirect to card selection if new game is ready)
-      this.$router.push('/completed').catch(() => {
-        // Ignore navigation errors
-      })
+      this.$router.push('/select-card').catch(() => {})
     },
     showNotification(message, type = 'info') {
       this.notificationMessage = message

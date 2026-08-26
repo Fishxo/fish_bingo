@@ -51,13 +51,13 @@ export default {
             clearInterval(this.interval)
             this.interval = null
           }
-          this.$router.push('/game')
+          this.$router.push('/select-card')
         } else if (game.status === 'completed') {
           if (this.interval) {
             clearInterval(this.interval)
             this.interval = null
           }
-          this.$router.push('/completed')
+          this.$router.push('/select-card')
         } else if (game.status === 'waiting') {
           // If game is waiting, redirect to card selection
           if (this.interval) {
