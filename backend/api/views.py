@@ -439,6 +439,19 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                 game = None
                                 cached_data = None
                             # else: keep waiting game and continue (fake users / timer / serialize)
+                    else:
+                        # Cached row is missing or completed. Do not keep `game` set —
+                        # that used to skip the active/waiting fetch and recache a
+                        # finished round, freezing card selection on old taken cards.
+                        game = None
+                        cached_data = None
+                        try:
+                            cache.delete(cache_key)
+                            cache.delete(cache_key_state)
+                        except Exception:
+                            pass
+                else:
+                    cached_data = None
             
             # Cache miss or waiting game - fetch from database with optimized query
             if not game:
@@ -450,6 +463,8 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             # If no active/waiting game, create a new one. Never return a completed game as "current"
             # (returning completed caused card selection to load with old game + stale card state + banner blink).
+            if game and game.status not in ['active', 'waiting']:
+                game = None
             if not game:
                 game = check_and_create_new_game()
                 if not game:
@@ -669,15 +684,21 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             # PHASE 2 OPTIMIZATION #1: Multi-level caching
             # Cache state (minimal data) for 1 second - for quick status checks
             # Wrap in try-except to handle Redis connection failures gracefully
+            # Never cache a completed/cancelled payload — polling clients would
+            # keep it alive forever and freeze the next-round card picker.
             try:
-                cache.set(cache_key_state, {
-                    'id': game.id,
-                    'status': game.status,
-                    'created_at': game.created_at.isoformat() if game.created_at else None
-                }, 1)
-                
-                # Cache full game data for 5 seconds (medium-term cache)
-                cache.set(cache_key, game_data, 5)
+                if game_data.get('status') in ('active', 'waiting'):
+                    cache.set(cache_key_state, {
+                        'id': game.id,
+                        'status': game.status,
+                        'created_at': game.created_at.isoformat() if game.created_at else None
+                    }, 1)
+                    
+                    # Cache full game data for 5 seconds (medium-term cache)
+                    cache.set(cache_key, game_data, 5)
+                else:
+                    cache.delete(cache_key)
+                    cache.delete(cache_key_state)
             except Exception as cache_error:
                 # Redis connection failed - log but don't crash
                 print(f"WARNING: Cache write failed (game data still returned): {cache_error}")

@@ -1666,6 +1666,11 @@ export default {
       try {
         sessionStorage.removeItem('gameStarting')
         sessionStorage.removeItem('startingGameId')
+        if (this.boundGameId || this.game?.id) {
+          sessionStorage.setItem('awaitingNextRound', String(this.boundGameId || this.game.id))
+        } else {
+          sessionStorage.setItem('awaitingNextRound', '1')
+        }
       } catch (e) {}
       
       this.$router.push('/select-card').catch(() => {})

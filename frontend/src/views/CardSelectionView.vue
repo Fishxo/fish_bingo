@@ -315,12 +315,16 @@ export default {
           this._wsBoundRole = null
           this._myCardCheckedForGameId = null
           this._enterAttempts = 0
+          this.takenCards = []
+          this.availableCards = []
+          this.selectedCard = null
+          this.userCard = null
           if (this.ws) {
             this.ws.disconnect()
             this.ws = null
           }
         }
-        if (game) {
+        if (game && game.status !== 'completed') {
           this._loadedGameId = game.id
         }
         
@@ -332,6 +336,20 @@ export default {
         }
         
         if (game) {
+          if (game.status === 'waiting') {
+            try {
+              sessionStorage.removeItem('awaitingNextRound')
+            } catch (e) {}
+          }
+
+          // After a finished round, /current/ can still return that game (active
+          // for a few seconds, or completed via stale cache). Do not freeze the
+          // picker on its taken cards — keep polling until a waiting round exists.
+          if (this.isFinishedRoundPayload(game) && !this.showWinnerBanner) {
+            this.waitForNextWaitingRound()
+            return
+          }
+
           const shouldCheckMyCard =
             this._myCardCheckedForGameId !== game.id ||
             this.userCard ||
@@ -391,23 +409,7 @@ export default {
             this.stayOnActiveWithoutCard()
             return
           }
-          if (game.status === 'completed' && !this.showWinnerBanner) {
-            if (this.timerInterval) {
-              clearInterval(this.timerInterval)
-              this.timerInterval = null
-            }
-            if (!this._completedRedirectTimeoutId) {
-              this._completedRedirectTimeoutId = setTimeout(() => {
-                this._completedRedirectTimeoutId = null
-                if (this._isUnmounted || this.showWinnerBanner) return
-                this._loadedGameId = null
-                this.loadGame()
-              }, 2500)
-            }
-            if (!this.interval) this.startPolling()
-            this.startStatusPoll()
-            return
-          } else if (game.status === 'waiting') {
+          if (game.status === 'waiting') {
             if (this.startingGame || this.isRedirecting) {
               return
             }
@@ -456,6 +458,24 @@ export default {
     userHasCard() {
       return !!(this.userCard || this.selectedCard)
     },
+    getFinishedRoundId() {
+      try {
+        const raw = sessionStorage.getItem('awaitingNextRound')
+        if (!raw) return null
+        if (raw === '1') return true
+        return Number(raw) || null
+      } catch (e) {
+        return null
+      }
+    },
+    isFinishedRoundPayload(game) {
+      if (!game) return false
+      if (game.status === 'completed') return true
+      const finished = this.getFinishedRoundId()
+      if (!finished) return false
+      if (finished === true) return game.status !== 'waiting'
+      return game.id === finished && game.status !== 'waiting'
+    },
     stayOnActiveWithoutCard() {
       if (this.game) {
         this.game.status = 'active'
@@ -466,6 +486,34 @@ export default {
         this.timerInterval = null
       }
       this.timerSeconds = 0
+      if (!this.interval) this.startPolling()
+      this.startStatusPoll()
+    },
+    waitForNextWaitingRound() {
+      this._loadedGameId = null
+      this.isRedirecting = false
+      this.startingGame = false
+      this.selectedCard = null
+      this.userCard = null
+      this.takenCards = []
+      this.availableCards = []
+      if (this.timerInterval) {
+        clearInterval(this.timerInterval)
+        this.timerInterval = null
+      }
+      if (this.ws) {
+        this.ws.disconnect()
+        this.ws = null
+        this.wsConnected = false
+      }
+      if (!this._completedRedirectTimeoutId) {
+        this._completedRedirectTimeoutId = setTimeout(() => {
+          this._completedRedirectTimeoutId = null
+          if (this._isUnmounted || this.showWinnerBanner) return
+          this.loadGame()
+        }, 400)
+      }
+      if (!this.interval) this.startPolling()
       this.startStatusPoll()
     },
     enterActiveGame() {
@@ -560,14 +608,28 @@ export default {
       try {
         const game = await getCurrentGame()
         if (this.isRedirecting || this._isUnmounted) return
-        if (game && game.status === 'active') {
+        if (!game) {
+          this.loadGame()
+          return
+        }
+        if (game.status === 'waiting') {
+          const frozen = this.game && this.game.status !== 'waiting'
+          const newRound = this.game && game.id !== this.game.id
+          if (frozen || newRound || (!this.timerInterval && !this.startingGame)) {
+            this.loadGame()
+          }
+          return
+        }
+        if (game.status === 'completed' || this.isFinishedRoundPayload(game)) {
+          this.waitForNextWaitingRound()
+          return
+        }
+        if (game.status === 'active') {
           if (this.userHasCard()) {
             this.enterActiveGame()
           } else {
             this.stayOnActiveWithoutCard()
           }
-        } else if (game && this.game && game.id !== this.game.id && game.status === 'waiting') {
-          this.loadGame()
         }
       } catch (error) {
         console.error('Error checking game active status:', error)
@@ -756,6 +818,11 @@ export default {
       this._myCardCheckedForGameId = null
       this.selectedCard = null
       this.userCard = null
+      try {
+        if (this.game?.id) {
+          sessionStorage.setItem('awaitingNextRound', String(this.game.id))
+        }
+      } catch (e) {}
       this.loadGame()
     },
     startTimer(opts = {}) {
