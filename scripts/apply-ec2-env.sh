@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$ROOT/backend/.env"
 EXAMPLE="$ROOT/backend/.env.example"
-VALUE="http://16.16.200.57"
+VALUE="http://16.16.121.39"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Creating $ENV_FILE from .env.example (edit secrets before restarting services)."

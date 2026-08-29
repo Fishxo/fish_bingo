@@ -37,7 +37,7 @@ sudo systemctl restart bingo-gunicorn
 ```bash
 curl -s http://127.0.0.1:8000/ | grep -E 'src=|href='
 curl -I http://127.0.0.1:8000/assets/
-curl -I http://16.16.200.57/
+curl -I http://16.16.121.39/
 ```
 
 Browser DevTools → Network: `/assets/index-*.js` should return **200**, not 404.

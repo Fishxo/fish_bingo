@@ -50,13 +50,13 @@ sudo systemctl enable nginx
 
 ```bash
 sudo systemctl status nginx
-curl -I http://16.16.200.57/api/health/
+curl -I http://16.16.121.39/api/health/
 ```
 
 Open in browser:
 
-- `http://16.16.200.57/`
-- `http://16.16.200.57/admin-dashboard/`
+- `http://16.16.121.39/`
+- `http://16.16.121.39/admin-dashboard/`
 
 ## Logs
 
