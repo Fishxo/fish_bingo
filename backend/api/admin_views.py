@@ -1503,6 +1503,7 @@ def game_settings_api(request):
             'anti_abuse_filter_enabled': getattr(settings, 'anti_abuse_filter_enabled', False),
             'default_free_play_for_new_users': getattr(settings, 'default_free_play_for_new_users', True),
             'allow_free_play_after_real_win': getattr(settings, 'allow_free_play_after_real_win', True),
+            'second_admin_can_end_game': getattr(settings, 'second_admin_can_end_game', False),
         }
         response_data.update(_get_register_window_stats())
         return JsonResponse(response_data)
@@ -1618,6 +1619,8 @@ def game_settings_api(request):
                 settings_obj.default_free_play_for_new_users = bool(data['default_free_play_for_new_users'])
             if 'allow_free_play_after_real_win' in data:
                 settings_obj.allow_free_play_after_real_win = bool(data['allow_free_play_after_real_win'])
+            if 'second_admin_can_end_game' in data and not is_second_admin:
+                settings_obj.second_admin_can_end_game = bool(data['second_admin_can_end_game'])
             
             settings_obj.save()
 

@@ -2112,8 +2112,16 @@ def end_game(request, game_id):
     # Check if all 75 numbers have been called (admin can override with force=true)
     called_count = CalledNumber.objects.filter(game=game).count()
     force = request.data.get('force') is True or request.query_params.get('force') == 'true'
-    allow_force = request.user.is_authenticated and request.user.is_staff
-    if called_count < 75 and not (force and allow_force):
+    is_staff = request.user.is_authenticated and request.user.is_staff
+    is_second_admin = bool(request.session.get('second_admin_authenticated'))
+    if is_second_admin:
+        from .models import GameSettings
+        if not getattr(GameSettings.get_settings(), 'second_admin_can_end_game', False):
+            return Response({'error': 'Unauthorized'}, status=status.HTTP_403_FORBIDDEN)
+        can_admin_end = True
+    else:
+        can_admin_end = is_staff
+    if called_count < 75 and not (force and can_admin_end):
         return Response(
             {'error': 'Cannot end game. Not all numbers have been called yet. Use "Force end" as admin to end anyway.'},
             status=status.HTTP_400_BAD_REQUEST

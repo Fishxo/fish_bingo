@@ -525,6 +525,10 @@ class GameSettings(models.Model):
         default=False,
         help_text="If True, the next game that starts will run in test co-win mode (admin QA: same last call, banner shows both, payout real-only)."
     )
+    second_admin_can_end_game = models.BooleanField(
+        default=False,
+        help_text="When enabled, second admin dashboard shows End / Force end for active stuck games."
+    )
     
     updated_at = models.DateTimeField(auto_now=True)
     

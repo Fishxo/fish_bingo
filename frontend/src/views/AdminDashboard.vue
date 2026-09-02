@@ -479,6 +479,10 @@
                     <button class="btn btn-reject" @click="endGameAction(g.id)">End</button>
                     <button class="btn btn-reject" @click="endGameAction(g.id, true)" title="End game even if not all 75 numbers called (for stuck games)">Force end</button>
                   </template>
+                  <template v-else-if="isSecondAdmin && settings.second_admin_can_end_game && g.status === 'active'">
+                    <button class="btn btn-reject" @click="endGameAction(g.id)">End</button>
+                    <button class="btn btn-reject" @click="endGameAction(g.id, true)" title="End game even if not all 75 numbers called (for stuck games)">Force end</button>
+                  </template>
                   <span v-else class="muted">—</span>
                 </td>
               </tr>
@@ -884,6 +888,13 @@
           </div>
           <button class="btn btn-secondary" :disabled="secondAdminSaving" @click="saveSecondAdmin">{{ secondAdminSaving ? 'Saving…' : '💾 Save Credentials' }}</button>
           <span v-if="secondAdminMessage" class="second-admin-msg">{{ secondAdminMessage }}</span>
+          <div class="form-group checkbox second-admin-permission-toggle">
+            <label>
+              <input v-model="settings.second_admin_can_end_game" type="checkbox" @change="saveSettings" />
+              Allow second admin to End / Force end stuck games
+            </label>
+            <p class="form-hint">When on, second admin sees End and Force end on active games (saved immediately).</p>
+          </div>
           <p class="form-hint">Used to access dashboard at /secondadmin — enter both username and password when creating or changing login.</p>
         </div>
       </section>
@@ -1084,6 +1095,7 @@ export default {
         anti_abuse_filter_enabled: false,
         default_free_play_for_new_users: true,
         allow_free_play_after_real_win: true,
+        second_admin_can_end_game: false,
         support_phone: '',
         instruction_text: '',
         telebirr_verify_api_key: '',
